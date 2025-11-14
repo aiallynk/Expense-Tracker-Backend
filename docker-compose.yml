@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: expense-tracker-backend
+    ports:
+      - "4000:4000"
+    environment:
+      - APP_ENV=development
+      - APP_PORT=4000
+      - MONGODB_URI=mongodb://mongo:27017
+      - MONGODB_DB_NAME=expense_tracker
+    env_file:
+      - .env
+    depends_on:
+      - mongo
+    volumes:
+      - ./src:/app/src
+      - ./dist:/app/dist
+    restart: unless-stopped
+    networks:
+      - expense-tracker-network
+
+  mongo:
+    image: mongo:7
+    container_name: expense-tracker-mongo
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+    networks:
+      - expense-tracker-network
+
+volumes:
+  mongo-data:
+
+networks:
+  expense-tracker-network:
+    driver: bridge
+
