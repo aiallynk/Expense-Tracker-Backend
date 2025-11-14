@@ -4,7 +4,7 @@ import helmet from 'helmet';
 import { config } from './config/index';
 import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
-import { logger } from './utils/logger';
+// import { logger } from './utils/logger'; // Unused for now
 
 // Routes
 import authRoutes from './routes/auth.routes';
@@ -67,7 +67,7 @@ export const createApp = (): Express => {
   app.use('/api/v1', apiRateLimiter);
 
   // Health check
-  app.get('/health', (req, res) => {
+  app.get('/health', (_req, res) => {
     res.status(200).json({
       success: true,
       message: 'Server is healthy',
@@ -88,7 +88,7 @@ export const createApp = (): Express => {
   app.use('/api/v1/notifications', notificationsRoutes);
 
   // 404 handler
-  app.use((req, res) => {
+  app.use((_req, res) => {
     res.status(404).json({
       success: false,
       message: 'Route not found',

@@ -7,7 +7,7 @@ import {
   updateReportSchema,
   reportFiltersSchema,
 } from '../utils/dtoTypes';
-import { ExpenseReportStatus } from '../utils/enums';
+// import { ExpenseReportStatus } from '../utils/enums'; // Unused
 
 export class ReportsController {
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {

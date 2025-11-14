@@ -1,6 +1,6 @@
 import { User, IUser } from '../models/User';
 import { UpdateProfileDto } from '../utils/dtoTypes';
-import { AuthRequest } from '../middleware/auth.middleware';
+// import { AuthRequest } from '../middleware/auth.middleware'; // Unused
 import mongoose from 'mongoose';
 
 export class UsersService {

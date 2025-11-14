@@ -7,7 +7,7 @@ import { PutObjectCommand } from '@aws-sdk/client-s3';
 import { s3Client, getS3Bucket } from '../config/aws';
 import { getObjectUrl } from '../utils/s3';
 import { randomUUID } from 'crypto';
-import { logger } from '../utils/logger';
+// import { logger } from '../utils/logger'; // Unused
 
 export class ExportService {
   static async generateExport(
@@ -158,7 +158,7 @@ export class ExportService {
       const doc = new PDFDocument({ margin: 50 });
       const chunks: Buffer[] = [];
 
-      doc.on('data', (chunk) => chunks.push(chunk));
+      doc.on('data', (chunk: Buffer) => chunks.push(chunk));
       doc.on('end', () => resolve(Buffer.concat(chunks)));
       doc.on('error', reject);
 

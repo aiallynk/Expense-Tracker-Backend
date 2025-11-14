@@ -1,6 +1,6 @@
 import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
-import { ExpenseReport } from '../models/ExpenseReport';
+// import { ExpenseReport } from '../models/ExpenseReport'; // Unused
 import { getMessaging } from '../config/firebase';
 import { getResendClient, getFromEmail } from '../config/resend';
 import { NotificationPlatform } from '../utils/enums';
@@ -77,7 +77,7 @@ export class NotificationService {
     }).select('_id');
 
     for (const admin of admins) {
-      await this.sendPushToUser(admin._id.toString(), {
+      await this.sendPushToUser((admin._id as mongoose.Types.ObjectId).toString(), {
         title: 'New Expense Report Submitted',
         body: `Report "${report.name}" has been submitted for approval`,
         data: {
@@ -162,8 +162,8 @@ export class NotificationService {
             <h2>New Expense Report Submitted</h2>
             <p>A new expense report has been submitted for your approval:</p>
             <ul>
-              <li><strong>Report:</strong> ${data.reportName}</li>
-              <li><strong>Submitted by:</strong> ${data.ownerName} (${data.ownerEmail})</li>
+              <li><strong>Report:</strong> ${(data as any).reportName}</li>
+              <li><strong>Submitted by:</strong> ${(data as any).ownerName} (${(data as any).ownerEmail})</li>
             </ul>
             <p>Please review and approve or reject the report.</p>
           `;
@@ -173,8 +173,8 @@ export class NotificationService {
             <h2>Expense Report Approved</h2>
             <p>Your expense report has been approved:</p>
             <ul>
-              <li><strong>Report:</strong> ${data.reportName}</li>
-              <li><strong>Total Amount:</strong> ${data.currency} ${data.totalAmount}</li>
+              <li><strong>Report:</strong> ${(data as any).reportName}</li>
+              <li><strong>Total Amount:</strong> ${(data as any).currency} ${(data as any).totalAmount}</li>
             </ul>
             <p>Thank you for submitting your expenses.</p>
           `;
@@ -184,8 +184,8 @@ export class NotificationService {
             <h2>Expense Report Rejected</h2>
             <p>Your expense report has been rejected:</p>
             <ul>
-              <li><strong>Report:</strong> ${data.reportName}</li>
-              <li><strong>Total Amount:</strong> ${data.currency} ${data.totalAmount}</li>
+              <li><strong>Report:</strong> ${(data as any).reportName}</li>
+              <li><strong>Total Amount:</strong> ${(data as any).currency} ${(data as any).totalAmount}</li>
             </ul>
             <p>Please review and resubmit if needed.</p>
           `;

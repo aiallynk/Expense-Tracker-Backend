@@ -106,7 +106,7 @@ export class AdminController {
   });
 
   // Dashboard
-  static getDashboard = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static getDashboard = asyncHandler(async (_req: AuthRequest, res: Response) => {
     // Simple dashboard summary
     const { ExpenseReport } = await import('../models/ExpenseReport');
     const { Expense: ExpenseModel } = await import('../models/Expense');

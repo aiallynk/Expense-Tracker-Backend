@@ -1,6 +1,6 @@
 import { Receipt, IReceipt } from '../models/Receipt';
 import { Expense } from '../models/Expense';
-import { ExpenseReport } from '../models/ExpenseReport';
+// import { ExpenseReport } from '../models/ExpenseReport'; // Unused - accessed via populate
 import { UploadIntentDto } from '../utils/dtoTypes';
 import { getPresignedUploadUrl, getObjectUrl } from '../utils/s3';
 import mongoose from 'mongoose';
@@ -48,12 +48,12 @@ export class ReceiptsService {
 
     // Link receipt to expense if it's the primary one
     if (!expense.receiptPrimaryId) {
-      expense.receiptPrimaryId = saved._id;
+      expense.receiptPrimaryId = saved._id as mongoose.Types.ObjectId;
       await expense.save();
     }
 
     return {
-      receiptId: saved._id.toString(),
+      receiptId: (saved._id as mongoose.Types.ObjectId).toString(),
       uploadUrl,
       storageKey,
     };

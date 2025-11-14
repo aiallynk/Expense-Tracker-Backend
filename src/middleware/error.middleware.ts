@@ -11,7 +11,7 @@ export const errorMiddleware = (
   err: AppError,
   req: Request,
   res: Response,
-  next: NextFunction
+  _next: NextFunction
 ): void => {
   logger.error('Error:', {
     message: err.message,

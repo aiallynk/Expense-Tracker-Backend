@@ -36,11 +36,11 @@ export class OcrService {
     const saved = await ocrJob.save();
 
     // Update receipt with OCR job ID
-    receipt.ocrJobId = saved._id;
+    receipt.ocrJobId = saved._id as mongoose.Types.ObjectId;
     await receipt.save();
 
     // Process immediately (in production, use a queue)
-    this.processOcrJob(saved._id.toString()).catch((error) => {
+    this.processOcrJob((saved._id as mongoose.Types.ObjectId).toString()).catch((error) => {
       logger.error('OCR job processing error:', error);
     });
 

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import {
-  UserRole,
-  UserStatus,
+  // UserRole, // Unused
+  // UserStatus, // Unused
   ExpenseReportStatus,
   ExpenseStatus,
   ExpenseSource,

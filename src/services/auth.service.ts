@@ -1,8 +1,9 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { User, IUser } from '../models/User';
 import { config } from '../config/index';
-import { logger } from '../utils/logger';
+// import { logger } from '../utils/logger'; // Unused
 import { AuditService } from './audit.service';
 import { AuditAction } from '../utils/enums';
 
@@ -51,16 +52,17 @@ export class AuthService {
     const tokens = this.generateTokens(user);
 
     // Audit log
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
     await AuditService.log(
-      user._id.toString(),
+      userId,
       'User',
-      user._id.toString(),
+      userId,
       AuditAction.CREATE
     );
 
     return {
       user: {
-        id: user._id.toString(),
+        id: userId,
         email: user.email,
         name: user.name,
         role: user.role,
@@ -94,17 +96,18 @@ export class AuthService {
     const tokens = this.generateTokens(user);
 
     // Audit log
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
     await AuditService.log(
-      user._id.toString(),
+      userId,
       'User',
-      user._id.toString(),
+      userId,
       AuditAction.UPDATE,
       { lastLoginAt: user.lastLoginAt }
     );
 
     return {
       user: {
-        id: user._id.toString(),
+        id: userId,
         email: user.email,
         name: user.name,
         role: user.role,
@@ -146,31 +149,31 @@ export class AuthService {
   }
 
   static generateAccessToken(user: IUser): string {
-    return jwt.sign(
-      {
-        id: user._id.toString(),
-        email: user.email,
-        role: user.role,
-      },
-      config.jwt.accessSecret,
-      {
-        expiresIn: config.jwt.accessExpiresIn,
-      }
-    );
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
+    const payload = {
+      id: userId,
+      email: user.email,
+      role: user.role,
+    };
+    const secret = String(config.jwt.accessSecret);
+    const options = {
+      expiresIn: config.jwt.accessExpiresIn,
+    } as jwt.SignOptions;
+    return jwt.sign(payload, secret, options);
   }
 
   static generateRefreshToken(user: IUser): string {
-    return jwt.sign(
-      {
-        id: user._id.toString(),
-        email: user.email,
-        role: user.role,
-      },
-      config.jwt.refreshSecret,
-      {
-        expiresIn: config.jwt.refreshExpiresIn,
-      }
-    );
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
+    const payload = {
+      id: userId,
+      email: user.email,
+      role: user.role,
+    };
+    const secret = String(config.jwt.refreshSecret);
+    const options = {
+      expiresIn: config.jwt.refreshExpiresIn,
+    } as jwt.SignOptions;
+    return jwt.sign(payload, secret, options);
   }
 
   static async hashPassword(password: string): Promise<string> {

@@ -8,7 +8,7 @@ import {
 } from '../utils/dtoTypes';
 
 export class CategoriesController {
-  static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static getAll = asyncHandler(async (_req: AuthRequest, res: Response) => {
     const categories = await CategoriesService.getAllCategories();
 
     res.status(200).json({

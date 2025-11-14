@@ -31,7 +31,7 @@ export class ReportsService {
     await AuditService.log(
       userId,
       'ExpenseReport',
-      saved._id.toString(),
+      (saved._id as mongoose.Types.ObjectId).toString(),
       AuditAction.CREATE
     );
 

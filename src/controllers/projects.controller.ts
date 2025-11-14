@@ -8,7 +8,7 @@ import {
 } from '../utils/dtoTypes';
 
 export class ProjectsController {
-  static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
+  static getAll = asyncHandler(async (_req: AuthRequest, res: Response) => {
     const projects = await ProjectsService.getAllProjects();
 
     res.status(200).json({

@@ -45,7 +45,7 @@ export class AuthController {
     });
   });
 
-  static logout = asyncHandler(async (req: Request, res: Response) => {
+  static logout = asyncHandler(async (_req: Request, res: Response) => {
     // In a production system, you might want to blacklist the refresh token
     // For now, we'll just return success
     res.status(200).json({
