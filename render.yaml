@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: expense-tracker-backend
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_ENV
+        value: production
+      # PORT is automatically provided by Render, no need to set it
+      # Add your other environment variables in Render Dashboard:
+      # - MONGODB_URI
+      # - MONGODB_DB_NAME
+      # - JWT_ACCESS_SECRET
+      # - JWT_REFRESH_SECRET
+      # - AWS_ACCESS_KEY_ID
+      # - AWS_SECRET_ACCESS_KEY
+      # - S3_BUCKET_NAME
+      # - TOGETHER_AI_API_KEY
+      # - FIREBASE_PROJECT_ID
+      # - FIREBASE_CLIENT_EMAIL
+      # - FIREBASE_PRIVATE_KEY
+      # - FIREBASE_DATABASE_URL
+      # - RESEND_API_KEY
+      # - APP_FRONTEND_URL_APP
+      # - APP_FRONTEND_URL_ADMIN
+

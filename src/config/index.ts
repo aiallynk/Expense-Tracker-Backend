@@ -5,7 +5,8 @@ dotenv.config();
 export const config = {
   app: {
     env: process.env.APP_ENV || 'development',
-    port: parseInt(process.env.APP_PORT || '4000', 10),
+    // Render provides PORT environment variable, fallback to APP_PORT or 4000
+    port: parseInt(process.env.PORT || process.env.APP_PORT || '4000', 10),
     frontendUrlApp: process.env.APP_FRONTEND_URL_APP || 'http://localhost:3000',
     frontendUrlAdmin: process.env.APP_FRONTEND_URL_ADMIN || 'http://localhost:3001',
   },
