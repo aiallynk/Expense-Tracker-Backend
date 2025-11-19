@@ -17,11 +17,15 @@ const startServer = async (): Promise<void> => {
     console.log(`Starting server on port ${PORT}`);
     console.log(`PORT env var: ${process.env.PORT}`);
     console.log(`Config port: ${config.app.port}`);
+    console.log(`Node version: ${process.version}`);
+    console.log(`Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB used`);
 
     // Create Express app - wrap in try-catch to ensure server starts even if app creation fails
     let app;
     try {
+      console.log('Creating Express application...');
       app = createApp();
+      console.log('Express application created successfully');
     } catch (error) {
       console.error('Error creating app:', error);
       // Create minimal app if createApp fails
