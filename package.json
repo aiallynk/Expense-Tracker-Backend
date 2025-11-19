@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node --max-old-space-size=1024 dist/server.js",
+    "postbuild": "node -e \"const fs=require('fs'); if(!fs.existsSync('dist/server.js')) { console.error('ERROR: dist/server.js not found after build!'); process.exit(1); } else { console.log('✓ Build verified: dist/server.js exists'); }\"",
+    "start": "node start.js",
     "lint": "eslint src --ext .ts",
     "test": "jest",
     "test:watch": "jest --watch",
