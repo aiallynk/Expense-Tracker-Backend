@@ -68,5 +68,14 @@ export class ExpensesController {
       ...result,
     });
   });
+
+  static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
+    await ExpensesService.deleteExpense(req.params.id, req.user!.id, req.user!.role);
+
+    res.status(200).json({
+      success: true,
+      message: 'Expense deleted successfully',
+    });
+  });
 }
 

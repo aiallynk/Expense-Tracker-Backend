@@ -3,11 +3,13 @@ import { AuthService } from '../services/auth.service';
 import { asyncHandler } from '../middleware/error.middleware';
 import { loginSchema, refreshTokenSchema } from '../utils/dtoTypes';
 import { z } from 'zod';
+import { UserRole } from '../utils/enums';
 
 const signupSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
   name: z.string().min(1),
+  role: z.nativeEnum(UserRole).optional(),
 });
 
 export class AuthController {
@@ -16,7 +18,8 @@ export class AuthController {
     const result = await AuthService.signup(
       data.email,
       data.password,
-      data.name
+      data.name,
+      data.role
     );
 
     res.status(201).json({

@@ -17,9 +17,11 @@ export const authMiddleware = async (
   next: NextFunction
 ): Promise<void> => {
   try {
+    logger.debug(`Auth middleware - ${req.method} ${req.path}`);
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      logger.warn(`Auth middleware - No authorization header for ${req.method} ${req.path}`);
       res.status(401).json({
         success: false,
         message: 'Authentication required',
@@ -29,6 +31,7 @@ export const authMiddleware = async (
     }
 
     const token = authHeader.substring(7);
+    logger.debug('Auth middleware - Token received, verifying...');
 
     try {
       const decoded = jwt.verify(token, config.jwt.accessSecret) as {
@@ -43,9 +46,11 @@ export const authMiddleware = async (
         role: decoded.role,
       };
 
+      logger.debug(`Auth middleware - Token verified for user: ${decoded.email} (${decoded.id})`);
       next();
     } catch (error) {
       if (error instanceof jwt.TokenExpiredError) {
+        logger.warn(`Auth middleware - Token expired for ${req.method} ${req.path}`);
         res.status(401).json({
           success: false,
           message: 'Token expired',
@@ -55,6 +60,7 @@ export const authMiddleware = async (
       }
 
       if (error instanceof jwt.JsonWebTokenError) {
+        logger.warn(`Auth middleware - Invalid token for ${req.method} ${req.path}:`, error.message);
         res.status(401).json({
           success: false,
           message: 'Invalid token',
@@ -63,6 +69,7 @@ export const authMiddleware = async (
         return;
       }
 
+      logger.error('Auth middleware - Unexpected error:', error);
       throw error;
     }
   } catch (error) {

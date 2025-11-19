@@ -24,6 +24,7 @@ router.patch(
   validate(updateExpenseSchema),
   ExpensesController.update
 );
+router.delete('/expenses/:id', ExpensesController.delete);
 
 export default router;
 

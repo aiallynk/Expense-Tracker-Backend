@@ -2,7 +2,7 @@ import { OcrJob, IOcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
 import { Expense } from '../models/Expense';
 import { OcrJobStatus } from '../utils/enums';
-import { openaiClient, getVisionModel } from '../config/openai';
+import { togetherAIClient, getVisionModel } from '../config/openai';
 import { s3Client, getS3Bucket } from '../config/aws';
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import { logger } from '../utils/logger';
@@ -16,6 +16,7 @@ export interface OcrResult {
   tax?: number;
   categorySuggestion?: string;
   lineItems?: Array<{ description: string; amount: number }>;
+  notes?: string;
   confidence?: number;
 }
 
@@ -29,7 +30,7 @@ export class OcrService {
 
     const ocrJob = new OcrJob({
       status: OcrJobStatus.QUEUED,
-      provider: 'OPENAI_VISION',
+      provider: 'TOGETHER_AI',
       receiptId,
     });
 
@@ -40,9 +41,32 @@ export class OcrService {
     await receipt.save();
 
     // Process immediately (in production, use a queue)
-    this.processOcrJob((saved._id as mongoose.Types.ObjectId).toString()).catch((error) => {
-      logger.error('OCR job processing error:', error);
-    });
+    logger.info('Starting OCR processing for receipt', { receiptId, jobId: saved._id });
+    this.processOcrJob((saved._id as mongoose.Types.ObjectId).toString())
+      .then(() => {
+        logger.info('OCR job completed successfully', { jobId: saved._id });
+      })
+      .catch(async (error: any) => {
+        logger.error('OCR job processing error:', {
+          jobId: saved._id,
+          receiptId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        });
+        
+        // Update job status to failed
+        try {
+          await OcrJob.findByIdAndUpdate(saved._id, {
+            status: OcrJobStatus.FAILED,
+            errorJson: {
+              message: error instanceof Error ? error.message : String(error),
+              timestamp: new Date().toISOString(),
+            },
+          });
+        } catch (updateError) {
+          logger.error('Failed to update OCR job status', { error: updateError });
+        }
+      });
 
     return saved;
   }
@@ -59,6 +83,18 @@ export class OcrService {
 
     try {
       const receipt = job.receiptId as any;
+      
+      if (!receipt) {
+        throw new Error('Receipt not found for OCR job');
+      }
+
+      logger.info('Downloading receipt from S3', {
+        jobId,
+        receiptId: receipt._id,
+        storageKey: receipt.storageKey,
+        mimeType: receipt.mimeType,
+      });
+
       const bucket = getS3Bucket('receipts');
 
       // Download image from S3
@@ -70,11 +106,31 @@ export class OcrService {
       const response = await s3Client.send(command);
       const imageBuffer = await this.streamToBuffer(response.Body as any);
 
+      logger.info('Receipt downloaded from S3', { 
+        sizeBytes: imageBuffer.length,
+        jobId,
+      });
+
       // Convert to base64
       const base64Image = imageBuffer.toString('base64');
 
-      // Call OpenAI Vision API
-      const result = await this.callOpenAIVision(base64Image, receipt.mimeType);
+      logger.info('Calling Together AI Vision API', {
+        model: getVisionModel(),
+        imageSize: base64Image.length,
+        mimeType: receipt.mimeType,
+        jobId,
+      });
+
+      // Call Together AI Vision API
+      const result = await this.callTogetherAIVision(base64Image, receipt.mimeType);
+      
+      logger.info('Together AI Vision API call successful', {
+        extractedFields: Object.keys(result),
+        hasVendor: !!result.vendor,
+        hasAmount: !!result.totalAmount,
+        hasDate: !!result.date,
+        jobId,
+      });
 
       // Save result
       job.status = OcrJobStatus.COMPLETED;
@@ -82,24 +138,95 @@ export class OcrService {
       job.completedAt = new Date();
       await job.save();
 
-      // Optionally auto-fill expense fields
-      const expense = await Expense.findOne({ receiptPrimaryId: receipt._id });
-      if (expense && result.vendor && result.totalAmount) {
-        expense.vendor = result.vendor;
-        expense.amount = result.totalAmount;
-        if (result.date) {
-          expense.expenseDate = new Date(result.date);
+      // Auto-fill expense fields if expense exists and report is still DRAFT
+      const expense = await Expense.findOne({ receiptPrimaryId: receipt._id })
+        .populate('reportId');
+      
+      if (expense) {
+        const report = expense.reportId as any;
+        
+        // Only auto-update if report is DRAFT
+        if (report.status === 'DRAFT') {
+          let updated = false;
+          
+          if (result.vendor && result.vendor.trim()) {
+            expense.vendor = result.vendor.trim();
+            updated = true;
+          }
+          
+          if (result.totalAmount && result.totalAmount > 0) {
+            expense.amount = result.totalAmount;
+            updated = true;
+          }
+          
+          if (result.date) {
+            try {
+              expense.expenseDate = new Date(result.date);
+              updated = true;
+            } catch (e) {
+              // Invalid date, skip
+            }
+          }
+          
+          if (result.currency && result.currency.trim()) {
+            expense.currency = result.currency.trim().toUpperCase();
+            updated = true;
+          }
+          
+          if (result.categorySuggestion && result.categorySuggestion.trim()) {
+            // Try to find matching category
+            const { Category } = await import('../models/Category');
+            const categoryName = result.categorySuggestion.trim();
+            const category = await Category.findOne({
+              name: { $regex: new RegExp(`^${categoryName}$`, 'i') }
+            });
+            
+            if (category) {
+              expense.categoryId = category._id as mongoose.Types.ObjectId;
+              updated = true;
+            }
+          }
+          
+          if (result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
+            // Combine line items into notes if notes is empty
+            if (!expense.notes || expense.notes.trim() === '') {
+              const lineItemsText = result.lineItems
+                .map((item: any) => `${item.description || 'Item'}: ${item.amount || 0}`)
+                .join('\n');
+              expense.notes = lineItemsText;
+              updated = true;
+            }
+          } else if (result.notes && result.notes.trim()) {
+            // Use extracted notes if available
+            if (!expense.notes || expense.notes.trim() === '') {
+              expense.notes = result.notes.trim();
+              updated = true;
+            }
+          }
+          
+          if (updated) {
+            await expense.save();
+            // Recalculate report totals
+            const { ReportsService } = await import('./reports.service');
+            await ReportsService.recalcTotals(report._id.toString());
+          }
         }
-        await expense.save();
       }
 
+      logger.info('OCR job completed and expense updated', { jobId });
       return job;
     } catch (error: any) {
-      logger.error('OCR processing error:', error);
+      logger.error('OCR processing error:', {
+        jobId,
+        error: error.message,
+        stack: error.stack,
+        name: error.name,
+      });
       job.status = OcrJobStatus.FAILED;
       job.errorJson = {
         message: error.message,
         stack: error.stack,
+        name: error.name,
       };
       await job.save();
       throw error;
@@ -115,80 +242,275 @@ export class OcrService {
     });
   }
 
-  private static async callOpenAIVision(
+  private static async callTogetherAIVision(
     base64Image: string,
     mimeType: string
   ): Promise<OcrResult> {
     const model = getVisionModel();
 
-    const prompt = `Extract the following information from this receipt image:
-- vendor/merchant name
-- date of transaction
-- total amount
-- currency
-- tax amount (if visible)
-- category suggestion (Travel, Food, Office, Others, etc.)
-- line items (description and amount for each item)
+    const prompt = `You are a receipt OCR system. Extract all information from this receipt image and return ONLY a valid JSON object with no additional text or markdown formatting.
 
-Return the data as a JSON object with these fields. If a field is not found, omit it.`;
+Extract the following fields:
+- vendor: merchant/store name (string)
+- date: transaction date in ISO format YYYY-MM-DD (string)
+- totalAmount: total amount as a number (number)
+- currency: currency code like INR, USD, EUR (string)
+- tax: tax amount if visible (number, optional)
+- categorySuggestion: one of Travel, Food, Office, Others (string)
+- lineItems: array of items with description and amount (array of {description: string, amount: number})
+- notes: any additional notes or information (string, optional)
 
-    const response = await openaiClient.chat.completions.create({
-      model,
-      messages: [
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: prompt },
-            {
-              type: 'image_url',
-              image_url: {
-                url: `data:${mimeType};base64,${base64Image}`,
-              },
-            },
-          ],
-        },
-      ],
-      max_tokens: 1000,
-    });
+IMPORTANT: Return ONLY valid JSON. No markdown, no code blocks, no explanations. Just the JSON object.
 
-    const content = response.choices[0]?.message?.content;
-    if (!content) {
-      throw new Error('No response from OpenAI');
-    }
+Example format:
+{
+  "vendor": "Store Name",
+  "date": "2024-01-15",
+  "totalAmount": 1234.56,
+  "currency": "INR",
+  "categorySuggestion": "Food",
+  "lineItems": [{"description": "Item 1", "amount": 500}, {"description": "Item 2", "amount": 734.56}],
+  "notes": "Additional info"
+}`;
 
-    // Parse JSON response
     try {
-      const result = JSON.parse(content) as OcrResult;
-      result.confidence = 0.85; // Default confidence, could be calculated
-      return result;
-    } catch (error) {
-      // If not JSON, try to extract structured data
-      logger.warn('OpenAI response not in JSON format, attempting to parse:', content);
-      return this.parseUnstructuredResponse(content);
+      logger.info('Preparing Together AI API request', {
+        model,
+        imageSize: base64Image.length,
+        mimeType,
+      });
+
+      // Together AI vision API format
+      const response = await togetherAIClient.chat.completions.create({
+        model: model,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              { 
+                type: 'text', 
+                text: prompt 
+              },
+              {
+                type: 'image_url',
+                image_url: {
+                  url: `data:${mimeType};base64,${base64Image}`,
+                  detail: 'high', // Use high detail for better OCR accuracy
+                },
+              },
+            ],
+          },
+        ],
+        max_tokens: 2000,
+        response_format: { type: 'json_object' }, // Force JSON response format
+        temperature: 0.1, // Lower temperature for more consistent results
+      });
+
+      logger.info('Together AI API call successful', {
+        model,
+        usage: response.usage,
+        finishReason: response.choices[0]?.finish_reason,
+      });
+
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        logger.error('Together AI returned empty response');
+        throw new Error('No response from Together AI');
+      }
+
+      // Clean the content - remove markdown code blocks if present
+      let cleanedContent = content.trim();
+      if (cleanedContent.startsWith('```json')) {
+        cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+      } else if (cleanedContent.startsWith('```')) {
+        cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+      }
+
+      // Parse JSON response
+      try {
+        const result = JSON.parse(cleanedContent) as OcrResult;
+        result.confidence = 0.85; // Default confidence, could be calculated
+        
+        // Log successful extraction
+        logger.info('OCR extraction successful', {
+          vendor: result.vendor,
+          totalAmount: result.totalAmount,
+          date: result.date,
+          currency: result.currency,
+          categorySuggestion: result.categorySuggestion,
+          hasLineItems: !!(result.lineItems && result.lineItems.length > 0),
+          lineItemsCount: result.lineItems?.length || 0,
+        });
+        
+        // Validate that we got at least some data
+        if (!result.vendor && !result.totalAmount && !result.date) {
+          logger.warn('OCR extraction returned minimal data', result);
+        }
+        
+        return result;
+      } catch (error) {
+        // If not JSON, try to extract structured data
+        logger.warn('Together AI response not in JSON format, attempting to parse:', {
+          content: cleanedContent.substring(0, 200), // Log first 200 chars
+          error: error instanceof Error ? error.message : String(error),
+        });
+        const parsed = this.parseUnstructuredResponse(cleanedContent);
+        logger.info('Parsed unstructured response', parsed);
+        return parsed;
+      }
+    } catch (error: any) {
+      logger.error('Together AI API call failed', {
+        error: error.message,
+        name: error.name,
+        status: error.status,
+        code: error.code,
+        model,
+        stack: error.stack,
+      });
+      
+      // Provide more helpful error messages
+      if (error.message?.includes('non-serverless') || error.message?.includes('dedicated endpoint')) {
+        throw new Error(
+          `Together AI model "${model}" requires a dedicated endpoint (non-serverless).\n` +
+          `\n` +
+          `SOLUTION OPTIONS:\n` +
+          `\n` +
+          `Option 1: Create a dedicated endpoint (recommended for production)\n` +
+          `1. Visit: https://api.together.ai/models/${model}\n` +
+          `2. Create and start a dedicated endpoint\n` +
+          `3. Use the endpoint name in TOGETHER_AI_MODEL_VISION\n` +
+          `\n` +
+          `Option 2: Use a different model that supports serverless\n` +
+          `Check your Together AI dashboard for available serverless vision models:\n` +
+          `- Visit: https://api.together.ai/models\n` +
+          `- Look for models marked as "Serverless" with vision/image support\n` +
+          `- Common serverless vision models may include:\n` +
+          `  * meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo (if available)\n` +
+          `  * Qwen/Qwen2-VL-2B-Instruct (if available)\n` +
+          `  * Or check Together AI docs for latest serverless models\n` +
+          `\n` +
+          `Option 3: Check your Together AI account plan\n` +
+          `- Some models require specific subscription tiers\n` +
+          `- Visit: https://together.ai/pricing\n` +
+          `\n` +
+          `After updating, restart the backend server.`
+        );
+      } else if (error.message?.includes('model') || error.code === 'invalid_model' || error.status === 404) {
+        throw new Error(
+          `Together AI model "${model}" not found or not available.\n` +
+          `Please check:\n` +
+          `1. Model name is correct in .env file (TOGETHER_AI_MODEL_VISION)\n` +
+          `2. Model is available in your Together AI account\n` +
+          `3. Model supports vision/image inputs\n` +
+          `Recommended serverless vision models: Qwen/Qwen2-VL-7B-Instruct, Qwen/Qwen2-VL-2B-Instruct, meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo`
+        );
+      } else if (error.message?.includes('vision') || error.message?.includes('image')) {
+        throw new Error(
+          `Together AI model "${model}" may not support vision/image inputs.\n` +
+          `Please use a vision-capable model like: Qwen/Qwen2-VL-7B-Instruct`
+        );
+      } else if (error.status === 401 || error.message?.includes('authentication') || error.message?.includes('Unauthorized')) {
+        throw new Error(
+          'Together AI authentication failed.\n' +
+          'Please check:\n' +
+          '1. TOGETHER_AI_API_KEY is set correctly in .env file\n' +
+          '2. API key is valid and has sufficient credits\n' +
+          '3. TOGETHER_AI_USER_KEY is set if required'
+        );
+      } else if (error.status === 429 || error.message?.includes('rate limit')) {
+        throw new Error(
+          'Together AI rate limit exceeded.\n' +
+          'Please wait a moment and try again, or check your Together AI account limits.'
+        );
+      }
+      
+      throw new Error(`Together AI API error: ${error.message || 'Unknown error'}\nStatus: ${error.status || 'N/A'}\nCode: ${error.code || 'N/A'}`);
     }
   }
 
   private static parseUnstructuredResponse(content: string): OcrResult {
     // Fallback parser for non-JSON responses
     const result: OcrResult = {};
+    
+    logger.warn('Attempting to parse unstructured OCR response', {
+      contentLength: content.length,
+      preview: content.substring(0, 200),
+    });
 
-    // Try to extract vendor
-    const vendorMatch = content.match(/vendor[:\s]+([^\n,]+)/i);
-    if (vendorMatch) {
-      result.vendor = vendorMatch[1].trim();
+    // Try to extract vendor - multiple patterns
+    const vendorPatterns = [
+      /vendor[:\s]+([^\n,]+)/i,
+      /merchant[:\s]+([^\n,]+)/i,
+      /store[:\s]+([^\n,]+)/i,
+      /"vendor"\s*:\s*"([^"]+)"/i,
+    ];
+    
+    for (const pattern of vendorPatterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        result.vendor = match[1].trim();
+        break;
+      }
     }
 
-    // Try to extract amount
-    const amountMatch = content.match(/total[:\s]+([\d.]+)/i);
-    if (amountMatch) {
-      result.totalAmount = parseFloat(amountMatch[1]);
+    // Try to extract amount - multiple patterns
+    const amountPatterns = [
+      /total[:\s]+([\d.]+)/i,
+      /amount[:\s]+([\d.]+)/i,
+      /"totalAmount"\s*:\s*([\d.]+)/i,
+      /₹\s*([\d,]+\.?\d*)/i,
+      /\$\s*([\d,]+\.?\d*)/i,
+      /(\d+\.\d{2})/,
+    ];
+    
+    for (const pattern of amountPatterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        const amountStr = match[1].replace(/,/g, '');
+        const amount = parseFloat(amountStr);
+        if (!isNaN(amount) && amount > 0) {
+          result.totalAmount = amount;
+          break;
+        }
+      }
+    }
+    
+    // Try to extract date - multiple patterns
+    const datePatterns = [
+      /date[:\s]+([\d-]+)/i,
+      /"date"\s*:\s*"([^"]+)"/i,
+      /(\d{4}-\d{2}-\d{2})/,
+      /(\d{2}\/\d{2}\/\d{4})/,
+      /(\d{2}-\d{2}-\d{4})/,
+    ];
+    
+    for (const pattern of datePatterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        result.date = match[1];
+        break;
+      }
+    }
+    
+    // Try to extract currency
+    const currencyMatch = content.match(/"currency"\s*:\s*"([^"]+)"/i) ||
+                         content.match(/currency[:\s]+([A-Z]{3})/i);
+    if (currencyMatch) {
+      result.currency = currencyMatch[1].trim().toUpperCase();
+    }
+    
+    // Try to extract category
+    const categoryMatch = content.match(/"categorySuggestion"\s*:\s*"([^"]+)"/i) ||
+                         content.match(/category[:\s]+(Travel|Food|Office|Others)/i);
+    if (categoryMatch) {
+      result.categorySuggestion = categoryMatch[1].trim();
     }
 
-    // Try to extract date
-    const dateMatch = content.match(/date[:\s]+([^\n,]+)/i);
-    if (dateMatch) {
-      result.date = dateMatch[1].trim();
-    }
+    logger.info('Parsed unstructured response', {
+      extractedFields: Object.keys(result),
+      hasVendor: !!result.vendor,
+      hasAmount: !!result.totalAmount,
+    });
 
     return result;
   }

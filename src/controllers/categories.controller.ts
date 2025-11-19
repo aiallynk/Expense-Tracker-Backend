@@ -63,5 +63,24 @@ export class CategoriesController {
       message: 'Category deleted successfully',
     });
   });
+
+  // Get or create category by name (allows users to auto-create categories)
+  static getOrCreateByName = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const name = req.params.name;
+    if (!name || name.trim() === '') {
+      res.status(400).json({
+        success: false,
+        message: 'Category name is required',
+        code: 'INVALID_NAME',
+      });
+      return;
+    }
+
+    const category = await CategoriesService.getOrCreateCategoryByName(name.trim());
+    res.status(200).json({
+      success: true,
+      data: category,
+    });
+  });
 }
 

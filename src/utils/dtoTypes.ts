@@ -50,10 +50,25 @@ export const updateCategorySchema = z.object({
 // Expense Report DTOs
 export const createReportSchema = z.object({
   name: z.string().min(1),
-  projectId: z.string().optional(),
+  // projectId is optional and can be any string (will be validated in service)
+  // If it's not a valid ObjectId, it will be ignored
+  projectId: z.string().optional().or(z.literal('')),
   notes: z.string().optional(),
-  fromDate: z.string().datetime(),
-  toDate: z.string().datetime(),
+  // Use coerce to handle various datetime formats, then validate
+  fromDate: z.string().refine(
+    (val) => {
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for fromDate' }
+  ),
+  toDate: z.string().refine(
+    (val) => {
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for toDate' }
+  ),
 }).refine((data) => new Date(data.fromDate) <= new Date(data.toDate), {
   message: 'fromDate must be before or equal to toDate',
 });
@@ -70,9 +85,16 @@ export const updateReportSchema = z.object({
 export const createExpenseSchema = z.object({
   vendor: z.string().min(1),
   categoryId: z.string(),
-  amount: z.number().positive(),
+  amount: z.number().min(0), // Allow 0 for DRAFT expenses (will be updated after OCR)
   currency: z.string().default('INR'),
-  expenseDate: z.string().datetime(),
+  // Use lenient validation for expenseDate - accepts any valid date string
+  expenseDate: z.string().refine(
+    (val) => {
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for expenseDate' }
+  ),
   source: z.nativeEnum(ExpenseSource),
   notes: z.string().optional(),
 });
@@ -82,7 +104,14 @@ export const updateExpenseSchema = z.object({
   categoryId: z.string().optional(),
   amount: z.number().positive().optional(),
   currency: z.string().optional(),
-  expenseDate: z.string().datetime().optional(),
+  // Use lenient validation for expenseDate - accepts any valid date string
+  expenseDate: z.string().refine(
+    (val) => {
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for expenseDate' }
+  ).optional(),
   notes: z.string().optional(),
 });
 

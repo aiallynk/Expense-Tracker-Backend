@@ -25,6 +25,7 @@ export class ExportService {
 
     const expenses = await Expense.find({ reportId })
       .populate('categoryId', 'name')
+      .populate('receiptPrimaryId', 'storageUrl storageKey mimeType')
       .sort({ expenseDate: 1 })
       .exec();
 
@@ -87,7 +88,7 @@ export class ExportService {
 
     // Expenses sheet
     const expensesSheet = workbook.addWorksheet('Expenses');
-    expensesSheet.addRow(['Date', 'Vendor', 'Category', 'Amount', 'Currency', 'Notes']);
+    expensesSheet.addRow(['Date', 'Vendor', 'Category', 'Amount', 'Currency', 'Notes', 'Receipt URL', 'Receipt Filename']);
 
     // Style header row
     const headerRow = expensesSheet.getRow(1);
@@ -100,6 +101,10 @@ export class ExportService {
 
     // Add expense rows
     expenses.forEach((exp) => {
+      const receipt = exp.receiptPrimaryId as any;
+      const receiptUrl = receipt?.storageUrl || '';
+      const receiptFilename = receipt?.storageKey ? receipt.storageKey.split('/').pop() : '';
+      
       expensesSheet.addRow([
         exp.expenseDate,
         exp.vendor,
@@ -107,6 +112,8 @@ export class ExportService {
         exp.amount,
         exp.currency,
         exp.notes || '',
+        receiptUrl,
+        receiptFilename,
       ]);
     });
 
@@ -135,10 +142,14 @@ export class ExportService {
     // Header
     lines.push('Expense Report: ' + report.name);
     lines.push('');
-    lines.push('Date,Vendor,Category,Amount,Currency,Notes');
+    lines.push('Date,Vendor,Category,Amount,Currency,Notes,Receipt URL,Receipt Filename');
 
     // Expenses
     expenses.forEach((exp) => {
+      const receipt = exp.receiptPrimaryId as any;
+      const receiptUrl = receipt?.storageUrl || '';
+      const receiptFilename = receipt?.storageKey ? receipt.storageKey.split('/').pop() : '';
+      
       const row = [
         exp.expenseDate.toISOString().split('T')[0],
         exp.vendor,
@@ -146,6 +157,8 @@ export class ExportService {
         exp.amount.toString(),
         exp.currency,
         (exp.notes || '').replace(/,/g, ';'), // Replace commas in notes
+        receiptUrl.replace(/,/g, ';'), // Replace commas in URL
+        receiptFilename,
       ];
       lines.push(row.join(','));
     });
@@ -186,11 +199,13 @@ export class ExportService {
 
       // Table header
       const tableTop = doc.y;
+      doc.fontSize(8);
       doc.text('Date', 50, tableTop);
-      doc.text('Vendor', 150, tableTop);
-      doc.text('Category', 300, tableTop);
-      doc.text('Amount', 450, tableTop);
-      doc.text('Notes', 550, tableTop);
+      doc.text('Vendor', 100, tableTop);
+      doc.text('Category', 200, tableTop);
+      doc.text('Amount', 280, tableTop);
+      doc.text('Notes', 350, tableTop);
+      doc.text('Receipt', 500, tableTop);
 
       let y = tableTop + 20;
       expenses.forEach((exp) => {
@@ -198,11 +213,16 @@ export class ExportService {
           doc.addPage();
           y = 50;
         }
+        const receipt = exp.receiptPrimaryId as any;
+        const receiptFilename = receipt?.storageKey ? receipt.storageKey.split('/').pop() : 'N/A';
+        
+        doc.fontSize(8);
         doc.text(exp.expenseDate.toISOString().split('T')[0], 50, y);
-        doc.text(exp.vendor.substring(0, 30), 150, y);
-        doc.text((exp.categoryId?.name || 'N/A').substring(0, 20), 300, y);
-        doc.text(`${exp.currency} ${exp.amount}`, 450, y);
-        doc.text((exp.notes || '').substring(0, 30), 550, y);
+        doc.text(exp.vendor.substring(0, 25), 100, y);
+        doc.text((exp.categoryId?.name || 'N/A').substring(0, 15), 200, y);
+        doc.text(`${exp.currency} ${exp.amount}`, 280, y);
+        doc.text((exp.notes || '').substring(0, 20), 350, y);
+        doc.text(receiptFilename.substring(0, 20), 500, y);
         y += 20;
       });
 

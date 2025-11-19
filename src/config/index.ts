@@ -16,22 +16,24 @@ export const config = {
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET || 'changeme',
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'changeme',
-    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
-    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '30d',
+    // For testing: Set to very long expiration (100 years) - change back to '15m' for production
+    accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '100y',
+    refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '100y',
   },
   aws: {
     region: process.env.AWS_REGION || 'ap-south-1',
     accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
-    s3Buckets: {
-      receipts: process.env.AWS_S3_BUCKET_RECEIPTS || 'expense-receipts-bucket',
-      exports: process.env.AWS_S3_BUCKET_EXPORTS || 'expense-exports-bucket',
-    },
+    s3BucketName: process.env.S3_BUCKET_NAME || 'expense-tracker-aially',
   },
-  openai: {
-    apiKey: process.env.OPENAI_API_KEY || '',
-    modelVision: process.env.OPENAI_MODEL_VISION || 'gpt-4o',
-    modelText: process.env.OPENAI_MODEL_TEXT || 'gpt-4o-mini',
+  togetherAI: {
+    apiKey: process.env.TOGETHER_AI_API_KEY || '',
+    userKey: process.env.TOGETHER_AI_USER_KEY || '',
+    // Default to a serverless vision model
+    // User can override with TOGETHER_AI_MODEL_VISION in .env
+    // Note: Some models require dedicated endpoints - check Together AI docs
+    modelVision: process.env.TOGETHER_AI_MODEL_VISION || 'Qwen/Qwen2.5-VL-72B-Instruct',
+    baseUrl: 'https://api.together.xyz/v1',
   },
   firebase: {
     projectId: process.env.FIREBASE_PROJECT_ID || '',

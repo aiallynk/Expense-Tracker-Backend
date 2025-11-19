@@ -26,23 +26,27 @@ export class AuthService {
   static async signup(
     email: string,
     password: string,
-    name: string
+    name: string,
+    role?: string
   ): Promise<AuthResult> {
     // Check if user already exists
     const existingUser = await User.findOne({ email: email.toLowerCase() });
     if (existingUser) {
-      throw new Error('User with this email already exists');
+      const error: any = new Error('User with this email already exists');
+      error.statusCode = 409;
+      error.code = 'USER_ALREADY_EXISTS';
+      throw error;
     }
 
     // Hash password
     const passwordHash = await this.hashPassword(password);
 
-    // Create user with EMPLOYEE role by default
+    // Create user with EMPLOYEE role by default unless provided
     const user = new User({
       email: email.toLowerCase(),
       passwordHash,
       name,
-      role: 'EMPLOYEE',
+      role: role ?? 'EMPLOYEE',
       status: 'ACTIVE',
     });
 
@@ -75,17 +79,26 @@ export class AuthService {
     const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
-      throw new Error('Invalid credentials');
+      const error: any = new Error('Invalid credentials');
+      error.statusCode = 401;
+      error.code = 'INVALID_CREDENTIALS';
+      throw error;
     }
 
     if (user.status !== 'ACTIVE') {
-      throw new Error('Account is inactive');
+      const error: any = new Error('Account is inactive');
+      error.statusCode = 403;
+      error.code = 'ACCOUNT_INACTIVE';
+      throw error;
     }
 
     const isPasswordValid = await user.comparePassword(password);
 
     if (!isPasswordValid) {
-      throw new Error('Invalid credentials');
+      const error: any = new Error('Invalid credentials');
+      error.statusCode = 401;
+      error.code = 'INVALID_CREDENTIALS';
+      throw error;
     }
 
     // Update last login

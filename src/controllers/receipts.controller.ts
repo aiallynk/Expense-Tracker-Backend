@@ -22,14 +22,16 @@ export class ReceiptsController {
   );
 
   static confirmUpload = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const receipt = await ReceiptsService.confirmUpload(
+    const result = await ReceiptsService.confirmUpload(
       req.params.receiptId,
       req.user!.id
     );
 
     res.status(200).json({
       success: true,
-      data: receipt,
+      data: result.receipt,
+      extractedFields: result.extractedFields,
+      ocrJobId: result.ocrJobId,
       message: 'Receipt uploaded and OCR processing started',
     });
   });

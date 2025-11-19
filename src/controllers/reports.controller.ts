@@ -7,12 +7,31 @@ import {
   updateReportSchema,
   reportFiltersSchema,
 } from '../utils/dtoTypes';
+import { logger } from '../utils/logger';
 // import { ExpenseReportStatus } from '../utils/enums'; // Unused
 
 export class ReportsController {
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
+    logger.info('POST /api/v1/reports - Creating new report');
+    logger.debug('Request body:', JSON.stringify(req.body, null, 2));
+    logger.debug('User ID:', req.user!.id);
+    logger.debug('User email:', req.user!.email);
+
     const data = createReportSchema.parse(req.body);
+    logger.info('Validation passed. Report data:', {
+      name: data.name,
+      projectId: data.projectId || 'none',
+      fromDate: data.fromDate,
+      toDate: data.toDate,
+      notes: data.notes || 'none',
+    });
+
     const report = await ReportsService.createReport(req.user!.id, data);
+    logger.info('Report created successfully:', {
+      reportId: report._id,
+      name: report.name,
+      status: report.status,
+    });
 
     res.status(201).json({
       success: true,

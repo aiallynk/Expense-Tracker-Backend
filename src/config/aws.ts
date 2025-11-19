@@ -9,9 +9,10 @@ export const s3Client = new S3Client({
   },
 });
 
-export const getS3Bucket = (bucketType: 'receipts' | 'exports'): string => {
-  return bucketType === 'receipts'
-    ? config.aws.s3Buckets.receipts
-    : config.aws.s3Buckets.exports;
+export const getS3Bucket = (_bucketType?: 'receipts' | 'exports'): string => {
+  // Single bucket for both receipts and exports
+  // Files are organized by prefix: receipts/ and exports/
+  // bucketType parameter is kept for API compatibility but not used
+  return config.aws.s3BucketName;
 };
 

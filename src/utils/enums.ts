@@ -1,7 +1,8 @@
 export enum UserRole {
-  EMPLOYEE = 'EMPLOYEE',
   ADMIN = 'ADMIN',
   BUSINESS_HEAD = 'BUSINESS_HEAD',
+  MANAGER = 'MANAGER',
+  EMPLOYEE = 'EMPLOYEE',
 }
 
 export enum UserStatus {
@@ -53,4 +54,3 @@ export enum ExportFormat {
   CSV = 'csv',
   PDF = 'pdf',
 }
-

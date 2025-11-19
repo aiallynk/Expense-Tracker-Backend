@@ -273,5 +273,46 @@ export class ExpensesService {
 
     return saved;
   }
+
+  static async deleteExpense(
+    id: string,
+    userId: string,
+    userRole: string
+  ): Promise<void> {
+    const expense = await Expense.findById(id).populate('reportId');
+
+    if (!expense) {
+      throw new Error('Expense not found');
+    }
+
+    const report = expense.reportId as any;
+
+    // Check access: owner or admin
+    if (
+      report.userId.toString() !== userId &&
+      userRole !== 'ADMIN' &&
+      userRole !== 'BUSINESS_HEAD'
+    ) {
+      throw new Error('Access denied');
+    }
+
+    // Only allow deletion if report is DRAFT (for employees) or if admin
+    if (
+      report.userId.toString() === userId &&
+      report.status !== ExpenseReportStatus.DRAFT
+    ) {
+      throw new Error('Can only delete expenses from draft reports');
+    }
+
+    const reportId = report._id.toString();
+
+    // Delete the expense
+    await Expense.findByIdAndDelete(id);
+
+    // Recalculate report total
+    await ReportsService.recalcTotals(reportId);
+
+    await AuditService.log(userId, 'Expense', id, AuditAction.DELETE);
+  }
 }
 

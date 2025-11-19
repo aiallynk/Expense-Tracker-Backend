@@ -1,6 +1,7 @@
 import express, { Express } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
+import mongoose from 'mongoose';
 import { config } from './config/index';
 import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
@@ -68,10 +69,16 @@ export const createApp = (): Express => {
 
   // Health check
   app.get('/health', (_req, res) => {
+    const isDbConnected = mongoose.connection.readyState === 1;
+    
     res.status(200).json({
       success: true,
       message: 'Server is healthy',
       timestamp: new Date().toISOString(),
+      database: {
+        connected: isDbConnected,
+        status: isDbConnected ? 'connected' : 'disconnected',
+      },
     });
   });
 

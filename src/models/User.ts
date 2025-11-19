@@ -9,6 +9,13 @@ export interface IUser extends Document {
   role: UserRole;
   status: UserStatus;
   lastLoginAt?: Date;
+  receiptUrls?: Array<{
+    receiptId: mongoose.Types.ObjectId;
+    storageUrl: string;
+    signedUrl?: string;
+    signedUrlExpiresAt?: Date;
+    uploadedAt: Date;
+  }>;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
@@ -46,6 +53,29 @@ const userSchema = new Schema<IUser>(
     lastLoginAt: {
       type: Date,
     },
+    receiptUrls: [
+      {
+        receiptId: {
+          type: Schema.Types.ObjectId,
+          ref: 'Receipt',
+          required: true,
+        },
+        storageUrl: {
+          type: String,
+          required: true,
+        },
+        signedUrl: {
+          type: String,
+        },
+        signedUrlExpiresAt: {
+          type: Date,
+        },
+        uploadedAt: {
+          type: Date,
+          default: Date.now,
+        },
+      },
+    ],
   },
   {
     timestamps: true,

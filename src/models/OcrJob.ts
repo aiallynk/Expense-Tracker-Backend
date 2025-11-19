@@ -22,7 +22,7 @@ const ocrJobSchema = new Schema<IOcrJob>(
     },
     provider: {
       type: String,
-      default: 'OPENAI_VISION',
+      default: 'TOGETHER_AI',
     },
     receiptId: {
       type: Schema.Types.ObjectId,

@@ -14,6 +14,7 @@ const router = Router();
 router.use(authMiddleware);
 
 router.get('/', CategoriesController.getAll);
+router.get('/name/:name', CategoriesController.getOrCreateByName);
 router.get('/:id', CategoriesController.getById);
 
 // Admin only

@@ -5,6 +5,7 @@ import { config } from './config/index';
 import { logger } from './utils/logger';
 import { createServer, Server } from 'http';
 import { Express } from 'express';
+import os from 'os';
 
 const findAvailablePort = async (
   app: Express,
@@ -45,8 +46,11 @@ const findAvailablePort = async (
 
 const startServer = async (): Promise<void> => {
   try {
-    // Connect to MongoDB
-    await connectDB();
+    // Try to connect to MongoDB (non-blocking)
+    // Server will start even if MongoDB connection fails
+    connectDB().catch(() => {
+      logger.warn('MongoDB connection will be retried in background');
+    });
 
     // Initialize Firebase Admin (optional)
     // This will log its own status messages
@@ -67,10 +71,32 @@ const startServer = async (): Promise<void> => {
       // Store server reference for graceful shutdown
       (global as any).httpServer = server;
       
-      logger.info(`Server running on port ${port}`);
+      logger.info(`✅ Server running on port ${port}`);
       logger.info(`Environment: ${config.app.env}`);
       logger.info(`API available at http://localhost:${port}/api/v1`);
       logger.info(`For Android emulator, use: http://10.0.2.2:${port}/api/v1`);
+      
+      // Get network IP addresses
+      const networkInterfaces = os.networkInterfaces();
+      const addresses: string[] = [];
+      
+      Object.keys(networkInterfaces).forEach((interfaceName) => {
+        const interfaces = networkInterfaces[interfaceName];
+        if (interfaces) {
+          interfaces.forEach((iface: any) => {
+            if (iface.family === 'IPv4' && !iface.internal) {
+              addresses.push(iface.address);
+            }
+          });
+        }
+      });
+      
+      if (addresses.length > 0) {
+        logger.info(`For physical devices, use one of these IPs:`);
+        addresses.forEach((addr) => {
+          logger.info(`  http://${addr}:${port}/api/v1`);
+        });
+      }
     } catch (error) {
       logger.error('Failed to start server on any available port:', error);
       process.exit(1);

@@ -35,6 +35,37 @@ All required environment variables are listed in `env.example`. Key ones:
 - **Firebase**: Admin SDK credentials for push notifications
 - **Resend**: API key for email notifications
 
+### AWS S3 Bucket Setup
+
+The application uses a single S3 bucket for both receipts and exports:
+- `expense-tracker-aially` - Stores both receipt images and exported reports (organized by folders)
+
+Files are organized within the bucket:
+- Receipts: `s3://expense-tracker-aially/receipts/`
+- Exports: `s3://expense-tracker-aially/exports/`
+
+**Option 1: Automatic Setup (Recommended)**
+```bash
+npm run setup:s3
+```
+
+This script will automatically create the bucket if it doesn't exist. Make sure your AWS credentials are configured in `.env`:
+```
+AWS_REGION=ap-south-1
+S3_BUCKET_NAME=expense-tracker-aially
+AWS_ACCESS_KEY_ID=your_access_key
+AWS_SECRET_ACCESS_KEY=your_secret_key
+```
+
+**Option 2: Manual Setup**
+1. Go to [AWS S3 Console](https://s3.console.aws.amazon.com/)
+2. Click "Create bucket"
+3. Bucket name: `expense-tracker-aially` (must match your `.env` file)
+4. Region: Select your region (e.g., `ap-south-1`)
+5. Leave other settings as default and create
+
+**Note:** The application will automatically try to create the bucket if it doesn't exist when you upload a receipt, but it's recommended to create it beforehand using the setup script.
+
 ## Initial Setup
 
 ### Create Admin User
