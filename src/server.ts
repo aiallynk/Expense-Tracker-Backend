@@ -4,33 +4,44 @@ import { initializeFirebase } from './config/firebase';
 import { config } from './config/index';
 import { logger } from './utils/logger';
 import { createServer } from 'http';
+import express from 'express';
 import os from 'os';
 
 const startServer = async (): Promise<void> => {
   try {
-    // Try to connect to MongoDB (non-blocking)
-    // Server will start even if MongoDB connection fails
-    connectDB().catch(() => {
-      logger.warn('MongoDB connection will be retried in background');
-    });
-
-    // Initialize Firebase Admin (optional)
-    // This will log its own status messages
-    initializeFirebase();
-
-    // Create Express app
-    const app = createApp();
-
-    // Get port - prioritize process.env.PORT for Render compatibility
+    // Get port FIRST - prioritize process.env.PORT for Render compatibility
+    // Render requires this to be set from process.env.PORT
     const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : config.app.port;
+    
+    // Log port for debugging (Render shows console output)
+    console.log(`Starting server on port ${PORT}`);
+    console.log(`PORT env var: ${process.env.PORT}`);
+    console.log(`Config port: ${config.app.port}`);
 
-    // Create HTTP server and listen on the specified port
+    // Create Express app - wrap in try-catch to ensure server starts even if app creation fails
+    let app;
+    try {
+      app = createApp();
+    } catch (error) {
+      console.error('Error creating app:', error);
+      // Create minimal app if createApp fails
+      app = express();
+      app.get('/health', (_req: any, res: any) => {
+        res.json({ status: 'error', message: 'App initialization failed' });
+      });
+    }
+
+    // Create HTTP server and listen on the specified port IMMEDIATELY
+    // This must happen synchronously for Render to detect the port
     const server = createServer(app);
     
+    // Start listening immediately - this is critical for Render port detection
     server.listen(PORT, '0.0.0.0', () => {
       // Store server reference for graceful shutdown
       (global as any).httpServer = server;
       
+      // Use console.log for Render visibility
+      console.log(`Server running on port ${PORT}`);
       logger.info(`Server running on port ${PORT}`);
       
       // Additional info for development only
@@ -64,6 +75,7 @@ const startServer = async (): Promise<void> => {
     });
 
     server.on('error', (error: any) => {
+      console.error(`Server error on port ${PORT}:`, error);
       if (error.code === 'EADDRINUSE') {
         logger.error(`Port ${PORT} is already in use`);
         process.exit(1);
@@ -72,7 +84,29 @@ const startServer = async (): Promise<void> => {
         process.exit(1);
       }
     });
+
+    // Initialize services AFTER server is listening (non-blocking)
+    // This ensures Render detects the port even if these fail
+    try {
+      // Try to connect to MongoDB (non-blocking)
+      connectDB().catch((err) => {
+        console.warn('MongoDB connection failed, will retry:', err);
+        logger.warn('MongoDB connection will be retried in background');
+      });
+
+      // Initialize Firebase Admin (optional)
+      try {
+        initializeFirebase();
+      } catch (err) {
+        console.warn('Firebase initialization failed:', err);
+        logger.warn('Firebase initialization failed, continuing without it');
+      }
+    } catch (error) {
+      console.warn('Error initializing services:', error);
+      // Don't exit - server is already listening
+    }
   } catch (error) {
+    console.error('Critical error starting server:', error);
     logger.error('Failed to start server:', error);
     process.exit(1);
   }
