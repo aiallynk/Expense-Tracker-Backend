@@ -21,23 +21,22 @@ const startServer = async (): Promise<void> => {
     // Create Express app
     const app = createApp();
 
-    // Get port from config (already uses process.env.PORT for Render compatibility)
-    const PORT = config.app.port;
+    // Get port - prioritize process.env.PORT for Render compatibility
+    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : config.app.port;
 
     // Create HTTP server and listen on the specified port
-    // Render requires listening on process.env.PORT, which is already in config.app.port
     const server = createServer(app);
     
     server.listen(PORT, '0.0.0.0', () => {
       // Store server reference for graceful shutdown
       (global as any).httpServer = server;
       
-      logger.info(`✅ Server running on port ${PORT}`);
-      logger.info(`Environment: ${config.app.env}`);
-      logger.info(`API available at http://localhost:${PORT}/api/v1`);
+      logger.info(`Server running on port ${PORT}`);
       
-      // Only show network info in development (not needed for Render/production)
+      // Additional info for development only
       if (config.app.env === 'development') {
+        logger.info(`Environment: ${config.app.env}`);
+        logger.info(`API available at http://localhost:${PORT}/api/v1`);
         logger.info(`For Android emulator, use: http://10.0.2.2:${PORT}/api/v1`);
         
         // Get network IP addresses
