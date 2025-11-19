@@ -6,7 +6,7 @@ services:
     plan: starter
     # Root Directory: Leave empty if repo root contains package.json directly
     # Or set to "BACKEND" if backend code is in a BACKEND subfolder
-    buildCommand: NODE_OPTIONS="--max-old-space-size=1024" npm install && npm run build && ls -la dist/ || echo "Build output check"
+    buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health
     envVars:
