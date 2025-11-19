@@ -4,6 +4,8 @@ services:
     env: node
     region: oregon
     plan: starter
+    # Root Directory: Leave empty if repo root contains package.json directly
+    # Or set to "BACKEND" if backend code is in a BACKEND subfolder
     buildCommand: npm install && npm run build
     startCommand: npm start
     healthCheckPath: /health

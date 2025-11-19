@@ -3,46 +3,8 @@ import { connectDB } from './config/db';
 import { initializeFirebase } from './config/firebase';
 import { config } from './config/index';
 import { logger } from './utils/logger';
-import { createServer, Server } from 'http';
-import { Express } from 'express';
+import { createServer } from 'http';
 import os from 'os';
-
-const findAvailablePort = async (
-  app: Express,
-  startPort: number,
-  maxAttempts: number = 10
-): Promise<{ port: number; server: Server }> => {
-  for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    const port = startPort + attempt;
-    try {
-      const server = await new Promise<Server>((resolve, reject) => {
-        const httpServer = createServer(app);
-        
-        // Listen on all interfaces (0.0.0.0) to allow emulator connections
-        httpServer.listen(port, '0.0.0.0', () => {
-          resolve(httpServer);
-        });
-
-        httpServer.on('error', (err: any) => {
-          if (err.code === 'EADDRINUSE') {
-            reject(new Error('PORT_IN_USE'));
-          } else {
-            reject(err);
-          }
-        });
-      });
-      
-      return { port, server };
-    } catch (error: any) {
-      if (error.message === 'PORT_IN_USE') {
-        continue; // Try next port
-      }
-      throw error;
-    }
-  }
-  
-  throw new Error(`Could not find available port after ${maxAttempts} attempts`);
-};
 
 const startServer = async (): Promise<void> => {
   try {
@@ -59,48 +21,58 @@ const startServer = async (): Promise<void> => {
     // Create Express app
     const app = createApp();
 
-    // Find available port and start server
-    const preferredPort = config.app.port;
+    // Get port from config (already uses process.env.PORT for Render compatibility)
+    const PORT = config.app.port;
 
-    try {
-      const { port, server } = await findAvailablePort(app, preferredPort);
-      if (port !== preferredPort) {
-        logger.warn(`Port ${preferredPort} is occupied, using port ${port} instead`);
-      }
-      
+    // Create HTTP server and listen on the specified port
+    // Render requires listening on process.env.PORT, which is already in config.app.port
+    const server = createServer(app);
+    
+    server.listen(PORT, '0.0.0.0', () => {
       // Store server reference for graceful shutdown
       (global as any).httpServer = server;
       
-      logger.info(`✅ Server running on port ${port}`);
+      logger.info(`✅ Server running on port ${PORT}`);
       logger.info(`Environment: ${config.app.env}`);
-      logger.info(`API available at http://localhost:${port}/api/v1`);
-      logger.info(`For Android emulator, use: http://10.0.2.2:${port}/api/v1`);
+      logger.info(`API available at http://localhost:${PORT}/api/v1`);
       
-      // Get network IP addresses
-      const networkInterfaces = os.networkInterfaces();
-      const addresses: string[] = [];
-      
-      Object.keys(networkInterfaces).forEach((interfaceName) => {
-        const interfaces = networkInterfaces[interfaceName];
-        if (interfaces) {
-          interfaces.forEach((iface: any) => {
-            if (iface.family === 'IPv4' && !iface.internal) {
-              addresses.push(iface.address);
-            }
+      // Only show network info in development (not needed for Render/production)
+      if (config.app.env === 'development') {
+        logger.info(`For Android emulator, use: http://10.0.2.2:${PORT}/api/v1`);
+        
+        // Get network IP addresses
+        const networkInterfaces = os.networkInterfaces();
+        const addresses: string[] = [];
+        
+        Object.keys(networkInterfaces).forEach((interfaceName) => {
+          const interfaces = networkInterfaces[interfaceName];
+          if (interfaces) {
+            interfaces.forEach((iface: any) => {
+              if (iface.family === 'IPv4' && !iface.internal) {
+                addresses.push(iface.address);
+              }
+            });
+          }
+        });
+        
+        if (addresses.length > 0) {
+          logger.info(`For physical devices, use one of these IPs:`);
+          addresses.forEach((addr) => {
+            logger.info(`  http://${addr}:${PORT}/api/v1`);
           });
         }
-      });
-      
-      if (addresses.length > 0) {
-        logger.info(`For physical devices, use one of these IPs:`);
-        addresses.forEach((addr) => {
-          logger.info(`  http://${addr}:${port}/api/v1`);
-        });
       }
-    } catch (error) {
-      logger.error('Failed to start server on any available port:', error);
-      process.exit(1);
-    }
+    });
+
+    server.on('error', (error: any) => {
+      if (error.code === 'EADDRINUSE') {
+        logger.error(`Port ${PORT} is already in use`);
+        process.exit(1);
+      } else {
+        logger.error('Failed to start server:', error);
+        process.exit(1);
+      }
+    });
   } catch (error) {
     logger.error('Failed to start server:', error);
     process.exit(1);
