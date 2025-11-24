@@ -33,12 +33,16 @@ export class ReceiptsController {
       req.user!.id
     );
 
+    // Convert receipt to plain object to include all fields
+    const receiptObj = (result.receipt as any).toObject ? (result.receipt as any).toObject() : result.receipt;
+    
     res.status(200).json({
       success: true,
       data: {
         receiptId: (result.receipt._id as any).toString(),
         ocrJobId: result.ocrJobId,
         extractedFields: result.extractedFields || null,
+        receipt: receiptObj, // Include full receipt object with signedUrl if available
       },
     });
   });

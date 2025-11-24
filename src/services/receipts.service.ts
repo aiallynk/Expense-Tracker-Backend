@@ -130,11 +130,22 @@ export class ReceiptsService {
     await new Promise(resolve => setTimeout(resolve, 1000));
 
     // Generate signed URL for the receipt (valid for 7 days)
-    const signedUrl = await getPresignedDownloadUrl(
-      'receipts',
-      receipt.storageKey,
-      7 * 24 * 60 * 60 // 7 days
-    );
+    let signedUrl: string;
+    try {
+      signedUrl = await getPresignedDownloadUrl(
+        'receipts',
+        receipt.storageKey,
+        7 * 24 * 60 * 60 // 7 days
+      );
+    } catch (error) {
+      logger.error({
+        receiptId,
+        storageKey: receipt.storageKey,
+        error: error instanceof Error ? error.message : String(error),
+      }, 'Failed to generate signed URL for receipt');
+      // Don't fail the confirm - signed URL can be generated later when needed
+      signedUrl = '';
+    }
 
     const signedUrlExpiresAt = new Date();
     signedUrlExpiresAt.setDate(signedUrlExpiresAt.getDate() + 7);
@@ -150,7 +161,7 @@ export class ReceiptsService {
       const receiptUrlData = {
         receiptId: receipt._id as mongoose.Types.ObjectId,
         storageUrl: receipt.storageUrl,
-        signedUrl,
+        signedUrl: signedUrl || '',
         signedUrlExpiresAt,
         uploadedAt: new Date(),
       };
@@ -174,6 +185,12 @@ export class ReceiptsService {
         receiptId,
         storageUrl: receipt.storageUrl,
       }, 'Receipt URL stored in user collection')
+    }
+    
+    // Add signedUrl to receipt object for response
+    const receiptObj = receipt.toObject ? receipt.toObject() : receipt;
+    if (signedUrl) {
+      (receiptObj as any).signedUrl = signedUrl;
     }
 
     // Process OCR synchronously (no queue)
@@ -239,8 +256,15 @@ export class ReceiptsService {
       .populate('ocrJobId')
       .exec();
     
+    // Ensure receipt has signedUrl if it was generated
+    const finalReceipt = receiptWithOcr || receipt;
+    const finalReceiptObj = (finalReceipt as any).toObject ? (finalReceipt as any).toObject() : finalReceipt;
+    if (signedUrl && !(finalReceiptObj as any).signedUrl) {
+      (finalReceiptObj as any).signedUrl = signedUrl;
+    }
+    
     return {
-      receipt: receiptWithOcr || receipt,
+      receipt: finalReceiptObj,
       ocrJobId: ocrJobId || '',
       extractedFields,
     };
