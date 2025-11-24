@@ -252,16 +252,42 @@ export class ReceiptsService {
     }
     
     // Return receipt with OCR job info
+    // Refresh receipt to ensure ocrJobId is populated
     const receiptWithOcr = await Receipt.findById(receiptId)
       .populate('ocrJobId')
+      .populate({
+        path: 'expenseId',
+        populate: { path: 'reportId' },
+      })
       .exec();
     
+    if (!receiptWithOcr) {
+      logger.error({ receiptId }, 'Receipt not found after OCR processing');
+      throw new Error('Receipt not found after OCR processing');
+    }
+    
     // Ensure receipt has signedUrl if it was generated
-    const finalReceipt = receiptWithOcr || receipt;
-    const finalReceiptObj = (finalReceipt as any).toObject ? (finalReceipt as any).toObject() : finalReceipt;
+    const finalReceiptObj = (receiptWithOcr as any).toObject ? (receiptWithOcr as any).toObject() : receiptWithOcr;
     if (signedUrl && !(finalReceiptObj as any).signedUrl) {
       (finalReceiptObj as any).signedUrl = signedUrl;
     }
+    
+    // Ensure ocrJobId is included in the response (as both object and string)
+    if (ocrJobId) {
+      // If ocrJobId is populated as object, extract the ID string
+      if ((finalReceiptObj as any).ocrJobId && typeof (finalReceiptObj as any).ocrJobId === 'object') {
+        (finalReceiptObj as any).ocrJobId = (finalReceiptObj as any).ocrJobId._id?.toString() || (finalReceiptObj as any).ocrJobId.id?.toString() || ocrJobId;
+      } else if (!(finalReceiptObj as any).ocrJobId) {
+        (finalReceiptObj as any).ocrJobId = ocrJobId;
+      }
+    }
+    
+    logger.debug({
+      receiptId,
+      hasOcrJobId: !!(finalReceiptObj as any).ocrJobId,
+      ocrJobId,
+      ocrJobIdType: typeof (finalReceiptObj as any).ocrJobId,
+    }, 'Returning receipt with OCR job info');
     
     return {
       receipt: finalReceiptObj,
@@ -276,28 +302,47 @@ export class ReceiptsService {
     requestingUserRole: string
   ): Promise<IReceipt | null> {
     if (!mongoose.Types.ObjectId.isValid(id)) {
-      return null;
+      logger.warn({ receiptId: id }, 'Invalid receipt ID format');
+      throw new Error('Invalid receipt ID format');
     }
 
-    const receipt = await Receipt.findById(id).populate({
-      path: 'expenseId',
-      populate: { path: 'reportId' },
-    });
+    const receipt = await Receipt.findById(id)
+      .populate({
+        path: 'expenseId',
+        populate: { path: 'reportId' },
+      })
+      .populate('ocrJobId')
+      .exec();
 
     if (!receipt) {
-      return null;
+      logger.warn({ receiptId: id }, 'Receipt not found');
+      throw new Error('Receipt not found');
     }
 
-    const expense = receipt.expenseId as any;
-    const report = expense.reportId as any;
+    // Check access - only if receipt has an expense with a report
+    if (receipt.expenseId) {
+      const expense = receipt.expenseId as any;
+      const report = expense.reportId as any;
 
-    // Check access
-    if (
-      report.userId.toString() !== requestingUserId &&
-      requestingUserRole !== 'ADMIN' &&
-      requestingUserRole !== 'BUSINESS_HEAD'
-    ) {
-      throw new Error('Access denied');
+      if (report) {
+        // Check access via report
+        if (
+          report.userId.toString() !== requestingUserId &&
+          requestingUserRole !== 'ADMIN' &&
+          requestingUserRole !== 'BUSINESS_HEAD'
+        ) {
+          logger.warn({
+            receiptId: id,
+            requestingUserId,
+            reportUserId: report.userId.toString(),
+          }, 'Access denied to receipt');
+          throw new Error('Access denied');
+        }
+      }
+    } else {
+      // Receipt without expense - check if user has access (e.g., they uploaded it)
+      // For now, allow access if user is authenticated
+      logger.debug({ receiptId: id }, 'Receipt has no expenseId, allowing access for authenticated user');
     }
 
     // Generate signed URL for the receipt (valid for 7 days)

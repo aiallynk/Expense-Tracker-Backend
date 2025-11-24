@@ -48,25 +48,37 @@ export class ReceiptsController {
   });
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const receipt = await ReceiptsService.getReceipt(
-      req.params.id,
-      req.user!.id,
-      req.user!.role
-    );
+    try {
+      const receipt = await ReceiptsService.getReceipt(
+        req.params.id,
+        req.user!.id,
+        req.user!.role
+      );
 
-    if (!receipt) {
-      res.status(404).json({
-        success: false,
-        message: 'Receipt not found',
-        code: 'RECEIPT_NOT_FOUND',
+      res.status(200).json({
+        success: true,
+        data: receipt,
       });
-      return;
+    } catch (error: any) {
+      if (error.message === 'Receipt not found' || error.message === 'Invalid receipt ID format') {
+        res.status(404).json({
+          success: false,
+          message: error.message,
+          code: 'RECEIPT_NOT_FOUND',
+        });
+        return;
+      }
+      if (error.message === 'Access denied') {
+        res.status(403).json({
+          success: false,
+          message: 'Access denied',
+          code: 'ACCESS_DENIED',
+        });
+        return;
+      }
+      // Re-throw other errors to be handled by error middleware
+      throw error;
     }
-
-    res.status(200).json({
-      success: true,
-      data: receipt,
-    });
   });
 }
 
