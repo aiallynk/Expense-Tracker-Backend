@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 
 import { CompanyAdmin, ICompanyAdmin } from '../models/CompanyAdmin';
 import { User, IUser } from '../models/User';
-import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated } from '../socket/realtimeEvents';
+import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated, emitToUser, EmployeeEvent } from '../socket/realtimeEvents';
 import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
 
 // import { AuthRequest } from '../middleware/auth.middleware'; // Unused
@@ -143,6 +143,49 @@ export class UsersService {
       .populate('departmentId', 'name code')
       .select('-passwordHash')
       .exec();
+    
+    // Emit profile update to the user themselves for real-time updates
+    if (result) {
+      const formattedUser = {
+        id: (result._id as any).toString(),
+        name: result.name,
+        email: result.email,
+        phone: result.phone,
+        employeeId: result.employeeId,
+        role: result.role,
+        companyId: result.companyId ? {
+          _id: (result.companyId as any)._id?.toString() || (result.companyId as any).toString(),
+          name: (result.companyId as any).name || null,
+        } : null,
+        departmentId: result.departmentId ? {
+          _id: (result.departmentId as any)._id?.toString() || (result.departmentId as any).toString(),
+          name: (result.departmentId as any).name || null,
+        } : null,
+      };
+      emitToUser(userId, 'user:profile-updated', formattedUser);
+      logger.debug({ userId }, 'Emitted profile update to user');
+    }
+    
+    // Emit to company admin if user has company
+    if (result?.companyId) {
+      const companyId = typeof result.companyId === 'object' 
+        ? (result.companyId as any)._id?.toString() 
+        : result.companyId.toString();
+      const formattedUser = {
+        id: (result._id as any).toString(),
+        name: result.name,
+        email: result.email,
+        phone: result.phone,
+        employeeId: result.employeeId,
+        role: result.role,
+        companyId: companyId,
+        departmentId: result.departmentId ? {
+          _id: (result.departmentId as any)._id?.toString() || (result.departmentId as any).toString(),
+          name: (result.departmentId as any).name || null,
+        } : null,
+      };
+      emitUserUpdated(companyId, formattedUser);
+    }
     
     return result || updatedUser;
   }
