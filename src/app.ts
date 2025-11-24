@@ -122,19 +122,13 @@ export const createApp = (): Express => {
   app.get('/healthz', async (_req, res) => {
     const isDbConnected = mongoose.connection.readyState === 1;
     let isRedisConnected = false;
-    let redisRequired = false;
 
     try {
       // Check Redis connection (if available)
       // Redis is optional - only needed for OCR queue/worker
       if (redisConnection) {
-        redisRequired = true;
         const redisStatus = await redisConnection.ping();
         isRedisConnected = redisStatus === 'PONG';
-      } else {
-        // Redis not initialized - not required for sync OCR processing
-        isRedisConnected = false;
-        redisRequired = false;
       }
     } catch (error) {
       logger.debug({ error }, 'Redis health check failed');
