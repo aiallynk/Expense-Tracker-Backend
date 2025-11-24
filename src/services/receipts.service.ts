@@ -125,6 +125,10 @@ export class ReceiptsService {
       storageUrl: receipt.storageUrl,
     }, 'Receipt upload confirmed')
 
+    // Small delay to ensure S3 upload has fully propagated
+    // S3 eventual consistency can cause issues if we try to read immediately
+    await new Promise(resolve => setTimeout(resolve, 1000));
+
     // Generate signed URL for the receipt (valid for 7 days)
     const signedUrl = await getPresignedDownloadUrl(
       'receipts',
@@ -177,7 +181,40 @@ export class ReceiptsService {
     let extractedFields: any = null;
     
     try {
-      logger.info({ receiptId }, 'Starting OCR processing');
+      logger.info({ 
+        receiptId,
+        storageKey: receipt.storageKey,
+        storageUrl: receipt.storageUrl,
+      }, 'Starting OCR processing');
+      
+      // Verify file exists in S3 before processing OCR
+      const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
+      const { s3Client, getS3Bucket } = await import('../config/aws');
+      const bucket = getS3Bucket('receipts');
+      
+      try {
+        const headCommand = new HeadObjectCommand({
+          Bucket: bucket,
+          Key: receipt.storageKey,
+        });
+        await s3Client.send(headCommand);
+        logger.info({ receiptId, storageKey: receipt.storageKey }, 'Receipt verified in S3 before OCR');
+      } catch (s3Error: any) {
+        if (s3Error.name === 'NotFound' || s3Error.$metadata?.httpStatusCode === 404) {
+          logger.error({
+            receiptId,
+            storageKey: receipt.storageKey,
+          }, 'Receipt not found in S3 - upload may not have completed. OCR will be skipped.');
+          // Don't throw - allow the confirm to succeed, OCR can be retried later
+          return {
+            receipt,
+            ocrJobId: '',
+            extractedFields: null,
+          };
+        }
+        throw s3Error;
+      }
+      
       const ocrJob = await OcrService.processReceiptSync(receiptId);
       ocrJobId = (ocrJob._id as mongoose.Types.ObjectId).toString();
       
@@ -190,7 +227,9 @@ export class ReceiptsService {
     } catch (error: any) {
       logger.error({
         receiptId,
+        storageKey: receipt.storageKey,
         error: error.message,
+        stack: error.stack,
       }, 'OCR processing error');
       // Don't fail the confirm upload if OCR fails - receipt is still uploaded
     }
