@@ -1,4 +1,4 @@
-import { GetObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import mongoose from 'mongoose';
 
 import { s3Client, getS3Bucket } from '../config/aws';
@@ -100,9 +100,42 @@ export class OcrService {
         receiptId: receiptPopulated._id,
         storageKey: receiptPopulated.storageKey,
         mimeType: receiptPopulated.mimeType,
-      }, 'Downloading receipt from S3');
+      }, 'Verifying receipt exists in S3');
 
       const bucket = getS3Bucket('receipts');
+
+      // First, verify the object exists in S3
+      try {
+        const headCommand = new HeadObjectCommand({
+          Bucket: bucket,
+          Key: receiptPopulated.storageKey,
+        });
+        await s3Client.send(headCommand);
+        logger.info({
+          jobId,
+          storageKey: receiptPopulated.storageKey,
+        }, 'Receipt verified in S3');
+      } catch (headError: any) {
+        if (headError.name === 'NotFound' || headError.$metadata?.httpStatusCode === 404) {
+          logger.error({
+            jobId,
+            receiptId: receiptPopulated._id,
+            storageKey: receiptPopulated.storageKey,
+          }, 'Receipt not found in S3 - upload may not have completed');
+          job.status = OcrJobStatus.FAILED;
+          job.error = 'Receipt file not found in S3. Please ensure the upload completed successfully.';
+          await job.save();
+          throw new Error('Receipt file not found in S3');
+        }
+        throw headError;
+      }
+
+      logger.info({
+        jobId,
+        receiptId: receiptPopulated._id,
+        storageKey: receiptPopulated.storageKey,
+        mimeType: receiptPopulated.mimeType,
+      }, 'Downloading receipt from S3');
 
       // Download image from S3
       const command = new GetObjectCommand({
@@ -111,7 +144,16 @@ export class OcrService {
       });
 
       const response = await s3Client.send(command);
-      const imageBuffer = await this.streamToBuffer(response.Body as any);
+      
+      if (!response.Body) {
+        logger.error({ jobId, storageKey: receiptPopulated.storageKey }, 'S3 response has no body');
+        job.status = OcrJobStatus.FAILED;
+        job.error = 'S3 object has no body content';
+        await job.save();
+        throw new Error('S3 object has no body content');
+      }
+      
+      const imageBuffer = await this.streamToBuffer(response.Body);
 
       logger.info({ 
         sizeBytes: imageBuffer.length,

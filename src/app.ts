@@ -34,8 +34,10 @@ export const createApp = (): Express => {
   const app = express();
 
   // Trust proxy - Required for Render and other reverse proxies
+  // Trust only the first proxy (Render's load balancer) for security
   // This allows Express to correctly identify client IPs and handle X-Forwarded-* headers
-  app.set('trust proxy', true);
+  // Setting to 1 (instead of true) only trusts the first proxy, preventing IP spoofing
+  app.set('trust proxy', 1);
 
   // Request ID middleware (must be first to add requestId to all requests)
   app.use(requestIdMiddleware);

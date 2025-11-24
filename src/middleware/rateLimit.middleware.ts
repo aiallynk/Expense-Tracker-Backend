@@ -14,6 +14,10 @@ export const loginRateLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Skip validation warnings for trust proxy in production (Render uses reverse proxy)
+  validate: {
+    trustProxy: false, // Disable trust proxy validation warning
+  },
   skip: (req) => {
     // Skip rate limiting for health checks
     return req.path === '/health';
@@ -31,6 +35,10 @@ export const receiptUploadRateLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Skip validation warnings for trust proxy in production (Render uses reverse proxy)
+  validate: {
+    trustProxy: false, // Disable trust proxy validation warning
+  },
 });
 
 // OCR rate limiter - control API costs
@@ -44,6 +52,10 @@ export const ocrRateLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Skip validation warnings for trust proxy in production (Render uses reverse proxy)
+  validate: {
+    trustProxy: false, // Disable trust proxy validation warning
+  },
 });
 
 // General API rate limiter
@@ -58,6 +70,10 @@ export const apiRateLimiter = rateLimit({
   },
   standardHeaders: true,
   legacyHeaders: false,
+  // Skip validation warnings for trust proxy in production (Render uses reverse proxy)
+  validate: {
+    trustProxy: false, // Disable trust proxy validation warning
+  },
   skip: (req) => {
     // Skip rate limiting for health checks
     return req.path === '/health';
