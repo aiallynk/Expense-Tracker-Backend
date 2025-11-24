@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 
 import { CompanyAdmin, ICompanyAdmin } from '../models/CompanyAdmin';
 import { User, IUser } from '../models/User';
-import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated, emitToUser, EmployeeEvent } from '../socket/realtimeEvents';
+import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated, emitToUser } from '../socket/realtimeEvents';
 import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
 
 // import { AuthRequest } from '../middleware/auth.middleware'; // Unused
@@ -170,7 +170,7 @@ export class UsersService {
     if (result?.companyId) {
       const companyId = typeof result.companyId === 'object' 
         ? (result.companyId as any)._id?.toString() 
-        : result.companyId.toString();
+        : (result.companyId as any).toString();
       const formattedUser = {
         id: (result._id as any).toString(),
         name: result.name,
