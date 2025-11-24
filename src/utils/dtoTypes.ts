@@ -154,7 +154,7 @@ export const updateExpenseSchema = z.object({
 
 // Receipt DTOs
 export const uploadIntentSchema = z.object({
-  filename: z.string(),
+  filename: z.string().optional(),
   mimeType: z.string(),
   sizeBytes: z.number().positive().optional(),
 });

@@ -33,6 +33,10 @@ import { logger } from '@/config/logger';
 export const createApp = (): Express => {
   const app = express();
 
+  // Trust proxy - Required for Render and other reverse proxies
+  // This allows Express to correctly identify client IPs and handle X-Forwarded-* headers
+  app.set('trust proxy', true);
+
   // Request ID middleware (must be first to add requestId to all requests)
   app.use(requestIdMiddleware);
 
