@@ -1,7 +1,10 @@
 import mongoose from 'mongoose';
-import { config } from './index';
-import { logger } from '../utils/logger';
+
 import { CategoriesService } from '../services/categories.service';
+
+import { logger } from './logger';
+
+import { config } from './index';
 
 export const connectDB = async (): Promise<void> => {
   try {
@@ -23,19 +26,19 @@ export const connectDB = async (): Promise<void> => {
       await CategoriesService.initializeDefaultCategories();
       logger.info('Default categories initialized');
     } catch (error) {
-      logger.warn('Failed to initialize default categories:', error);
+      logger.warn({ error }, 'Failed to initialize default categories');
       // Don't fail startup if categories can't be initialized
     }
 
     mongoose.connection.on('error', (err) => {
-      logger.error('MongoDB connection error:', err);
+      logger.error({ error: err }, 'MongoDB connection error');
     });
 
     mongoose.connection.on('disconnected', () => {
       logger.warn('MongoDB disconnected');
     });
   } catch (error: any) {
-    logger.error('Failed to connect to MongoDB:', error.message || error);
+    logger.error({ error: error.message || error }, 'Failed to connect to MongoDB');
     logger.warn('Server will start without MongoDB. Some features may not work.');
     logger.warn('To fix: Ensure MongoDB is running and MONGODB_URI is set correctly in .env');
     // Don't exit - allow server to start without MongoDB for testing
@@ -48,7 +51,7 @@ export const disconnectDB = async (): Promise<void> => {
     await mongoose.disconnect();
     logger.info('MongoDB disconnected');
   } catch (error) {
-    logger.error('Error disconnecting from MongoDB:', error);
+    logger.error({ error }, 'Error disconnecting from MongoDB');
   }
 };
 

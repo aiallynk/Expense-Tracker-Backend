@@ -1,6 +1,7 @@
+import mongoose from 'mongoose';
+
 import { Project, IProject } from '../models/Project';
 import { CreateProjectDto, UpdateProjectDto } from '../utils/dtoTypes';
-import mongoose from 'mongoose';
 
 export class ProjectsService {
   static async getAllProjects(): Promise<IProject[]> {

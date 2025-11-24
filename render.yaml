@@ -4,11 +4,9 @@ services:
     env: node
     region: oregon
     plan: starter
-    # Root Directory: Leave empty if repo root contains package.json directly
-    # Or set to "BACKEND" if backend code is in a BACKEND subfolder
     buildCommand: npm install && npm run build
     startCommand: npm start
-    healthCheckPath: /health
+    healthCheckPath: /healthz
     envVars:
       - key: NODE_ENV
         value: production
@@ -16,19 +14,62 @@ services:
         value: production
       # PORT is automatically provided by Render, no need to set it
       # Add your other environment variables in Render Dashboard:
-      # - MONGODB_URI
-      # - MONGODB_DB_NAME
-      # - JWT_ACCESS_SECRET
-      # - JWT_REFRESH_SECRET
-      # - AWS_ACCESS_KEY_ID
-      # - AWS_SECRET_ACCESS_KEY
-      # - S3_BUCKET_NAME
-      # - TOGETHER_AI_API_KEY
-      # - FIREBASE_PROJECT_ID
-      # - FIREBASE_CLIENT_EMAIL
-      # - FIREBASE_PRIVATE_KEY
-      # - FIREBASE_DATABASE_URL
-      # - RESEND_API_KEY
-      # - APP_FRONTEND_URL_APP
-      # - APP_FRONTEND_URL_ADMIN
+      # - MONGODB_URI (required)
+      # - MONGODB_DB_NAME (required)
+      # - JWT_ACCESS_SECRET (required, min 32 chars)
+      # - JWT_REFRESH_SECRET (required, min 32 chars)
+      # - AWS_ACCESS_KEY_ID (required)
+      # - AWS_SECRET_ACCESS_KEY (required)
+      # - S3_BUCKET_NAME (required)
+      # - AWS_REGION (default: ap-south-1)
+      # - TOGETHER_AI_API_KEY (optional)
+      # - TOGETHER_AI_USER_KEY (optional)
+      # - TOGETHER_AI_MODEL_VISION (optional)
+      # - FIREBASE_PROJECT_ID (optional)
+      # - FIREBASE_CLIENT_EMAIL (optional)
+      # - FIREBASE_PRIVATE_KEY (optional)
+      # - FIREBASE_DATABASE_URL (optional)
+      # - RESEND_API_KEY (optional)
+      # - RESEND_FROM_EMAIL (optional)
+      # - APP_FRONTEND_URL_APP (required for production CORS)
+      # - APP_FRONTEND_URL_ADMIN (required for production CORS)
+      # - REDIS_HOST (default: localhost)
+      # - REDIS_PORT (default: 6379)
+      # - REDIS_PASSWORD (optional)
+      # - REDIS_DB (default: 0)
+      # - LOG_LEVEL (default: info)
+      # - LOG_PRETTY (default: false, set to true for human-readable logs)
+      # - REQUEST_ID_HEADER (default: X-Request-ID)
+      # - DISABLE_OCR (optional, set to true to disable OCR)
+      # - OCR_WORKER_CONCURRENCY (default: 3)
 
+  - type: worker
+    name: expense-tracker-ocr-worker
+    env: node
+    region: oregon
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm run worker:prod
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: APP_ENV
+        value: production
+      # Same environment variables as web service
+      # - MONGODB_URI (required)
+      # - MONGODB_DB_NAME (required)
+      # - REDIS_HOST (required)
+      # - REDIS_PORT (default: 6379)
+      # - REDIS_PASSWORD (optional)
+      # - REDIS_DB (default: 0)
+      # - TOGETHER_AI_API_KEY (required for OCR)
+      # - TOGETHER_AI_USER_KEY (optional)
+      # - TOGETHER_AI_MODEL_VISION (optional)
+      # - AWS_ACCESS_KEY_ID (required)
+      # - AWS_SECRET_ACCESS_KEY (required)
+      # - S3_BUCKET_NAME (required)
+      # - AWS_REGION (default: ap-south-1)
+      # - DISABLE_OCR (optional, set to true to disable OCR)
+      # - OCR_WORKER_CONCURRENCY (default: 3)
+      # - LOG_LEVEL (default: info)
+      # - LOG_PRETTY (default: false)

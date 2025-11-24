@@ -1,6 +1,7 @@
+import mongoose from 'mongoose';
+
 import { Category, ICategory } from '../models/Category';
 import { CreateCategoryDto, UpdateCategoryDto } from '../utils/dtoTypes';
-import mongoose from 'mongoose';
 
 export class CategoriesService {
   static async getAllCategories(): Promise<ICategory[]> {

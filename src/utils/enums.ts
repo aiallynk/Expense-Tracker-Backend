@@ -1,4 +1,6 @@
 export enum UserRole {
+  SUPER_ADMIN = 'SUPER_ADMIN',
+  COMPANY_ADMIN = 'COMPANY_ADMIN',
   ADMIN = 'ADMIN',
   BUSINESS_HEAD = 'BUSINESS_HEAD',
   MANAGER = 'MANAGER',
@@ -13,6 +15,8 @@ export enum UserStatus {
 export enum ExpenseReportStatus {
   DRAFT = 'DRAFT',
   SUBMITTED = 'SUBMITTED',
+  MANAGER_APPROVED = 'MANAGER_APPROVED',
+  BH_APPROVED = 'BH_APPROVED',
   APPROVED = 'APPROVED',
   REJECTED = 'REJECTED',
 }
@@ -47,6 +51,7 @@ export enum AuditAction {
   UPDATE = 'UPDATE',
   DELETE = 'DELETE',
   STATUS_CHANGE = 'STATUS_CHANGE',
+  IMPERSONATE = 'IMPERSONATE',
 }
 
 export enum ExportFormat {

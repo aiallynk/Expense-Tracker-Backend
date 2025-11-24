@@ -1,7 +1,8 @@
 import { Response } from 'express';
-import { ReceiptsService } from '../services/receipts.service';
-import { asyncHandler } from '../middleware/error.middleware';
+
 import { AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { ReceiptsService } from '../services/receipts.service';
 import { uploadIntentSchema } from '../utils/dtoTypes';
 
 export class ReceiptsController {
@@ -16,7 +17,12 @@ export class ReceiptsController {
 
       res.status(200).json({
         success: true,
-        data: result,
+        data: {
+          receiptId: result.receiptId,
+          presignedUrl: result.uploadUrl,
+          storageKey: result.storageKey,
+          expiresIn: 3600,
+        },
       });
     }
   );
@@ -29,10 +35,11 @@ export class ReceiptsController {
 
     res.status(200).json({
       success: true,
-      data: result.receipt,
-      extractedFields: result.extractedFields,
-      ocrJobId: result.ocrJobId,
-      message: 'Receipt uploaded and OCR processing started',
+      data: {
+        receiptId: (result.receipt._id as any).toString(),
+        ocrJobId: result.ocrJobId,
+        extractedFields: result.extractedFields || null,
+      },
     });
   });
 

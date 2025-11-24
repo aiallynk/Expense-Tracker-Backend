@@ -1,5 +1,7 @@
 import { Response, NextFunction } from 'express';
+
 import { UserRole } from '../utils/enums';
+
 import { AuthRequest } from './auth.middleware';
 
 export const requireRole = (...allowedRoles: UserRole[]) => {
@@ -26,5 +28,5 @@ export const requireRole = (...allowedRoles: UserRole[]) => {
   };
 };
 
-export const requireAdmin = requireRole(UserRole.ADMIN, UserRole.BUSINESS_HEAD);
+export const requireAdmin = requireRole(UserRole.ADMIN, UserRole.BUSINESS_HEAD, UserRole.COMPANY_ADMIN, UserRole.SUPER_ADMIN);
 

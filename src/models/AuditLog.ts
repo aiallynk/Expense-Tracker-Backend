@@ -1,4 +1,5 @@
 import mongoose, { Document, Schema } from 'mongoose';
+
 import { AuditAction } from '../utils/enums';
 
 export interface IAuditLog extends Document {
@@ -7,6 +8,7 @@ export interface IAuditLog extends Document {
   entityId: mongoose.Types.ObjectId;
   action: AuditAction;
   diff?: Record<string, any>;
+  meta?: Record<string, any>;
   createdAt: Date;
 }
 
@@ -31,6 +33,9 @@ const auditLogSchema = new Schema<IAuditLog>(
       required: true,
     },
     diff: {
+      type: Schema.Types.Mixed,
+    },
+    meta: {
       type: Schema.Types.Mixed,
     },
   },

@@ -1,12 +1,19 @@
-import mongoose, { Document, Schema } from 'mongoose';
 import bcrypt from 'bcrypt';
+import mongoose, { Document, Schema } from 'mongoose';
+
 import { UserRole, UserStatus } from '../utils/enums';
 
 export interface IUser extends Document {
   email: string;
   passwordHash: string;
   name?: string;
+  phone?: string;
+  employeeId?: string; // Unique employee ID (e.g., ABC001)
   role: UserRole;
+  companyId?: mongoose.Types.ObjectId;
+  managerId?: mongoose.Types.ObjectId;
+  departmentId?: mongoose.Types.ObjectId;
+  roles?: string[];
   status: UserStatus;
   lastLoginAt?: Date;
   receiptUrls?: Array<{
@@ -38,11 +45,37 @@ const userSchema = new Schema<IUser>(
       type: String,
       trim: true,
     },
+    phone: {
+      type: String,
+      trim: true,
+    },
+    employeeId: {
+      type: String,
+      trim: true,
+      uppercase: true,
+      // No index options here - index is created explicitly below with sparse: true
+    },
     role: {
       type: String,
       enum: Object.values(UserRole),
       default: UserRole.EMPLOYEE,
       required: true,
+    },
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Company',
+    },
+    managerId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    },
+    departmentId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Department',
+    },
+    roles: {
+      type: [String],
+      default: [],
     },
     status: {
       type: String,
@@ -84,7 +117,12 @@ const userSchema = new Schema<IUser>(
 
 // Indexes
 // Note: email index is automatically created by unique: true in schema
+// employeeId: sparse unique index (allows null but enforces uniqueness when present)
+userSchema.index({ employeeId: 1 }, { unique: true, sparse: true });
 userSchema.index({ role: 1, status: 1 });
+userSchema.index({ companyId: 1 });
+userSchema.index({ managerId: 1 });
+userSchema.index({ departmentId: 1 });
 
 // Methods
 userSchema.methods.comparePassword = async function (

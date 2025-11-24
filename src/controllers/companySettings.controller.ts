@@ -1,0 +1,105 @@
+import { Response } from 'express';
+
+import { AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { CompanyAdmin } from '../models/CompanyAdmin';
+import { CompanySettingsService } from '../services/companySettings.service';
+
+export class CompanySettingsController {
+  /**
+   * Get company settings
+   * GET /api/v1/company-admin/settings
+   */
+  static getSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+    
+    if (!companyAdmin || !companyAdmin.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Company admin not found or company not associated',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const companyId = companyAdmin.companyId.toString();
+    const settings = await CompanySettingsService.getSettingsByCompanyId(companyId);
+
+    res.status(200).json({
+      success: true,
+      data: settings,
+    });
+  });
+
+  /**
+   * Update company settings
+   * PUT /api/v1/company-admin/settings
+   */
+  static updateSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+    
+    if (!companyAdmin || !companyAdmin.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Company admin not found or company not associated',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const companyId = companyAdmin.companyId.toString();
+    const updates = req.body;
+
+    // Validate required fields structure
+    if (updates.approvalFlow && typeof updates.approvalFlow !== 'object') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid approvalFlow settings format',
+        code: 'VALIDATION_ERROR',
+      });
+      return;
+    }
+
+    const settings = await CompanySettingsService.updateSettings(
+      companyId,
+      updates,
+      req.user!.id
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Settings updated successfully',
+      data: settings,
+    });
+  });
+
+  /**
+   * Reset company settings to default
+   * POST /api/v1/company-admin/settings/reset
+   */
+  static resetSettings = asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+    
+    if (!companyAdmin || !companyAdmin.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Company admin not found or company not associated',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const companyId = companyAdmin.companyId.toString();
+    const settings = await CompanySettingsService.resetSettings(companyId, req.user!.id);
+
+    res.status(200).json({
+      success: true,
+      message: 'Settings reset to default successfully',
+      data: settings,
+    });
+  });
+}
+

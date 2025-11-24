@@ -1,6 +1,8 @@
 import OpenAI from 'openai';
+
+import { logger } from './logger';
+
 import { config } from './index';
-import { logger } from '../utils/logger';
 
 // Together AI uses OpenAI-compatible API
 export const togetherAIClient = new OpenAI({
@@ -13,11 +15,14 @@ export const togetherAIClient = new OpenAI({
 
 // Log configuration on initialization
 if (config.togetherAI.apiKey) {
-  logger.info('Together AI configured', {
-    model: config.togetherAI.modelVision,
-    baseUrl: config.togetherAI.baseUrl,
-    hasUserKey: !!config.togetherAI.userKey,
-  });
+  logger.info(
+    {
+      model: config.togetherAI.modelVision,
+      baseUrl: config.togetherAI.baseUrl,
+      hasUserKey: !!config.togetherAI.userKey,
+    },
+    'Together AI configured'
+  );
 } else {
   logger.warn('Together AI API key not configured');
 }

@@ -1,6 +1,13 @@
 import dotenv from 'dotenv';
 
+import { validateEnv } from './env';
+
+// Load environment variables
 dotenv.config();
+
+// Validate environment variables (fail fast if invalid)
+// Must be called before importing logger to avoid circular dependency
+validateEnv();
 
 export const config = {
   app: {
@@ -48,6 +55,17 @@ export const config = {
   },
   log: {
     level: process.env.LOG_LEVEL || 'info',
+  },
+  redis: {
+    host: process.env.REDIS_HOST || 'localhost',
+    port: parseInt(process.env.REDIS_PORT || '6379', 10),
+    password: process.env.REDIS_PASSWORD || undefined,
+    db: parseInt(process.env.REDIS_DB || '0', 10),
+  },
+  ocr: {
+    disableOcr: process.env.DISABLE_OCR === 'true',
+    queueName: 'ocr-jobs',
+    concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '3', 10),
   },
 };
 

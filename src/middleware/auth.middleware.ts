@@ -1,13 +1,16 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+
 import { config } from '../config/index';
-import { logger } from '../utils/logger';
+
+import { logger } from '@/config/logger';
 
 export interface AuthRequest extends Request {
   user?: {
     id: string;
     email: string;
     role: string;
+    companyId?: string;
   };
 }
 
@@ -38,19 +41,21 @@ export const authMiddleware = async (
         id: string;
         email: string;
         role: string;
+        companyId?: string;
       };
 
       req.user = {
         id: decoded.id,
         email: decoded.email,
         role: decoded.role,
+        companyId: decoded.companyId,
       };
 
       logger.debug(`Auth middleware - Token verified for user: ${decoded.email} (${decoded.id})`);
       next();
     } catch (error) {
       if (error instanceof jwt.TokenExpiredError) {
-        logger.warn(`Auth middleware - Token expired for ${req.method} ${req.path}`);
+        logger.warn({ method: req.method, path: req.path }, 'Auth middleware - Token expired');
         res.status(401).json({
           success: false,
           message: 'Token expired',
@@ -60,7 +65,10 @@ export const authMiddleware = async (
       }
 
       if (error instanceof jwt.JsonWebTokenError) {
-        logger.warn(`Auth middleware - Invalid token for ${req.method} ${req.path}:`, error.message);
+        logger.warn(
+          { method: req.method, path: req.path, error: error.message },
+          'Auth middleware - Invalid token'
+        );
         res.status(401).json({
           success: false,
           message: 'Invalid token',
@@ -69,11 +77,11 @@ export const authMiddleware = async (
         return;
       }
 
-      logger.error('Auth middleware - Unexpected error:', error);
+      logger.error({ error }, 'Auth middleware - Unexpected error');
       throw error;
     }
   } catch (error) {
-    logger.error('Auth middleware error:', error);
+    logger.error({ error }, 'Auth middleware error');
     res.status(500).json({
       success: false,
       message: 'Authentication error',

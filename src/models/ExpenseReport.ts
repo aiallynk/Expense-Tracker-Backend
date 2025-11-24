@@ -1,9 +1,20 @@
 import mongoose, { Document, Schema } from 'mongoose';
+
 import { ExpenseReportStatus } from '../utils/enums';
+
+export interface IApprover {
+  level: number;
+  userId: mongoose.Types.ObjectId;
+  role: string;
+  decidedAt?: Date;
+  action?: string;
+  comment?: string;
+}
 
 export interface IExpenseReport extends Document {
   userId: mongoose.Types.ObjectId;
   projectId?: mongoose.Types.ObjectId;
+  projectName?: string;
   name: string;
   notes?: string;
   fromDate: Date;
@@ -11,6 +22,7 @@ export interface IExpenseReport extends Document {
   status: ExpenseReportStatus;
   totalAmount: number;
   currency: string;
+  approvers: IApprover[];
   submittedAt?: Date;
   approvedAt?: Date;
   rejectedAt?: Date;
@@ -29,6 +41,10 @@ const expenseReportSchema = new Schema<IExpenseReport>(
     projectId: {
       type: Schema.Types.ObjectId,
       ref: 'Project',
+    },
+    projectName: {
+      type: String,
+      trim: true,
     },
     name: {
       type: String,
@@ -62,6 +78,33 @@ const expenseReportSchema = new Schema<IExpenseReport>(
       type: String,
       default: 'INR',
     },
+    approvers: [
+      {
+        level: {
+          type: Number,
+          required: true,
+        },
+        userId: {
+          type: Schema.Types.ObjectId,
+          ref: 'User',
+          required: true,
+        },
+        role: {
+          type: String,
+          required: true,
+        },
+        decidedAt: {
+          type: Date,
+        },
+        action: {
+          type: String,
+          enum: ['approve', 'reject', 'request_changes'],
+        },
+        comment: {
+          type: String,
+        },
+      },
+    ],
     submittedAt: {
       type: Date,
     },
@@ -85,6 +128,7 @@ const expenseReportSchema = new Schema<IExpenseReport>(
 expenseReportSchema.index({ userId: 1, status: 1, fromDate: 1, toDate: 1 });
 expenseReportSchema.index({ projectId: 1, status: 1 });
 expenseReportSchema.index({ status: 1, createdAt: -1 });
+expenseReportSchema.index({ 'approvers.userId': 1 });
 
 // Validation
 expenseReportSchema.pre('save', function (next) {

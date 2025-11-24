@@ -1,8 +1,9 @@
 import { Request, Response } from 'express';
-import { AuthService } from '../services/auth.service';
-import { asyncHandler } from '../middleware/error.middleware';
-import { loginSchema, refreshTokenSchema } from '../utils/dtoTypes';
 import { z } from 'zod';
+
+import { asyncHandler } from '../middleware/error.middleware';
+import { AuthService } from '../services/auth.service';
+import { loginSchema, refreshTokenSchema } from '../utils/dtoTypes';
 import { UserRole } from '../utils/enums';
 
 const signupSchema = z.object({

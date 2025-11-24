@@ -1,7 +1,10 @@
 import { PutObjectCommand, GetObjectCommand, HeadBucketCommand, CreateBucketCommand, BucketLocationConstraint } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+
 import { s3Client, getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
+
+import { logger } from '@/config/logger';
 
 export interface PresignedUploadUrlOptions {
   bucketType: 'receipts' | 'exports';
@@ -18,6 +21,8 @@ export const getPresignedUploadUrl = async (
     Bucket: bucket,
     Key: options.key,
     ContentType: options.mimeType,
+    // Add CORS headers to the presigned URL
+    Metadata: {},
   });
 
   const expiresIn = options.expiresIn || 3600; // 1 hour default
@@ -67,7 +72,7 @@ export const bucketExists = async (bucketName: string): Promise<boolean> => {
     if (statusCode === 403 || errorName === 'Forbidden' || errorName === 'AccessDenied') {
       // Assume bucket exists if we get access denied (common when bucket exists in another account)
       // But log a warning
-      console.warn(`Access denied checking bucket "${bucketName}". Assuming it exists.`);
+      logger.warn({ bucketName }, 'Access denied checking bucket, assuming it exists');
       return true;
     }
     
@@ -92,11 +97,11 @@ export const ensureBucketExists = async (bucketType: 'receipts' | 'exports'): Pr
   try {
     const exists = await bucketExists(bucket);
     if (exists) {
-      console.log(`✅ S3 bucket "${bucket}" already exists`);
+      logger.info({ bucket, region }, 'S3 bucket already exists');
       return;
     }
 
-    console.log(`Creating S3 bucket "${bucket}" in region "${region}"...`);
+    logger.info({ bucket, region }, 'Creating S3 bucket');
     
     // Try to create the bucket
     const createCommand = new CreateBucketCommand({
@@ -109,7 +114,7 @@ export const ensureBucketExists = async (bucketType: 'receipts' | 'exports'): Pr
     });
 
     await s3Client.send(createCommand);
-    console.log(`✅ Created S3 bucket: ${bucket} in region ${region}`);
+    logger.info({ bucket, region }, 'S3 bucket created successfully');
   } catch (error: any) {
     const errorName = error.name || error.Code || 'UnknownError';
     const statusCode = error.$metadata?.httpStatusCode;
@@ -121,7 +126,7 @@ export const ensureBucketExists = async (bucketType: 'receipts' | 'exports'): Pr
       errorName === 'BucketAlreadyOwnedByYou' ||
       statusCode === 409
     ) {
-      console.log(`✅ S3 bucket "${bucket}" already exists (created by another process)`);
+      logger.info({ bucket, region }, 'S3 bucket already exists (created by another process)');
       return;
     }
     

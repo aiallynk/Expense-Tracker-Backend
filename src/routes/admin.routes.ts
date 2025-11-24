@@ -1,4 +1,6 @@
 import { Router } from 'express';
+
+import { ActivityController } from '../controllers/activity.controller';
 import { AdminController } from '../controllers/admin.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireAdmin } from '../middleware/role.middleware';
@@ -22,6 +24,11 @@ router.post('/expenses/:id/reject', AdminController.rejectExpense);
 
 // Dashboard
 router.get('/summary/dashboard', AdminController.getDashboard);
+router.get('/summary/storage-growth', AdminController.getStorageGrowth);
+
+// Activity Logs
+router.get('/activity', ActivityController.getActivityLogs);
+router.get('/activity/recent', ActivityController.getRecentActivity);
 
 export default router;
 

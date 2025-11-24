@@ -1,16 +1,22 @@
+import mongoose from 'mongoose';
+
+import { Expense } from '../models/Expense';
 import {
   ExpenseReport,
   IExpenseReport,
+  IApprover,
 } from '../models/ExpenseReport';
-import { Expense } from '../models/Expense';
+import { User } from '../models/User';
+import { emitCompanyAdminDashboardUpdate, emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
 import { CreateReportDto, UpdateReportDto, ReportFiltersDto } from '../utils/dtoTypes';
-import { ExpenseReportStatus } from '../utils/enums';
+import { ExpenseReportStatus, UserRole, ExpenseStatus , AuditAction } from '../utils/enums';
 import { getPaginationOptions, createPaginatedResult } from '../utils/pagination';
-import mongoose from 'mongoose';
+
 import { AuditService } from './audit.service';
-import { AuditAction } from '../utils/enums';
+import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
 import { NotificationService } from './notification.service';
-import { logger } from '../utils/logger';
+
+import { logger } from '@/config/logger';
 
 export class ReportsService {
   static async createReport(
@@ -18,14 +24,14 @@ export class ReportsService {
     data: CreateReportDto
   ): Promise<IExpenseReport> {
     logger.info('ReportsService.createReport - Starting report creation');
-    logger.debug('User ID:', userId);
-    logger.debug('Report data:', {
+    logger.debug({ userId }, 'User ID');
+    logger.debug({
       name: data.name,
       projectId: data.projectId || 'none',
       fromDate: data.fromDate,
       toDate: data.toDate,
       notes: data.notes || 'none',
-    });
+    }, 'Report data');
 
     try {
       // Validate projectId - if provided, it must be a valid ObjectId
@@ -34,16 +40,17 @@ export class ReportsService {
       if (data.projectId && data.projectId.trim() !== '') {
         if (mongoose.Types.ObjectId.isValid(data.projectId)) {
           projectId = new mongoose.Types.ObjectId(data.projectId);
-          logger.debug('Valid projectId provided:', projectId);
+          logger.debug({ projectId }, 'Valid projectId provided');
         } else {
-          logger.warn('Invalid projectId provided (not a valid ObjectId), ignoring:', data.projectId);
+          logger.warn({ projectId: data.projectId }, 'Invalid projectId provided (not a valid ObjectId), ignoring');
           // Don't throw error, just ignore invalid projectId
         }
       }
 
       const report = new ExpenseReport({
         userId,
-        projectId: projectId,
+        projectId,
+        projectName: data.projectName?.trim() || undefined,
         name: data.name,
         notes: data.notes,
         fromDate: new Date(data.fromDate),
@@ -52,19 +59,19 @@ export class ReportsService {
       });
 
       logger.info('ExpenseReport model instance created');
-      logger.debug('Report instance:', {
+      logger.debug({
         userId: report.userId,
         name: report.name,
         fromDate: report.fromDate,
         toDate: report.toDate,
         status: report.status,
-      });
+      }, 'Report instance');
 
       logger.info('Saving report to database (expensereports collection)...');
       const saved = await report.save();
       logger.info('Report saved successfully to expensereports collection');
-      logger.info('Saved report ID:', saved._id);
-      logger.info('Saved report details:', {
+      logger.info({ reportId: saved._id }, 'Saved report ID');
+      logger.info({
         _id: saved._id,
         name: saved.name,
         status: saved.status,
@@ -72,7 +79,7 @@ export class ReportsService {
         fromDate: saved.fromDate,
         toDate: saved.toDate,
         createdAt: saved.createdAt,
-      });
+      }, 'Saved report details');
 
       logger.info('Creating audit log...');
       await AuditService.log(
@@ -83,15 +90,28 @@ export class ReportsService {
       );
       logger.info('Audit log created successfully');
 
+      // Emit company admin dashboard update if user has a company
+      try {
+        const user = await User.findById(userId).select('companyId').exec();
+        if (user && user.companyId) {
+          const companyId = user.companyId.toString();
+          const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+          emitCompanyAdminDashboardUpdate(companyId, stats);
+        }
+      } catch (error) {
+        // Don't fail report creation if dashboard update fails
+        logger.error({ error }, 'Error emitting company admin dashboard update');
+      }
+
       logger.info('ReportsService.createReport - Report creation completed successfully');
       return saved;
     } catch (error: any) {
-      logger.error('ReportsService.createReport - Error creating report:', error);
-      logger.error('Error details:', {
+      logger.error({ error }, 'ReportsService.createReport - Error creating report');
+      logger.error({
         message: error.message,
         stack: error.stack,
         name: error.name,
-      });
+      }, 'Error details');
       throw error;
     }
   }
@@ -101,7 +121,8 @@ export class ReportsService {
     filters: ReportFiltersDto
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
-    const query: any = { userId };
+    // Ensure userId is converted to ObjectId for proper matching
+    const query: any = { userId: new mongoose.Types.ObjectId(userId) };
 
     if (filters.status) {
       query.status = filters.status;
@@ -178,7 +199,14 @@ export class ReportsService {
 
     const report = await ExpenseReport.findById(id)
       .populate('projectId', 'name code')
-      .populate('userId', 'name email')
+      .populate({
+        path: 'userId',
+        select: 'name email companyId departmentId managerId',
+        populate: [
+          { path: 'departmentId', select: 'name' },
+          { path: 'managerId', select: 'name email' },
+        ],
+      })
       .populate('updatedBy', 'name email')
       .exec();
 
@@ -210,26 +238,58 @@ export class ReportsService {
     
     const requestingUserIdStr = String(requestingUserId);
     
-    logger.debug('Checking report access', {
+    logger.debug({
       reportId: id,
       reportUserId,
       requestingUserId: requestingUserIdStr,
       requestingUserRole,
       userIdType: typeof userIdValue,
       userIdIsObject: typeof userIdValue === 'object',
-    });
+    }, 'Checking report access');
     
-    if (
-      reportUserId !== requestingUserIdStr &&
-      requestingUserRole !== 'ADMIN' &&
-      requestingUserRole !== 'BUSINESS_HEAD'
-    ) {
-      logger.warn('Access denied to report', {
+    // Check access: owner, admin, business head, or company admin (if report user is in their company)
+    let hasAccess = false;
+    
+    if (reportUserId === requestingUserIdStr) {
+      // Owner has access
+      hasAccess = true;
+    } else if (requestingUserRole === 'ADMIN' || requestingUserRole === 'BUSINESS_HEAD' || requestingUserRole === 'SUPER_ADMIN') {
+      // Admins and business heads have access
+      hasAccess = true;
+    } else if (requestingUserRole === 'COMPANY_ADMIN') {
+      // Company admin: check if report user belongs to their company
+      try {
+        const { CompanyAdmin } = await import('../models/CompanyAdmin');
+        const { User } = await import('../models/User');
+        
+        // Get company admin's company ID
+        const companyAdmin = await CompanyAdmin.findById(requestingUserIdStr).select('companyId').exec();
+        if (companyAdmin && companyAdmin.companyId) {
+          // Get report user's company ID
+          const reportUser = await User.findById(reportUserId).select('companyId').exec();
+          if (reportUser && reportUser.companyId) {
+            // Check if both belong to the same company
+            const companyAdminCompanyId = companyAdmin.companyId.toString();
+            const reportUserCompanyId = reportUser.companyId.toString();
+            if (companyAdminCompanyId === reportUserCompanyId) {
+              hasAccess = true;
+            }
+          }
+        }
+      } catch (error) {
+        logger.error({ error }, 'Error checking company admin access');
+        // If there's an error, deny access
+        hasAccess = false;
+      }
+    }
+    
+    if (!hasAccess) {
+      logger.warn({
         reportId: id,
         reportUserId,
         requestingUserId: requestingUserIdStr,
         requestingUserRole,
-      });
+      }, 'Access denied to report');
       throw new Error('Access denied');
     }
 
@@ -247,11 +307,37 @@ export class ReportsService {
       .sort({ expenseDate: -1 })
       .exec();
 
+    // Generate signed URLs for receipts (S3 buckets are private)
+    const { getPresignedDownloadUrl } = await import('../utils/s3');
+    const expensesWithSignedUrls = await Promise.all(
+      expenses.map(async (expense: any) => {
+        const expenseObj = expense.toObject();
+        if (expenseObj.receiptPrimaryId && expenseObj.receiptPrimaryId.storageKey) {
+          try {
+            const signedUrl = await getPresignedDownloadUrl(
+              'receipts',
+              expenseObj.receiptPrimaryId.storageKey,
+              7 * 24 * 60 * 60 // 7 days
+            );
+            expenseObj.receiptPrimaryId.signedUrl = signedUrl;
+          } catch (error) {
+            logger.error({
+              expenseId: expenseObj._id,
+              storageKey: expenseObj.receiptPrimaryId.storageKey,
+              error: error instanceof Error ? error.message : String(error),
+            }, 'Failed to generate signed URL for receipt');
+            // Continue without signed URL - frontend will handle gracefully
+          }
+        }
+        return expenseObj;
+      })
+    );
+
     // Convert to plain object and add expenses
     const reportObj = report.toObject();
     return {
       ...reportObj,
-      expenses,
+      expenses: expensesWithSignedUrls,
     };
   }
 
@@ -286,6 +372,10 @@ export class ReportsService {
       report.projectId = data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined;
     }
 
+    if (data.projectName !== undefined) {
+      report.projectName = data.projectName.trim() || undefined;
+    }
+
     if (data.fromDate !== undefined) {
       report.fromDate = new Date(data.fromDate);
     }
@@ -309,6 +399,74 @@ export class ReportsService {
     return saved;
   }
 
+  static async computeApproverChain(report: IExpenseReport): Promise<IApprover[]> {
+    const approvers: IApprover[] = [];
+    const reportUser = await User.findById(report.userId);
+    
+    if (!reportUser) {
+      throw new Error('Report owner not found');
+    }
+
+    // Level 1: Manager (if employee has a manager)
+    if (reportUser.managerId) {
+      const manager = await User.findById(reportUser.managerId);
+      if (manager && manager.status === 'ACTIVE') {
+        approvers.push({
+          level: 1,
+          userId: manager._id as mongoose.Types.ObjectId,
+          role: manager.role,
+        });
+      }
+    }
+
+    // Level 2: Business Head (if manager exists and has a business head, or if user is manager and has BH)
+    if (approvers.length > 0) {
+      const manager = await User.findById(approvers[0].userId);
+      if (manager && manager.managerId) {
+        const businessHead = await User.findById(manager.managerId);
+        if (businessHead && businessHead.status === 'ACTIVE' && 
+            (businessHead.role === UserRole.BUSINESS_HEAD || businessHead.role === UserRole.ADMIN)) {
+          approvers.push({
+            level: 2,
+            userId: businessHead._id as mongoose.Types.ObjectId,
+            role: businessHead.role,
+          });
+        }
+      }
+    } else {
+      // If no manager, check if user's manager is a business head
+      if (reportUser.managerId) {
+        const potentialBH = await User.findById(reportUser.managerId);
+        if (potentialBH && potentialBH.status === 'ACTIVE' && 
+            (potentialBH.role === UserRole.BUSINESS_HEAD || potentialBH.role === UserRole.ADMIN)) {
+          approvers.push({
+            level: 1,
+            userId: potentialBH._id as mongoose.Types.ObjectId,
+            role: potentialBH.role,
+          });
+        }
+      }
+    }
+
+    // If no approvers found, assign to ADMIN or COMPANY_ADMIN as fallback
+    if (approvers.length === 0) {
+      const admin = await User.findOne({
+        role: { $in: [UserRole.ADMIN, UserRole.COMPANY_ADMIN] },
+        status: 'ACTIVE',
+        companyId: reportUser.companyId,
+      });
+      if (admin) {
+        approvers.push({
+          level: 1,
+          userId: admin._id as mongoose.Types.ObjectId,
+          role: admin.role,
+        });
+      }
+    }
+
+    return approvers;
+  }
+
   static async submitReport(id: string, userId: string): Promise<IExpenseReport> {
     const report = await ExpenseReport.findById(id);
 
@@ -320,8 +478,27 @@ export class ReportsService {
       throw new Error('Access denied');
     }
 
-    if (report.status !== ExpenseReportStatus.DRAFT) {
-      throw new Error('Only draft reports can be submitted');
+    // Allow submitting if report is DRAFT or if it was SUBMITTED but has pending changes
+    // (in which case we allow resubmission after fixing expenses)
+    const canSubmit = 
+      report.status === ExpenseReportStatus.DRAFT || 
+      report.status === ExpenseReportStatus.SUBMITTED;
+
+    if (!canSubmit) {
+      throw new Error('Cannot submit this report in its current status');
+    }
+
+    // If report was previously SUBMITTED, check if there are any PENDING expenses
+    // If so, allow resubmission (this is a resubmission after fixing changes)
+    if (report.status === ExpenseReportStatus.SUBMITTED) {
+      const pendingExpensesCount = await Expense.countDocuments({ 
+        reportId: id, 
+        status: ExpenseStatus.PENDING 
+      });
+      
+      if (pendingExpensesCount > 0) {
+        throw new Error('Please update all expenses that need changes before resubmitting');
+      }
     }
 
     // Validate: must have at least one expense
@@ -330,9 +507,16 @@ export class ReportsService {
       throw new Error('Report must have at least one expense');
     }
 
+    // Compute approver chain
+    const approvers = await this.computeApproverChain(report);
+    if (approvers.length === 0) {
+      throw new Error('No approvers found for this report');
+    }
+
     report.status = ExpenseReportStatus.SUBMITTED;
     report.submittedAt = new Date();
     report.updatedBy = new mongoose.Types.ObjectId(userId);
+    report.approvers = approvers;
 
     const saved = await report.save();
 
@@ -341,11 +525,105 @@ export class ReportsService {
       'ExpenseReport',
       id,
       AuditAction.STATUS_CHANGE,
-      { status: ExpenseReportStatus.SUBMITTED }
+      { status: ExpenseReportStatus.SUBMITTED, approvers: approvers.map(a => ({ level: a.level, userId: a.userId.toString() })) }
     );
 
-    // Notify admins
+    // Notify approvers
     await NotificationService.notifyReportSubmitted(saved);
+
+    // Emit real-time events to managers
+    try {
+      // Get the user who submitted the report
+      const reportUser = await User.findById(report.userId).select('managerId').exec();
+      
+      if (reportUser && reportUser.managerId) {
+        // Emit to manager that a report was submitted
+        const populatedReport = await ExpenseReport.findById(saved._id)
+          .populate('userId', 'name email')
+          .populate('projectId', 'name code')
+          .exec();
+        
+        if (populatedReport) {
+          emitManagerReportUpdate(reportUser.managerId.toString(), 'submitted', populatedReport);
+          emitManagerDashboardUpdate(reportUser.managerId.toString());
+        }
+      }
+    } catch (error) {
+      logger.error({ error }, 'Error emitting manager real-time events');
+      // Don't fail report submission if real-time events fail
+    }
+
+    return saved;
+  }
+
+  static async handleReportAction(
+    id: string,
+    userId: string,
+    action: 'approve' | 'reject' | 'request_changes',
+    comment?: string
+  ): Promise<IExpenseReport> {
+    const report = await ExpenseReport.findById(id);
+
+    if (!report) {
+      throw new Error('Report not found');
+    }
+
+    // Check if user is an approver
+    const approverIndex = report.approvers.findIndex(
+      (a) => a.userId.toString() === userId && !a.decidedAt
+    );
+
+    if (approverIndex === -1) {
+      throw new Error('You are not authorized to approve/reject this report');
+    }
+
+    const approver = report.approvers[approverIndex];
+    const currentLevel = approver.level;
+
+    // Update approver record
+    approver.decidedAt = new Date();
+    approver.action = action;
+    approver.comment = comment;
+
+    // Handle action
+    if (action === 'reject') {
+      report.status = ExpenseReportStatus.REJECTED;
+      report.rejectedAt = new Date();
+    } else if (action === 'approve') {
+      // Check if this is the last approver
+      const totalLevels = Math.max(...report.approvers.map(a => a.level));
+      if (currentLevel >= totalLevels) {
+        // Final approval
+        report.status = ExpenseReportStatus.APPROVED;
+        report.approvedAt = new Date();
+      } else {
+        // Move to next level
+        if (currentLevel === 1) {
+          report.status = ExpenseReportStatus.MANAGER_APPROVED;
+        } else if (currentLevel === 2) {
+          report.status = ExpenseReportStatus.BH_APPROVED;
+        }
+      }
+    } else if (action === 'request_changes') {
+      // Revert to DRAFT for changes
+      report.status = ExpenseReportStatus.DRAFT;
+    }
+
+    report.updatedBy = new mongoose.Types.ObjectId(userId);
+    const saved = await report.save();
+
+    await AuditService.log(
+      userId,
+      'ExpenseReport',
+      id,
+      AuditAction.STATUS_CHANGE,
+      { action, comment, level: currentLevel, newStatus: saved.status }
+    );
+
+    // Notify report owner
+    if (saved.status === ExpenseReportStatus.APPROVED || saved.status === ExpenseReportStatus.REJECTED) {
+      await NotificationService.notifyReportStatusChanged(saved, saved.status);
+    }
 
     return saved;
   }
@@ -417,6 +695,39 @@ export class ReportsService {
 
     const saved = await report.save();
 
+    // If report is approved, approve all expenses in the report and emit real-time events
+    if (newStatus === ExpenseReportStatus.APPROVED) {
+      try {
+        const expenses = await Expense.find({ reportId: new mongoose.Types.ObjectId(id) }).exec();
+        const reportUserId = saved.userId.toString();
+        
+        // Update all expenses to APPROVED
+        await Expense.updateMany(
+          { reportId: new mongoose.Types.ObjectId(id) },
+          { 
+            $set: { 
+              status: ExpenseStatus.APPROVED 
+            } 
+          }
+        );
+        logger.info(`Approved all expenses for report ${id}`);
+
+        // Emit real-time events for each approved expense
+        try {
+          const { emitExpenseApprovedToEmployee } = await import('../socket/realtimeEvents');
+          for (const expense of expenses) {
+            const expenseObj = expense.toObject();
+            emitExpenseApprovedToEmployee(reportUserId, expenseObj);
+          }
+        } catch (error) {
+          logger.error({ error }, 'Error emitting expense approval events');
+        }
+      } catch (error) {
+        logger.error({ error, reportId: id }, 'Error approving expenses for report');
+        // Don't fail report approval if expense update fails
+      }
+    }
+
     await AuditService.log(
       adminUserId,
       'ExpenseReport',
@@ -424,6 +735,19 @@ export class ReportsService {
       AuditAction.STATUS_CHANGE,
       { status: newStatus }
     );
+
+    // Emit company admin dashboard update if report user has a company
+    try {
+      const reportUser = await User.findById(saved.userId).select('companyId').exec();
+      if (reportUser && reportUser.companyId) {
+        const companyId = reportUser.companyId.toString();
+        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+        emitCompanyAdminDashboardUpdate(companyId, stats);
+      }
+    } catch (error) {
+      // Don't fail report update if dashboard update fails
+      logger.error({ error }, 'Error emitting company admin dashboard update');
+    }
 
     // Notify employee
     await NotificationService.notifyReportStatusChanged(saved, newStatus);

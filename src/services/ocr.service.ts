@@ -1,12 +1,18 @@
+import { GetObjectCommand } from '@aws-sdk/client-s3';
+import mongoose from 'mongoose';
+
+import { s3Client, getS3Bucket } from '../config/aws';
+import { config } from '../config/index';
+import { togetherAIClient, getVisionModel } from '../config/openai';
+import { Expense } from '../models/Expense';
 import { OcrJob, IOcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
-import { Expense } from '../models/Expense';
 import { OcrJobStatus } from '../utils/enums';
-import { togetherAIClient, getVisionModel } from '../config/openai';
-import { s3Client, getS3Bucket } from '../config/aws';
-import { GetObjectCommand } from '@aws-sdk/client-s3';
-import { logger } from '../utils/logger';
-import mongoose from 'mongoose';
+
+
+import { logger } from '@/config/logger';
+
+
 
 export interface OcrResult {
   vendor?: string;
@@ -21,54 +27,55 @@ export interface OcrResult {
 }
 
 export class OcrService {
-  static async enqueueOcrJob(receiptId: string): Promise<IOcrJob> {
+  /**
+   * Process OCR synchronously (no queue) - simple implementation
+   */
+  static async processReceiptSync(receiptId: string): Promise<IOcrJob> {
     const receipt = await Receipt.findById(receiptId);
 
     if (!receipt) {
       throw new Error('Receipt not found');
     }
 
+    // Check if OCR is disabled
+    if (config.ocr.disableOcr) {
+      logger.info({ receiptId }, 'OCR is disabled, creating placeholder job');
+      const ocrJob = new OcrJob({
+        status: OcrJobStatus.COMPLETED,
+        provider: 'DISABLED',
+        receiptId,
+        result: { message: 'OCR disabled by configuration' },
+        attempts: 0,
+      });
+      const saved = await ocrJob.save();
+      receipt.ocrJobId = saved._id as mongoose.Types.ObjectId;
+      await receipt.save();
+      return saved;
+    }
+
+    // Create OCR job
     const ocrJob = new OcrJob({
-      status: OcrJobStatus.QUEUED,
+      status: OcrJobStatus.PROCESSING,
       provider: 'TOGETHER_AI',
       receiptId,
+      attempts: 0,
     });
 
     const saved = await ocrJob.save();
-
-    // Update receipt with OCR job ID
     receipt.ocrJobId = saved._id as mongoose.Types.ObjectId;
     await receipt.save();
 
-    // Process immediately (in production, use a queue)
-    logger.info('Starting OCR processing for receipt', { receiptId, jobId: saved._id });
-    this.processOcrJob((saved._id as mongoose.Types.ObjectId).toString())
-      .then(() => {
-        logger.info('OCR job completed successfully', { jobId: saved._id });
-      })
-      .catch(async (error: any) => {
-        logger.error('OCR job processing error:', {
-          jobId: saved._id,
-          receiptId,
-          error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-        });
-        
-        // Update job status to failed
-        try {
-          await OcrJob.findByIdAndUpdate(saved._id, {
-            status: OcrJobStatus.FAILED,
-            errorJson: {
-              message: error instanceof Error ? error.message : String(error),
-              timestamp: new Date().toISOString(),
-            },
-          });
-        } catch (updateError) {
-          logger.error('Failed to update OCR job status', { error: updateError });
-        }
-      });
-
-    return saved;
+    // Process immediately (synchronously)
+    try {
+      return await this.processOcrJob((saved._id as any).toString());
+    } catch (error: any) {
+      logger.error({
+        jobId: saved._id,
+        receiptId,
+        error: error.message,
+      }, 'OCR processing failed');
+      throw error;
+    }
   }
 
   static async processOcrJob(jobId: string): Promise<IOcrJob> {
@@ -82,64 +89,80 @@ export class OcrService {
     await job.save();
 
     try {
-      const receipt = job.receiptId as any;
+      const receiptPopulated = job.receiptId as any;
       
-      if (!receipt) {
+      if (!receiptPopulated) {
         throw new Error('Receipt not found for OCR job');
       }
 
-      logger.info('Downloading receipt from S3', {
+      logger.info({
         jobId,
-        receiptId: receipt._id,
-        storageKey: receipt.storageKey,
-        mimeType: receipt.mimeType,
-      });
+        receiptId: receiptPopulated._id,
+        storageKey: receiptPopulated.storageKey,
+        mimeType: receiptPopulated.mimeType,
+      }, 'Downloading receipt from S3');
 
       const bucket = getS3Bucket('receipts');
 
       // Download image from S3
       const command = new GetObjectCommand({
         Bucket: bucket,
-        Key: receipt.storageKey,
+        Key: receiptPopulated.storageKey,
       });
 
       const response = await s3Client.send(command);
       const imageBuffer = await this.streamToBuffer(response.Body as any);
 
-      logger.info('Receipt downloaded from S3', { 
+      logger.info({ 
         sizeBytes: imageBuffer.length,
         jobId,
-      });
+      }, 'Receipt downloaded from S3');
 
       // Convert to base64
       const base64Image = imageBuffer.toString('base64');
 
-      logger.info('Calling Together AI Vision API', {
+      logger.info({
         model: getVisionModel(),
         imageSize: base64Image.length,
-        mimeType: receipt.mimeType,
+        mimeType: receiptPopulated.mimeType,
         jobId,
-      });
+      }, 'Calling Together AI Vision API')
 
       // Call Together AI Vision API
-      const result = await this.callTogetherAIVision(base64Image, receipt.mimeType);
+      const result = await this.callTogetherAIVision(base64Image, receiptPopulated.mimeType);
       
-      logger.info('Together AI Vision API call successful', {
+      logger.info({
         extractedFields: Object.keys(result),
         hasVendor: !!result.vendor,
         hasAmount: !!result.totalAmount,
         hasDate: !!result.date,
         jobId,
-      });
+      }, 'Together AI Vision API call successful')
 
-      // Save result
+      // Save result to both result and resultJson for compatibility
       job.status = OcrJobStatus.COMPLETED;
+      job.result = result;
       job.resultJson = result;
       job.completedAt = new Date();
       await job.save();
 
+      // Update receipt with parsedData
+      const receiptDoc = await Receipt.findById(job.receiptId);
+      if (receiptDoc) {
+        receiptDoc.parsedData = result;
+        await receiptDoc.save();
+        logger.info({ receiptId: receiptDoc._id }, 'Receipt updated with parsed data');
+      }
+
       // Auto-fill expense fields if expense exists and report is still DRAFT
-      const expense = await Expense.findOne({ receiptPrimaryId: receipt._id })
+      // Try to find expense by receiptPrimaryId or by receiptIds array
+      const receiptIdForSearch = receiptDoc?._id || receiptPopulated?._id;
+      const expense = await Expense.findOne({
+        $or: [
+          { receiptPrimaryId: receiptIdForSearch },
+          { receiptIds: receiptIdForSearch }
+        ]
+      })
         .populate('reportId');
       
       if (expense) {
@@ -213,21 +236,23 @@ export class OcrService {
         }
       }
 
-      logger.info('OCR job completed and expense updated', { jobId });
+      logger.info({ jobId }, 'OCR job completed and expense updated');
       return job;
     } catch (error: any) {
-      logger.error('OCR processing error:', {
+      logger.error({
         jobId,
         error: error.message,
         stack: error.stack,
         name: error.name,
-      });
+      }, 'OCR processing error');
       job.status = OcrJobStatus.FAILED;
+      job.error = error.message;
       job.errorJson = {
         message: error.message,
         stack: error.stack,
         name: error.name,
       };
+      job.attempts = (job.attempts || 0) + 1;
       await job.save();
       throw error;
     }
@@ -274,15 +299,15 @@ Example format:
 }`;
 
     try {
-      logger.info('Preparing Together AI API request', {
+      logger.info({
         model,
         imageSize: base64Image.length,
         mimeType,
-      });
+      }, 'Preparing Together AI API request')
 
       // Together AI vision API format
       const response = await togetherAIClient.chat.completions.create({
-        model: model,
+        model,
         messages: [
           {
             role: 'user',
@@ -306,11 +331,11 @@ Example format:
         temperature: 0.1, // Lower temperature for more consistent results
       });
 
-      logger.info('Together AI API call successful', {
+      logger.info({
         model,
         usage: response.usage,
         finishReason: response.choices[0]?.finish_reason,
-      });
+      }, 'Together AI API call successful')
 
       const content = response.choices[0]?.message?.content;
       if (!content) {
@@ -332,7 +357,7 @@ Example format:
         result.confidence = 0.85; // Default confidence, could be calculated
         
         // Log successful extraction
-        logger.info('OCR extraction successful', {
+        logger.info({
           vendor: result.vendor,
           totalAmount: result.totalAmount,
           date: result.date,
@@ -340,33 +365,33 @@ Example format:
           categorySuggestion: result.categorySuggestion,
           hasLineItems: !!(result.lineItems && result.lineItems.length > 0),
           lineItemsCount: result.lineItems?.length || 0,
-        });
+        }, 'OCR extraction successful')
         
         // Validate that we got at least some data
         if (!result.vendor && !result.totalAmount && !result.date) {
-          logger.warn('OCR extraction returned minimal data', result);
+          logger.warn({ result }, 'OCR extraction returned minimal data');
         }
         
         return result;
       } catch (error) {
         // If not JSON, try to extract structured data
-        logger.warn('Together AI response not in JSON format, attempting to parse:', {
+        logger.warn({
           content: cleanedContent.substring(0, 200), // Log first 200 chars
           error: error instanceof Error ? error.message : String(error),
-        });
+        }, 'Together AI response not in JSON format, attempting to parse:')
         const parsed = this.parseUnstructuredResponse(cleanedContent);
-        logger.info('Parsed unstructured response', parsed);
+        logger.info({ parsed }, 'Parsed unstructured response');
         return parsed;
       }
     } catch (error: any) {
-      logger.error('Together AI API call failed', {
+      logger.error({
         error: error.message,
         name: error.name,
         status: error.status,
         code: error.code,
         model,
         stack: error.stack,
-      });
+      }, 'Together AI API call failed')
       
       // Provide more helpful error messages
       if (error.message?.includes('non-serverless') || error.message?.includes('dedicated endpoint')) {
@@ -432,10 +457,10 @@ Example format:
     // Fallback parser for non-JSON responses
     const result: OcrResult = {};
     
-    logger.warn('Attempting to parse unstructured OCR response', {
+    logger.warn({
       contentLength: content.length,
       preview: content.substring(0, 200),
-    });
+    }, 'Attempting to parse unstructured OCR response')
 
     // Try to extract vendor - multiple patterns
     const vendorPatterns = [
@@ -506,11 +531,11 @@ Example format:
       result.categorySuggestion = categoryMatch[1].trim();
     }
 
-    logger.info('Parsed unstructured response', {
+    logger.info({
       extractedFields: Object.keys(result),
       hasVendor: !!result.vendor,
       hasAmount: !!result.totalAmount,
-    });
+    }, 'Parsed unstructured response')
 
     return result;
   }

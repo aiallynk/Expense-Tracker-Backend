@@ -1,6 +1,8 @@
 import * as admin from 'firebase-admin';
+
+import { logger } from './logger';
+
 import { config } from './index';
-import { logger } from '../utils/logger';
 
 let firebaseAdmin: admin.app.App | null = null;
 
@@ -32,7 +34,7 @@ export const initializeFirebase = (): void => {
       credential: admin.credential.cert({
         projectId: config.firebase.projectId,
         clientEmail: config.firebase.clientEmail,
-        privateKey: privateKey,
+        privateKey,
       }),
       databaseURL: config.firebase.databaseUrl,
     });

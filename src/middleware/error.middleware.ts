@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
-import { logger } from '../utils/logger';
 import mongoose from 'mongoose';
+
+import { logger } from '@/config/logger';
 
 export interface AppError extends Error {
   statusCode?: number;
@@ -13,12 +14,22 @@ export const errorMiddleware = (
   res: Response,
   _next: NextFunction
 ): void => {
-  logger.error('Error:', {
-    message: err.message,
-    stack: err.stack,
-    url: req.url,
-    method: req.method,
-  });
+  const requestId = (req as any).requestId;
+  const requestLogger = requestId ? (req as any).logger : logger;
+
+  // Log error with request context
+  requestLogger.error(
+    {
+      error: err.message,
+      stack: err.stack,
+      url: req.url,
+      method: req.method,
+      statusCode: err.statusCode || 500,
+      code: err.code,
+      requestId,
+    },
+    'Request error'
+  );
 
   // Mongoose validation error
   if (err instanceof mongoose.Error.ValidationError) {

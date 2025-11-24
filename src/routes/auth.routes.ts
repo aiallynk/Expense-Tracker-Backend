@@ -1,9 +1,10 @@
 import { Router } from 'express';
+import { z } from 'zod';
+
 import { AuthController } from '../controllers/auth.controller';
 import { loginRateLimiter } from '../middleware/rateLimit.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { loginSchema, refreshTokenSchema } from '../utils/dtoTypes';
-import { z } from 'zod';
 import { UserRole } from '../utils/enums';
 
 const router = Router();

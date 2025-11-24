@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import { OcrController } from '../controllers/ocr.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { ocrRateLimiter } from '../middleware/rateLimit.middleware';

@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import { ReceiptsController } from '../controllers/receipts.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { receiptUploadRateLimiter } from '../middleware/rateLimit.middleware';

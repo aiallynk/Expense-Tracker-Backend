@@ -1,37 +1,44 @@
 import { Response } from 'express';
-import { ReportsService } from '../services/reports.service';
-import { asyncHandler } from '../middleware/error.middleware';
+
 import { AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { ReportsService } from '../services/reports.service';
 import {
   createReportSchema,
   updateReportSchema,
   reportFiltersSchema,
+  reportActionSchema,
 } from '../utils/dtoTypes';
-import { logger } from '../utils/logger';
+
+import { logger } from '@/config/logger';
 // import { ExpenseReportStatus } from '../utils/enums'; // Unused
 
 export class ReportsController {
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
-    logger.info('POST /api/v1/reports - Creating new report');
-    logger.debug('Request body:', JSON.stringify(req.body, null, 2));
-    logger.debug('User ID:', req.user!.id);
-    logger.debug('User email:', req.user!.email);
+    logger.info({ userId: req.user!.id, userEmail: req.user!.email }, 'POST /api/v1/reports - Creating new report');
+    logger.debug({ body: req.body }, 'Request body');
 
     const data = createReportSchema.parse(req.body);
-    logger.info('Validation passed. Report data:', {
-      name: data.name,
-      projectId: data.projectId || 'none',
-      fromDate: data.fromDate,
-      toDate: data.toDate,
-      notes: data.notes || 'none',
-    });
+    logger.info(
+      {
+        name: data.name,
+        projectId: data.projectId || 'none',
+        fromDate: data.fromDate,
+        toDate: data.toDate,
+        notes: data.notes || 'none',
+      },
+      'Validation passed. Report data'
+    );
 
     const report = await ReportsService.createReport(req.user!.id, data);
-    logger.info('Report created successfully:', {
-      reportId: report._id,
-      name: report.name,
-      status: report.status,
-    });
+    logger.info(
+      {
+        reportId: (report._id as any).toString(),
+        name: report.name,
+        status: report.status,
+      },
+      'Report created successfully'
+    );
 
     res.status(201).json({
       success: true,
@@ -90,8 +97,30 @@ export class ReportsController {
 
     res.status(200).json({
       success: true,
-      data: report,
-      message: 'Report submitted successfully',
+      data: {
+        reportId: (report._id as any).toString(),
+        status: report.status,
+        approvers: report.approvers,
+      },
+    });
+  });
+
+  static action = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const data = reportActionSchema.parse(req.body);
+    const report = await ReportsService.handleReportAction(
+      req.params.id,
+      req.user!.id,
+      data.action,
+      data.comment
+    );
+
+    res.status(200).json({
+      success: true,
+      data: {
+        reportId: (report._id as any).toString(),
+        status: report.status,
+        approvers: report.approvers,
+      },
     });
   });
 }

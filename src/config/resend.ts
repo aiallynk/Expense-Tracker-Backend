@@ -1,4 +1,7 @@
 import { Resend } from 'resend';
+
+import { logger } from './logger';
+
 import { config } from './index';
 
 let resendClient: Resend | null = null;
@@ -8,7 +11,7 @@ export const getResendClient = (): Resend | null => {
     try {
       resendClient = new Resend(config.resend.apiKey);
     } catch (error) {
-      console.warn('Resend not initialized - email notifications will be disabled');
+      logger.warn({ error }, 'Resend not initialized - email notifications will be disabled');
       return null;
     }
   }

@@ -1,144 +1,259 @@
-import { createApp } from './app';
-import { connectDB } from './config/db';
-import { initializeFirebase } from './config/firebase';
-import { config } from './config/index';
-import { logger } from './utils/logger';
-import { createServer } from 'http';
-import express from 'express';
+import { createServer, Server } from 'http';
 import os from 'os';
 
-const startServer = async (): Promise<void> => {
-  try {
-    // Get port FIRST - prioritize process.env.PORT for Render compatibility
-    // Render requires this to be set from process.env.PORT
-    const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : config.app.port;
-    
-    // Log port for debugging (Render shows console output)
-    console.log(`Starting server on port ${PORT}`);
-    console.log(`PORT env var: ${process.env.PORT}`);
-    console.log(`Config port: ${config.app.port}`);
-    console.log(`Node version: ${process.version}`);
-    console.log(`Memory: ${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB used`);
+import express from 'express';
 
-    // Create Express app - wrap in try-catch to ensure server starts even if app creation fails
-    let app;
+import { createApp } from './app';
+import { connectDB, disconnectDB } from './config/db';
+import { initializeFirebase } from './config/firebase';
+import { config } from './config/index';
+import { redisConnection , ocrQueue } from './config/queue';
+import { CompanyAdminDashboardService } from './services/companyAdminDashboard.service';
+import { SystemAnalyticsService } from './services/systemAnalytics.service';
+import { initializeSocketServer } from './socket/socketServer';
+
+import { logger } from '@/config/logger';
+
+
+
+// Store server reference for graceful shutdown
+let httpServer: Server | null = null;
+
+/**
+ * Graceful shutdown handler
+ * Closes all connections: HTTP server, MongoDB, Redis, BullMQ
+ */
+const gracefulShutdown = async (signal: string): Promise<void> => {
+  logger.info({ signal }, 'Graceful shutdown initiated');
+
+  // Stop accepting new connections
+  if (httpServer) {
+    httpServer.close(() => {
+      logger.info('HTTP server closed');
+    });
+  }
+
+  // Close MongoDB connection
+  try {
+    await disconnectDB();
+    logger.info('MongoDB disconnected');
+  } catch (error) {
+    logger.error({ error }, 'Error disconnecting from MongoDB');
+  }
+
+  // Close BullMQ queue
+  try {
+    if (ocrQueue) {
+      await ocrQueue.close();
+      logger.info('BullMQ queue closed');
+    }
+  } catch (error) {
+    logger.error({ error }, 'Error closing BullMQ queue');
+  }
+
+  // Close Redis connection
+  try {
+    if (redisConnection) {
+      await redisConnection.quit();
+      logger.info('Redis connection closed');
+    }
+  } catch (error) {
+    logger.error({ error }, 'Error closing Redis connection');
+  }
+
+  // Give connections time to close (max 10 seconds)
+  setTimeout(() => {
+    logger.info('Graceful shutdown complete');
+    process.exit(0);
+  }, 10000);
+};
+
+const startServer = async (): Promise<Server> => {
+  try {
+    // Render-friendly port binding: PORT (Render) || APP_PORT || 4000
+    const PORT = process.env.PORT
+      ? parseInt(process.env.PORT, 10)
+      : process.env.APP_PORT
+      ? parseInt(process.env.APP_PORT, 10)
+      : 4000;
+
+    logger.info(
+      {
+        port: PORT,
+        env: config.app.env,
+        nodeVersion: process.version,
+        memoryMB: Math.round(process.memoryUsage().heapUsed / 1024 / 1024),
+      },
+      'Starting server'
+    );
+
+    // Create Express app
+    let app: express.Express;
     try {
-      console.log('Creating Express application...');
       app = createApp();
-      console.log('Express application created successfully');
+      logger.info('Express application created successfully');
     } catch (error) {
-      console.error('Error creating app:', error);
+      logger.error({ error }, 'Error creating app');
       // Create minimal app if createApp fails
       app = express();
       app.get('/health', (_req: any, res: any) => {
         res.json({ status: 'error', message: 'App initialization failed' });
       });
+      app.get('/healthz', (_req: any, res: any) => {
+        res.json({ status: 'error', message: 'App initialization failed' });
+      });
     }
 
-    // Create HTTP server and listen on the specified port IMMEDIATELY
-    // This must happen synchronously for Render to detect the port
-    const server = createServer(app);
-    
-    // Start listening immediately - this is critical for Render port detection
-    server.listen(PORT, '0.0.0.0', () => {
-      // Store server reference for graceful shutdown
-      (global as any).httpServer = server;
-      
-      // Use console.log for Render visibility
-      console.log(`Server running on port ${PORT}`);
-      logger.info(`Server running on port ${PORT}`);
-      
-      // Additional info for development only
-      if (config.app.env === 'development') {
-        logger.info(`Environment: ${config.app.env}`);
-        logger.info(`API available at http://localhost:${PORT}/api/v1`);
-        logger.info(`For Android emulator, use: http://10.0.2.2:${PORT}/api/v1`);
-        
-        // Get network IP addresses
-        const networkInterfaces = os.networkInterfaces();
-        const addresses: string[] = [];
-        
-        Object.keys(networkInterfaces).forEach((interfaceName) => {
-          const interfaces = networkInterfaces[interfaceName];
-          if (interfaces) {
-            interfaces.forEach((iface: any) => {
-              if (iface.family === 'IPv4' && !iface.internal) {
-                addresses.push(iface.address);
-              }
+    // Create HTTP server
+    httpServer = createServer(app);
+
+    // Initialize Socket.IO server
+    initializeSocketServer(httpServer);
+
+    // Start listening - critical for Render port detection
+    return new Promise((resolve, reject) => {
+      httpServer!.listen(PORT, '0.0.0.0', () => {
+        logger.info({ port: PORT }, 'Server listening');
+
+        // Development-only network info
+        if (config.app.env === 'development') {
+          logger.info({ apiUrl: `http://localhost:${PORT}/api/v1` }, 'API endpoint');
+          logger.info({ apiUrl: `http://10.0.2.2:${PORT}/api/v1` }, 'Android emulator endpoint');
+
+          // Get network IP addresses
+          const networkInterfaces = os.networkInterfaces();
+          const addresses: string[] = [];
+
+          Object.keys(networkInterfaces).forEach((interfaceName) => {
+            const interfaces = networkInterfaces[interfaceName];
+            if (interfaces) {
+              interfaces.forEach((iface: any) => {
+                if (iface.family === 'IPv4' && !iface.internal) {
+                  addresses.push(iface.address);
+                }
+              });
+            }
+          });
+
+          if (addresses.length > 0) {
+            addresses.forEach((addr) => {
+              logger.info({ apiUrl: `http://${addr}:${PORT}/api/v1` }, 'Physical device endpoint');
             });
           }
-        });
-        
-        if (addresses.length > 0) {
-          logger.info(`For physical devices, use one of these IPs:`);
-          addresses.forEach((addr) => {
-            logger.info(`  http://${addr}:${PORT}/api/v1`);
-          });
         }
-      }
-    });
 
-    server.on('error', (error: any) => {
-      console.error(`Server error on port ${PORT}:`, error);
-      if (error.code === 'EADDRINUSE') {
-        logger.error(`Port ${PORT} is already in use`);
-        process.exit(1);
-      } else {
-        logger.error('Failed to start server:', error);
-        process.exit(1);
-      }
-    });
-
-    // Initialize services AFTER server is listening (non-blocking)
-    // This ensures Render detects the port even if these fail
-    try {
-      // Try to connect to MongoDB (non-blocking)
-      connectDB().catch((err) => {
-        console.warn('MongoDB connection failed, will retry:', err);
-        logger.warn('MongoDB connection will be retried in background');
+        resolve(httpServer!);
       });
 
-      // Initialize Firebase Admin (optional)
-      try {
-        initializeFirebase();
-      } catch (err) {
-        console.warn('Firebase initialization failed:', err);
-        logger.warn('Firebase initialization failed, continuing without it');
-      }
-    } catch (error) {
-      console.warn('Error initializing services:', error);
-      // Don't exit - server is already listening
-    }
+      httpServer!.on('error', (error: any) => {
+        logger.error({ error, port: PORT }, 'Server error');
+        if (error.code === 'EADDRINUSE') {
+          logger.fatal({ port: PORT }, 'Port already in use');
+        }
+        reject(error);
+      });
+    });
   } catch (error) {
-    console.error('Critical error starting server:', error);
-    logger.error('Failed to start server:', error);
-    process.exit(1);
+    logger.fatal({ error }, 'Failed to start server');
+    throw error;
+  }
+};
+
+// Initialize services (non-blocking)
+const initializeServices = async (): Promise<void> => {
+  try {
+    // Connect to MongoDB (non-blocking, will retry in background)
+    connectDB().catch((err) => {
+      logger.warn({ error: err }, 'MongoDB connection failed, will retry in background');
+    });
+
+    // Initialize Firebase Admin (optional)
+    try {
+      initializeFirebase();
+      logger.info('Firebase initialized');
+    } catch (err) {
+      logger.warn({ error: err }, 'Firebase initialization failed, continuing without it');
+    }
+
+    // Start periodic system analytics updates (every 30 seconds)
+    setInterval(() => {
+      SystemAnalyticsService.collectAndEmitAnalytics().catch((err) => {
+        logger.error({ error: err }, 'Error in periodic analytics update');
+      });
+    }, 30000);
+
+    // Start periodic dashboard analytics updates (every 30 seconds)
+    setInterval(() => {
+      SystemAnalyticsService.collectAndEmitDashboardAnalytics().catch((err) => {
+        logger.error({ error: err }, 'Error in periodic dashboard analytics update');
+      });
+    }, 30000);
+
+    // Start periodic company admin dashboard updates (every 30 seconds)
+    setInterval(() => {
+      CompanyAdminDashboardService.collectAndEmitDashboardStats().catch((err) => {
+        logger.error({ error: err }, 'Error in periodic company admin dashboard update');
+      });
+    }, 30000);
+
+    logger.info('Periodic analytics services started');
+  } catch (error) {
+    logger.warn({ error }, 'Error initializing services');
+    // Don't exit - server is already listening
   }
 };
 
 // Handle unhandled promise rejections
 process.on('unhandledRejection', (error: Error) => {
-  logger.error('Unhandled promise rejection:', error);
-  process.exit(1);
+  // Suppress Redis connection errors in development mode
+  if (config.app.env === 'development') {
+    const errorCode = (error as any).code;
+    const errorMessage = error.message || String(error);
+    const errorName = error.name || '';
+    
+    // Check if it's a Redis connection error (AggregateError with ECONNREFUSED)
+    if (
+      errorName === 'AggregateError' ||
+      errorCode === 'ECONNREFUSED' ||
+      errorMessage.includes('ECONNREFUSED') ||
+      errorMessage.includes('Redis') ||
+      (error as any).errors?.some?.((e: any) => e?.code === 'ECONNREFUSED' || e?.syscall === 'connect')
+    ) {
+      // Silently ignore Redis connection errors in development
+      return;
+    }
+  }
+  
+  logger.error({ error }, 'Unhandled promise rejection');
+  // In production, we might want to exit, but for now just log
+  if (config.app.env === 'production') {
+    process.exit(1);
+  }
 });
 
 // Handle uncaught exceptions
 process.on('uncaughtException', (error: Error) => {
-  logger.error('Uncaught exception:', error);
+  logger.fatal({ error }, 'Uncaught exception');
   process.exit(1);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-  logger.info('SIGTERM received, shutting down gracefully');
-  process.exit(0);
-});
-
-process.on('SIGINT', () => {
-  logger.info('SIGINT received, shutting down gracefully');
-  process.exit(0);
-});
+// Graceful shutdown handlers
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 // Start the server
-startServer();
+startServer()
+  .then(async (server) => {
+    // Store server reference globally for graceful shutdown
+    (global as any).httpServer = server;
+    logger.info('Server started successfully');
+    // Initialize services after server is listening
+    await initializeServices();
+  })
+  .catch((error) => {
+    logger.fatal({ error }, 'Failed to start server');
+    process.exit(1);
+  });
 
+// Export server for testing
+export { httpServer };

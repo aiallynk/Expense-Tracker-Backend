@@ -1,4 +1,5 @@
 import rateLimit from 'express-rate-limit';
+
 import { config } from '../config/index';
 
 // Login rate limiter - prevent brute force attacks

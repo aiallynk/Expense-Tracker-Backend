@@ -1,26 +1,40 @@
-import express, { Express } from 'express';
 import cors from 'cors';
+import express, { Express } from 'express';
 import helmet from 'helmet';
 import mongoose from 'mongoose';
+
 import { config } from './config/index';
+import { redisConnection } from './config/queue';
+import { apiLoggerMiddleware } from './middleware/apiLogger.middleware';
 import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
-// import { logger } from './utils/logger'; // Unused for now
+import { requestIdMiddleware } from './middleware/requestId.middleware';
 
 // Routes
+import adminRoutes from './routes/admin.routes';
 import authRoutes from './routes/auth.routes';
-import usersRoutes from './routes/users.routes';
-import projectsRoutes from './routes/projects.routes';
+import businessHeadRoutes from './routes/businessHead.routes';
 import categoriesRoutes from './routes/categories.routes';
-import reportsRoutes from './routes/reports.routes';
 import expensesRoutes from './routes/expenses.routes';
 import receiptsRoutes from './routes/receipts.routes';
 import ocrRoutes from './routes/ocr.routes';
-import adminRoutes from './routes/admin.routes';
+import superAdminRoutes from './routes/superAdmin.routes';
+import companyAdminRoutes from './routes/companyAdmin.routes';
+import companySettingsRoutes from './routes/companySettings.routes';
+import departmentsRoutes from './routes/departments.routes';
 import notificationsRoutes from './routes/notifications.routes';
+import managerRoutes from './routes/manager.routes';
+import projectsRoutes from './routes/projects.routes';
+import reportsRoutes from './routes/reports.routes';
+import usersRoutes from './routes/users.routes';
+
+import { logger } from '@/config/logger';
 
 export const createApp = (): Express => {
   const app = express();
+
+  // Request ID middleware (must be first to add requestId to all requests)
+  app.use(requestIdMiddleware);
 
   // Security middleware
   if (config.app.env === 'development') {
@@ -32,8 +46,10 @@ export const createApp = (): Express => {
       })
     );
   } else {
+    // Production security
     app.use(helmet());
   }
+
   // CORS configuration
   if (config.app.env === 'development') {
     // In development, allow all origins for easier testing
@@ -42,20 +58,37 @@ export const createApp = (): Express => {
         origin: true, // Allow all origins in development
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
       })
     );
   } else {
     // In production, use specific origins
+    const allowedOrigins = [
+      config.app.frontendUrlApp,
+      config.app.frontendUrlAdmin,
+    ].filter(Boolean); // Remove undefined values
+
+    if (allowedOrigins.length === 0) {
+      logger.warn('No frontend URLs configured for CORS in production');
+    }
+
     app.use(
       cors({
-        origin: [
-          config.app.frontendUrlApp,
-          config.app.frontendUrlAdmin,
-        ],
+        origin: (origin, callback) => {
+          // Allow requests with no origin (mobile apps, Postman, etc.)
+          if (!origin) {
+            return callback(null, true);
+          }
+          if (allowedOrigins.includes(origin)) {
+            callback(null, true);
+          } else {
+            logger.warn({ origin }, 'CORS blocked origin');
+            callback(new Error('Not allowed by CORS'));
+          }
+        },
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
       })
     );
   }
@@ -67,10 +100,13 @@ export const createApp = (): Express => {
   // Rate limiting
   app.use('/api/v1', apiRateLimiter);
 
-  // Health check
+  // API request logging (for analytics) - after rate limiting but before routes
+  app.use('/api/v1', apiLoggerMiddleware);
+
+  // Health check endpoint (legacy)
   app.get('/health', (_req, res) => {
     const isDbConnected = mongoose.connection.readyState === 1;
-    
+
     res.status(200).json({
       success: true,
       message: 'Server is healthy',
@@ -78,6 +114,48 @@ export const createApp = (): Express => {
       database: {
         connected: isDbConnected,
         status: isDbConnected ? 'connected' : 'disconnected',
+      },
+    });
+  });
+
+  // Health check endpoint with DB and Redis status (Render-compatible)
+  app.get('/healthz', async (_req, res) => {
+    const isDbConnected = mongoose.connection.readyState === 1;
+    let isRedisConnected = false;
+    let redisRequired = false;
+
+    try {
+      // Check Redis connection (if available)
+      // Redis is optional - only needed for OCR queue/worker
+      if (redisConnection) {
+        redisRequired = true;
+        const redisStatus = await redisConnection.ping();
+        isRedisConnected = redisStatus === 'PONG';
+      } else {
+        // Redis not initialized - not required for sync OCR processing
+        isRedisConnected = false;
+        redisRequired = false;
+      }
+    } catch (error) {
+      logger.debug({ error }, 'Redis health check failed');
+      isRedisConnected = false;
+    }
+
+    // Server is healthy if DB is connected
+    // Redis is optional (only needed for OCR queue/worker)
+    const isHealthy = isDbConnected;
+
+    res.status(isHealthy ? 200 : 503).json({
+      success: isHealthy,
+      message: isHealthy ? 'Server is healthy' : 'Server is unhealthy',
+      timestamp: new Date().toISOString(),
+      database: {
+        connected: isDbConnected,
+        status: isDbConnected ? 'connected' : 'disconnected',
+      },
+      redis: {
+        connected: isRedisConnected,
+        status: isRedisConnected ? 'connected' : 'disconnected',
       },
     });
   });
@@ -92,7 +170,17 @@ export const createApp = (): Express => {
   app.use('/api/v1', receiptsRoutes);
   app.use('/api/v1/ocr', ocrRoutes);
   app.use('/api/v1/admin', adminRoutes);
+  app.use('/api/v1/super-admin', superAdminRoutes);
+  app.use('/api/v1/companies', companyAdminRoutes);
+  app.use('/api/v1/company-admin', companySettingsRoutes);
+  app.use('/api/v1/departments', departmentsRoutes);
   app.use('/api/v1/notifications', notificationsRoutes);
+
+  // Manager routes
+  app.use('/api/v1/manager', managerRoutes);
+
+  // Business Head routes
+  app.use('/api/v1/business-head', businessHeadRoutes);
 
   // 404 handler
   app.use((_req, res) => {
@@ -108,4 +196,3 @@ export const createApp = (): Express => {
 
   return app;
 };
-

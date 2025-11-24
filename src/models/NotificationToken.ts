@@ -1,10 +1,12 @@
 import mongoose, { Document, Schema } from 'mongoose';
+
 import { NotificationPlatform } from '../utils/enums';
 
 export interface INotificationToken extends Document {
   userId: mongoose.Types.ObjectId;
-  fcmToken: string;
+  token: string;
   platform: NotificationPlatform;
+  fcmToken?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -16,7 +18,7 @@ const notificationTokenSchema = new Schema<INotificationToken>(
       ref: 'User',
       required: true,
     },
-    fcmToken: {
+    token: {
       type: String,
       required: true,
     },
@@ -24,6 +26,9 @@ const notificationTokenSchema = new Schema<INotificationToken>(
       type: String,
       enum: Object.values(NotificationPlatform),
       required: true,
+    },
+    fcmToken: {
+      type: String,
     },
   },
   {
@@ -33,7 +38,8 @@ const notificationTokenSchema = new Schema<INotificationToken>(
 
 // Indexes
 notificationTokenSchema.index({ userId: 1 });
-notificationTokenSchema.index({ fcmToken: 1 }, { unique: true });
+notificationTokenSchema.index({ token: 1 }, { unique: true });
+notificationTokenSchema.index({ fcmToken: 1 }, { unique: true, sparse: true });
 notificationTokenSchema.index({ userId: 1, platform: 1 });
 
 export const NotificationToken = mongoose.model<INotificationToken>(

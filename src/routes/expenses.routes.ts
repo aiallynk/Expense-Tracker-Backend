@@ -1,9 +1,9 @@
 import { Router } from 'express';
+
 import { ExpensesController } from '../controllers/expenses.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
 import {
-  createExpenseSchema,
   updateExpenseSchema,
 } from '../utils/dtoTypes';
 
@@ -12,11 +12,7 @@ const router = Router();
 // All routes require authentication
 router.use(authMiddleware);
 
-router.post(
-  '/reports/:reportId/expenses',
-  validate(createExpenseSchema),
-  ExpensesController.create
-);
+// Note: POST /reports/:reportId/expenses is now in reports.routes.ts
 router.get('/expenses', ExpensesController.getAll);
 router.get('/expenses/:id', ExpensesController.getById);
 router.patch(

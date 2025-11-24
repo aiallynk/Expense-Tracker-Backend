@@ -1,12 +1,14 @@
+import mongoose from 'mongoose';
+
+import { getMessaging } from '../config/firebase';
+import { getResendClient, getFromEmail } from '../config/resend';
 import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused
-import { getMessaging } from '../config/firebase';
-import { getResendClient, getFromEmail } from '../config/resend';
-import { NotificationPlatform } from '../utils/enums';
-import { ExpenseReportStatus } from '../utils/enums';
-import { logger } from '../utils/logger';
-import mongoose from 'mongoose';
+import { NotificationPlatform , ExpenseReportStatus } from '../utils/enums';
+
+import { logger } from '@/config/logger';
+
 
 export class NotificationService {
   static async registerFcmToken(
@@ -59,12 +61,12 @@ export class NotificationService {
           body: payload.body,
         },
         data: payload.data || {},
-        tokens: fcmTokens,
+        tokens: fcmTokens.filter((t): t is string => t !== undefined),
       };
 
       await messaging.sendEachForMulticast(message);
     } catch (error) {
-      logger.error('Error sending push notification:', error);
+      logger.error({ error }, 'Error sending push notification');
       // Don't throw - notifications are non-critical
     }
   }
@@ -207,7 +209,7 @@ export class NotificationService {
         html,
       });
     } catch (error) {
-      logger.error('Error sending email:', error);
+      logger.error({ error }, 'Error sending email');
       // Don't throw - emails are non-critical
     }
   }

@@ -1,7 +1,8 @@
 import { Response } from 'express';
-import { ProjectsService } from '../services/projects.service';
-import { asyncHandler } from '../middleware/error.middleware';
+
 import { AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { ProjectsService } from '../services/projects.service';
 import {
   createProjectSchema,
   updateProjectSchema,

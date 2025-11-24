@@ -1,9 +1,9 @@
 import { Router } from 'express';
-import { NotificationService } from '../services/notification.service';
-import { authMiddleware } from '../middleware/auth.middleware';
-import { asyncHandler } from '../middleware/error.middleware';
-import { AuthRequest } from '../middleware/auth.middleware';
 import { z } from 'zod';
+
+import { authMiddleware , AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { NotificationService } from '../services/notification.service';
 import { NotificationPlatform } from '../utils/enums';
 
 const router = Router();

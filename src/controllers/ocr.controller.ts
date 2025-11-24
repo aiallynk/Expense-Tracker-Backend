@@ -1,7 +1,8 @@
 import { Response } from 'express';
-import { OcrService } from '../services/ocr.service';
-import { asyncHandler } from '../middleware/error.middleware';
+
 import { AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { OcrService } from '../services/ocr.service';
 
 export class OcrController {
   static getJobStatus = asyncHandler(async (req: AuthRequest, res: Response) => {

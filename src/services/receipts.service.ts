@@ -1,13 +1,19 @@
-import { Receipt, IReceipt } from '../models/Receipt';
+import { randomUUID } from 'crypto';
+
+import mongoose from 'mongoose';
+
 import { Expense } from '../models/Expense';
+import { Receipt, IReceipt } from '../models/Receipt';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused - accessed via populate
 import { UploadIntentDto } from '../utils/dtoTypes';
 import { getPresignedUploadUrl, getObjectUrl, getPresignedDownloadUrl } from '../utils/s3';
-import mongoose from 'mongoose';
-import { randomUUID } from 'crypto';
+
+
+
 import { OcrService } from './ocr.service';
-import { logger } from '../utils/logger';
+
+import { logger } from '@/config/logger';
 
 export class ReceiptsService {
   static async createUploadIntent(
@@ -29,6 +35,16 @@ export class ReceiptsService {
 
     // Generate storage key (bucket is assumed to exist)
     const storageKey = `receipts/${expenseId}/${randomUUID()}-${Date.now()}`;
+    
+    logger.info({
+      expenseId,
+      userId,
+      filename: data.filename,
+      mimeType: data.mimeType,
+      sizeBytes: data.sizeBytes,
+      storageKey,
+    }, 'Creating upload intent')
+    
     const uploadUrl = await getPresignedUploadUrl({
       bucketType: 'receipts',
       key: storageKey,
@@ -43,16 +59,30 @@ export class ReceiptsService {
       storageKey,
       storageUrl,
       mimeType: data.mimeType,
-      sizeBytes: data.sizeBytes,
+      sizeBytes: data.sizeBytes || 0,
+      uploadConfirmed: false,
     });
 
     const saved = await receipt.save();
+    
+    logger.info({
+      receiptId: saved._id,
+      expenseId,
+      storageKey,
+      storageUrl,
+    }, 'Receipt created for upload')
 
-    // Link receipt to expense if it's the primary one
+    // Link receipt to expense
+    if (!expense.receiptIds) {
+      expense.receiptIds = [];
+    }
+    expense.receiptIds.push(saved._id as mongoose.Types.ObjectId);
+    
+    // Set as primary if it's the first one
     if (!expense.receiptPrimaryId) {
       expense.receiptPrimaryId = saved._id as mongoose.Types.ObjectId;
-      await expense.save();
     }
+    await expense.save();
 
     return {
       receiptId: (saved._id as mongoose.Types.ObjectId).toString(),
@@ -74,12 +104,26 @@ export class ReceiptsService {
       throw new Error('Receipt not found');
     }
 
+    // If expenseId exists, check access via report
+    if (receipt.expenseId) {
     const expense = receipt.expenseId as any;
     const report = expense.reportId as any;
 
-    if (report.userId.toString() !== userId) {
+      if (report && report.userId.toString() !== userId) {
       throw new Error('Access denied');
+      }
     }
+
+    // Mark upload as confirmed
+    receipt.uploadConfirmed = true;
+    await receipt.save();
+    
+    logger.info({
+      receiptId,
+      userId,
+      storageKey: receipt.storageKey,
+      storageUrl: receipt.storageUrl,
+    }, 'Receipt upload confirmed')
 
     // Generate signed URL for the receipt (valid for 7 days)
     const signedUrl = await getPresignedDownloadUrl(
@@ -121,15 +165,35 @@ export class ReceiptsService {
       }
 
       await user.save();
-      logger.info('Receipt URL stored in user collection', {
+      logger.info({
         userId,
         receiptId,
         storageUrl: receipt.storageUrl,
-      });
+      }, 'Receipt URL stored in user collection')
     }
 
-    // Enqueue OCR job (this starts processing immediately)
-    const ocrJob = await OcrService.enqueueOcrJob(receiptId);
+    // Process OCR synchronously (no queue)
+    let ocrJobId: string | null = null;
+    let extractedFields: any = null;
+    
+    try {
+      logger.info({ receiptId }, 'Starting OCR processing');
+      const ocrJob = await OcrService.processReceiptSync(receiptId);
+      ocrJobId = (ocrJob._id as mongoose.Types.ObjectId).toString();
+      
+      if (ocrJob.status === 'COMPLETED' && ocrJob.result) {
+        extractedFields = ocrJob.result;
+        logger.info({ receiptId, ocrJobId }, 'OCR completed successfully');
+      } else if (ocrJob.status === 'FAILED') {
+        logger.warn({ receiptId, ocrJobId, error: ocrJob.error }, 'OCR processing failed');
+      }
+    } catch (error: any) {
+      logger.error({
+        receiptId,
+        error: error.message,
+      }, 'OCR processing error');
+      // Don't fail the confirm upload if OCR fails - receipt is still uploaded
+    }
     
     // Return receipt with OCR job info
     const receiptWithOcr = await Receipt.findById(receiptId)
@@ -138,9 +202,8 @@ export class ReceiptsService {
     
     return {
       receipt: receiptWithOcr || receipt,
-      ocrJobId: (ocrJob._id as mongoose.Types.ObjectId).toString(),
-      // Note: extractedFields will be available after OCR completes
-      // Client should poll the OCR job endpoint to get results
+      ocrJobId: ocrJobId || '',
+      extractedFields,
     };
   }
 
@@ -184,18 +247,18 @@ export class ReceiptsService {
         7 * 24 * 60 * 60 // 7 days
       );
       
-      logger.debug('Generated signed URL for receipt', {
+      logger.debug({
         receiptId: id,
         storageKey: receipt.storageKey,
         signedUrlLength: signedUrl.length,
-      });
+      }, 'Generated signed URL for receipt')
     } catch (error) {
-      logger.error('Failed to generate signed URL for receipt', {
+      logger.error({
         receiptId: id,
         storageKey: receipt.storageKey,
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
-      });
+      }, 'Failed to generate signed URL for receipt');
       // Throw error - we cannot serve the receipt without a signed URL
       // The storageUrl will return 403 Forbidden from S3
       throw new Error(

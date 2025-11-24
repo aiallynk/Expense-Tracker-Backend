@@ -1,7 +1,8 @@
 import { Response } from 'express';
-import { CategoriesService } from '../services/categories.service';
-import { asyncHandler } from '../middleware/error.middleware';
+
 import { AuthRequest } from '../middleware/auth.middleware';
+import { asyncHandler } from '../middleware/error.middleware';
+import { CategoriesService } from '../services/categories.service';
 import {
   createCategorySchema,
   updateCategorySchema,

@@ -1,12 +1,18 @@
+import mongoose from 'mongoose';
+
 import { Expense, IExpense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
+import { User } from '../models/User';
+import { emitCompanyAdminDashboardUpdate } from '../socket/realtimeEvents';
 import { CreateExpenseDto, UpdateExpenseDto, ExpenseFiltersDto } from '../utils/dtoTypes';
-import { ExpenseStatus, ExpenseReportStatus } from '../utils/enums';
+import { ExpenseStatus, ExpenseReportStatus , AuditAction } from '../utils/enums';
 import { getPaginationOptions, createPaginatedResult } from '../utils/pagination';
-import mongoose from 'mongoose';
+
 import { AuditService } from './audit.service';
-import { AuditAction } from '../utils/enums';
+import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
 import { ReportsService } from './reports.service';
+
+import { logger } from '@/config/logger';
 
 export class ExpensesService {
   static async createExpense(
@@ -30,14 +36,17 @@ export class ExpensesService {
 
     const expense = new Expense({
       reportId,
+      userId: new mongoose.Types.ObjectId(userId),
       vendor: data.vendor,
-      categoryId: data.categoryId,
+      categoryId: data.categoryId ? new mongoose.Types.ObjectId(data.categoryId) : undefined,
+      projectId: data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined,
       amount: data.amount,
       currency: data.currency || 'INR',
       expenseDate: new Date(data.expenseDate),
       status: ExpenseStatus.DRAFT,
       source: data.source,
       notes: data.notes,
+      receiptIds: [],
     });
 
     const saved = await expense.save();
@@ -51,6 +60,19 @@ export class ExpensesService {
       (saved._id as mongoose.Types.ObjectId).toString(),
       AuditAction.CREATE
     );
+
+    // Emit company admin dashboard update if user has a company
+    try {
+      const user = await User.findById(userId).select('companyId').exec();
+      if (user && user.companyId) {
+        const companyId = user.companyId.toString();
+        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+        emitCompanyAdminDashboardUpdate(companyId, stats);
+      }
+    } catch (error) {
+      // Don't fail expense creation if dashboard update fails
+      logger.error({ error }, 'Error emitting company admin dashboard update');
+    }
 
     return saved;
   }
@@ -72,8 +94,15 @@ export class ExpensesService {
       throw new Error('Access denied');
     }
 
-    if (report.status !== ExpenseReportStatus.DRAFT) {
-      throw new Error('Can only update expenses in draft reports');
+    // Allow updating expenses if:
+    // 1. Report is DRAFT, OR
+    // 2. Report is SUBMITTED and expense status is PENDING (changes requested)
+    const canUpdate = 
+      report.status === ExpenseReportStatus.DRAFT || 
+      (report.status === ExpenseReportStatus.SUBMITTED && expense.status === ExpenseStatus.PENDING);
+
+    if (!canUpdate) {
+      throw new Error('Can only update expenses in draft reports or expenses with pending changes');
     }
 
     if (data.vendor !== undefined) {
@@ -81,7 +110,11 @@ export class ExpensesService {
     }
 
     if (data.categoryId !== undefined) {
-      expense.categoryId = new mongoose.Types.ObjectId(data.categoryId);
+      expense.categoryId = data.categoryId ? new mongoose.Types.ObjectId(data.categoryId) : undefined;
+    }
+
+    if (data.projectId !== undefined) {
+      expense.projectId = data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined;
     }
 
     if (data.amount !== undefined) {
@@ -100,12 +133,39 @@ export class ExpensesService {
       expense.notes = data.notes;
     }
 
+    // If expense status was PENDING (changes requested), update it back to DRAFT
+    // This indicates the employee has made the requested changes
+    if (expense.status === ExpenseStatus.PENDING) {
+      expense.status = ExpenseStatus.DRAFT;
+    }
+
     const saved = await expense.save();
 
     // Recalculate report total
     await ReportsService.recalcTotals(report._id.toString());
 
     await AuditService.log(userId, 'Expense', id, AuditAction.UPDATE, data);
+
+    // Emit real-time event if report is SUBMITTED (so manager can see the update)
+    if (report.status === ExpenseReportStatus.SUBMITTED) {
+      try {
+        const reportUser = await User.findById(report.userId).select('managerId companyId').exec();
+        if (reportUser && reportUser.managerId) {
+          const { emitManagerReportUpdate } = await import('../socket/realtimeEvents');
+          const populatedReport = await ExpenseReport.findById(report._id)
+            .populate('userId', 'name email')
+            .populate('projectId', 'name code')
+            .exec();
+          
+          if (populatedReport) {
+            emitManagerReportUpdate(reportUser.managerId.toString(), 'EXPENSE_UPDATED', populatedReport.toObject());
+          }
+        }
+      } catch (error) {
+        logger.error({ error }, 'Error emitting expense update event');
+        // Don't fail expense update if real-time event fails
+      }
+    }
 
     return saved;
   }
@@ -149,37 +209,61 @@ export class ExpensesService {
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
 
-    // Get user's reports
-    const userReports = await ExpenseReport.find({ userId }).select('_id');
-    const reportIds = userReports.map((r) => r._id);
+    // Build base query - expenses must belong to the user
+    // Since expenses have a userId field, we can directly query by userId
+    // This ensures all expenses created by the user (from phone or web) are included
+    const query: any = {
+      userId: new mongoose.Types.ObjectId(userId),
+    };
 
-    const query: any = { reportId: { $in: reportIds } };
+    // Filter by specific reportId if provided
+    if (filters.reportId) {
+      query.reportId = new mongoose.Types.ObjectId(filters.reportId);
+    }
+    // Otherwise, show all expenses for the user (regardless of reportId)
+    // This ensures expenses from phone and web are both visible
 
+    // Status filter
     if (filters.status) {
-      query.status = filters.status;
+      query.status = filters.status.toUpperCase();
     }
 
+    // Category filter
     if (filters.categoryId) {
       query.categoryId = filters.categoryId;
     }
 
-    if (filters.reportId) {
-      query.reportId = filters.reportId;
+    // Date range filters
+    if (filters.from || filters.to) {
+      query.expenseDate = {};
+      if (filters.from) {
+        query.expenseDate.$gte = new Date(filters.from);
+      }
+      if (filters.to) {
+        query.expenseDate.$lte = new Date(filters.to);
+      }
     }
 
-    if (filters.from) {
-      query.expenseDate = { ...query.expenseDate, $gte: new Date(filters.from) };
-    }
-
-    if (filters.to) {
-      query.expenseDate = { ...query.expenseDate, $lte: new Date(filters.to) };
-    }
-
+    // Search query - add as $and condition to preserve existing $or
     if (filters.q) {
-      query.$or = [
-        { vendor: { $regex: filters.q, $options: 'i' } },
-        { notes: { $regex: filters.q, $options: 'i' } },
-      ];
+      const searchConditions = {
+        $or: [
+          { vendor: { $regex: filters.q, $options: 'i' } },
+          { notes: { $regex: filters.q, $options: 'i' } },
+        ]
+      };
+      
+      if (query.$or) {
+        // Combine with existing $or using $and
+        query.$and = [
+          { $or: query.$or },
+          searchConditions
+        ];
+        delete query.$or;
+      } else {
+        // No existing $or, just add search conditions
+        query.$or = searchConditions.$or;
+      }
     }
 
     const skip = (page - 1) * pageSize;

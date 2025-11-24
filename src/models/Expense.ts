@@ -1,16 +1,20 @@
 import mongoose, { Document, Schema } from 'mongoose';
+
 import { ExpenseStatus, ExpenseSource } from '../utils/enums';
 
 export interface IExpense extends Document {
-  reportId: mongoose.Types.ObjectId;
+  reportId?: mongoose.Types.ObjectId;
+  userId: mongoose.Types.ObjectId;
   vendor: string;
-  categoryId: mongoose.Types.ObjectId;
+  categoryId?: mongoose.Types.ObjectId;
+  projectId?: mongoose.Types.ObjectId;
   amount: number;
   currency: string;
   expenseDate: Date;
   status: ExpenseStatus;
   source: ExpenseSource;
   notes?: string;
+  receiptIds: mongoose.Types.ObjectId[];
   receiptPrimaryId?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -21,6 +25,10 @@ const expenseSchema = new Schema<IExpense>(
     reportId: {
       type: Schema.Types.ObjectId,
       ref: 'ExpenseReport',
+    },
+    userId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
       required: true,
     },
     vendor: {
@@ -31,7 +39,10 @@ const expenseSchema = new Schema<IExpense>(
     categoryId: {
       type: Schema.Types.ObjectId,
       ref: 'Category',
-      required: true,
+    },
+    projectId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Project',
     },
     amount: {
       type: Number,
@@ -61,6 +72,11 @@ const expenseSchema = new Schema<IExpense>(
       type: String,
       trim: true,
     },
+    receiptIds: {
+      type: [Schema.Types.ObjectId],
+      ref: 'Receipt',
+      default: [],
+    },
     receiptPrimaryId: {
       type: Schema.Types.ObjectId,
       ref: 'Receipt',
@@ -73,7 +89,9 @@ const expenseSchema = new Schema<IExpense>(
 
 // Indexes
 expenseSchema.index({ reportId: 1 });
+expenseSchema.index({ userId: 1 });
 expenseSchema.index({ categoryId: 1, expenseDate: 1 });
+expenseSchema.index({ projectId: 1 });
 expenseSchema.index({ status: 1 });
 expenseSchema.index({ vendor: 1, expenseDate: 1 });
 expenseSchema.index({ expenseDate: -1 });

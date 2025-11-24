@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import { CategoriesController } from '../controllers/categories.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireAdmin } from '../middleware/role.middleware';
