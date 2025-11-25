@@ -1,10 +1,12 @@
 import { Response } from 'express';
+
 import { z } from 'zod';
 
 import { AuthRequest } from '../middleware/auth.middleware';
-import { asyncHandler } from '../middleware/error.middleware';
-import { ManagerService } from '../services/manager.service';
 
+import { asyncHandler } from '../middleware/error.middleware';
+
+import { ManagerService } from '../services/manager.service';
 
 const managerReportFiltersSchema = z.object({
   status: z.string().optional(),
@@ -107,6 +109,29 @@ export class ManagerController {
     res.status(200).json({
       success: true,
       data: stats,
+    });
+  });
+
+  /**
+   * Get team spending details with member-wise breakdown
+   */
+  static getTeamSpendingDetails = asyncHandler(async (req: AuthRequest, res: Response) => {
+    if (req.user!.role !== 'MANAGER') {
+      res.status(403).json({
+        success: false,
+        message: 'Only managers can access this endpoint',
+      });
+      return;
+    }
+
+    const details = await ManagerService.getTeamSpendingDetails(
+      req.user!.id,
+      req.params.teamId
+    );
+
+    res.status(200).json({
+      success: true,
+      data: details,
     });
   });
 
@@ -287,4 +312,3 @@ export class ManagerController {
     });
   });
 }
-

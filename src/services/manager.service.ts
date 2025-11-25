@@ -5,12 +5,11 @@ import { ExpenseReport, IExpenseReport } from '../models/ExpenseReport';
 import { NotificationType } from '../models/Notification';
 import { Team } from '../models/Team';
 import { User, IUser } from '../models/User';
-import { emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
+import { emitManagerReportUpdate } from '../socket/realtimeEvents';
 import { AuditAction , ExpenseReportStatus, UserRole, ExpenseStatus } from '../utils/enums';
 import { getPresignedDownloadUrl } from '../utils/s3';
 
 import { AuditService } from './audit.service';
-import { currencyService } from './currency.service';
 import { NotificationDataService } from './notificationData.service';
 
 import { logger } from '@/config/logger';
@@ -318,131 +317,6 @@ export class ManagerService {
   }
 
   /**
-   * Get manager dashboard stats
-   * Includes both direct reports and team members
-   */
-  static async getManagerDashboardStats(managerId: string): Promise<any> {
-    // Step 1: Get direct team members
-    const directTeamMembers = await User.find({ 
-      managerId: new mongoose.Types.ObjectId(managerId),
-      status: 'ACTIVE'
-    }).select('_id').exec();
-    
-    const directTeamMemberIds = directTeamMembers.map(m => m._id);
-
-    // Step 2: Get team members from teams where this manager is the team leader
-    const teams = await Team.find({
-      managerId: new mongoose.Types.ObjectId(managerId),
-      status: 'ACTIVE'
-    }).select('members').exec();
-    
-    // Extract all userIds from team members
-    const teamMemberIds: mongoose.Types.ObjectId[] = [];
-    teams.forEach(team => {
-      if (team.members && Array.isArray(team.members)) {
-        team.members.forEach((member: any) => {
-          if (member.userId) {
-            teamMemberIds.push(member.userId);
-          }
-        });
-      }
-    });
-
-    // Step 3: Combine both lists and remove duplicates
-    const allTeamMemberIds = [
-      ...directTeamMemberIds,
-      ...teamMemberIds
-    ];
-    
-    const uniqueTeamMemberIds = Array.from(
-      new Set(allTeamMemberIds.map((id: any) => (id as any).toString()))
-    ).map(id => new mongoose.Types.ObjectId(id));
-
-    if (uniqueTeamMemberIds.length === 0) {
-      return {
-        teamSize: 0,
-        pendingApprovals: 0,
-        approvedThisMonth: 0,
-        totalTeamSpend: 0,
-        pendingReports: []
-      };
-    }
-
-    // Get pending reports count
-    const pendingReports = await ExpenseReport.countDocuments({
-      userId: { $in: uniqueTeamMemberIds },
-      status: ExpenseReportStatus.SUBMITTED
-    });
-
-    // Get approved reports this month
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const approvedThisMonth = await ExpenseReport.countDocuments({
-      userId: { $in: uniqueTeamMemberIds },
-      status: { $in: [ExpenseReportStatus.APPROVED, ExpenseReportStatus.MANAGER_APPROVED] },
-      approvedAt: { $gte: startOfMonth }
-    });
-
-    // Get total team spend (sum of all approved reports) with currency conversion to INR
-    const approvedReports = await ExpenseReport.find({
-      userId: { $in: uniqueTeamMemberIds },
-      status: { $in: [ExpenseReportStatus.APPROVED, ExpenseReportStatus.MANAGER_APPROVED] }
-    }).select('totalAmount currency').exec();
-    
-    // Convert all amounts to INR
-    const convertedAmounts = await Promise.all(
-      approvedReports.map(async (report) => {
-        const amount = report.totalAmount || 0;
-        const currency = report.currency || 'INR';
-        return await currencyService.convertToINR(amount, currency);
-      })
-    );
-    
-    const totalTeamSpend = Math.round(convertedAmounts.reduce((sum, amount) => sum + amount, 0) * 100) / 100;
-
-    // Get pending reports for list
-    const pendingReportsList = await ExpenseReport.find({
-      userId: { $in: uniqueTeamMemberIds },
-      status: ExpenseReportStatus.SUBMITTED
-    })
-      .populate('userId', 'name email')
-      .sort({ submittedAt: -1 })
-      .limit(5)
-      .exec();
-
-    // Convert pending report amounts to INR for display
-    const pendingReportsWithConvertedAmounts = await Promise.all(
-      pendingReportsList.map(async (report) => {
-        const reportObj = report.toObject();
-        const amount = report.totalAmount || 0;
-        const currency = report.currency || 'INR';
-        const convertedAmount = await currencyService.convertToINR(amount, currency);
-        return {
-          ...reportObj,
-          totalAmount: Math.round(convertedAmount * 100) / 100, // Round to 2 decimal places
-          originalAmount: amount,
-          originalCurrency: currency,
-        };
-      })
-    );
-
-    logger.info({
-      managerId,
-      teamSize: uniqueTeamMemberIds.length,
-      totalTeamSpend,
-      pendingReports,
-    }, 'Manager dashboard stats calculated with currency conversion');
-
-    return {
-      teamSize: uniqueTeamMemberIds.length,
-      pendingApprovals: pendingReports,
-      approvedThisMonth,
-      totalTeamSpend,
-      pendingReports: pendingReportsWithConvertedAmounts
-    };
-  }
-
-  /**
    * Manager approves a report
    */
   static async approveReport(
@@ -577,7 +451,6 @@ export class ManagerService {
 
     if (populatedReport) {
       emitManagerReportUpdate(managerId, 'approved', populatedReport);
-      emitManagerDashboardUpdate(managerId);
     }
 
     return populatedReport!;
@@ -688,7 +561,6 @@ export class ManagerService {
 
     if (populatedReport) {
       emitManagerReportUpdate(managerId, 'rejected', populatedReport);
-      emitManagerDashboardUpdate(managerId);
     }
 
     return populatedReport!;
@@ -1012,6 +884,393 @@ export class ManagerService {
     emitManagerReportUpdate(managerId, 'EXPENSE_CHANGES_REQUESTED', report.toObject());
 
     return expense;
+  }
+
+  /**
+   * Get manager dashboard stats including team-wise spending
+   */
+  static async getManagerDashboardStats(managerId: string): Promise<any> {
+    // Get all team members (direct reports + team members)
+    const teamMembers = await this.getTeamMembers(managerId);
+    const teamMemberIds = teamMembers.map(m => m._id);
+
+    if (teamMemberIds.length === 0) {
+      return {
+        teamSize: 0,
+        pendingApprovals: 0,
+        approvedThisMonth: 0,
+        totalTeamSpend: 0,
+        pendingReports: [],
+        teamWiseSpending: [],
+      };
+    }
+
+    // Get all teams managed by this manager
+    const teams = await Team.find({
+      managerId: new mongoose.Types.ObjectId(managerId),
+      status: 'ACTIVE'
+    })
+      .populate('members.userId', 'name email')
+      .exec();
+
+    // Get all reports from team members
+    const allReports = await ExpenseReport.find({
+      userId: { $in: teamMemberIds }
+    })
+      .populate('userId', 'name email')
+      .exec();
+
+    // Get all expenses from team members (including draft, submitted, and approved)
+    const allExpenses = await Expense.find({
+      reportId: { $in: allReports.map(r => r._id) }
+    }).exec();
+
+    // Calculate pending approvals (reports with SUBMITTED status)
+    const pendingReports = allReports.filter(
+      r => r.status === ExpenseReportStatus.SUBMITTED
+    );
+
+    // Calculate approved this month
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    const approvedThisMonth = allReports.filter(
+      r => 
+        (r.status === ExpenseReportStatus.APPROVED || 
+         r.status === ExpenseReportStatus.MANAGER_APPROVED ||
+         r.status === ExpenseReportStatus.BH_APPROVED) &&
+        r.approvedAt &&
+        r.approvedAt >= startOfMonth
+    ).length;
+
+    // Calculate total team spend (sum of all expenses regardless of status)
+    const totalTeamSpend = allExpenses.reduce(
+      (sum, exp) => sum + (exp.amount || 0),
+      0
+    );
+
+    // Calculate team-wise spending
+    const teamWiseSpending = await Promise.all(
+      teams.map(async (team) => {
+        // Get team member IDs
+        const teamMemberUserIds = team.members
+          .map((m: any) => m.userId?._id || m.userId)
+          .filter(Boolean);
+
+        // Get reports for this team
+        const teamReports = allReports.filter(
+          r => teamMemberUserIds.some(
+            (id: any) => 
+              (r.userId as any)?._id?.toString() === id.toString() ||
+              (r.userId as any)?.toString() === id.toString()
+          )
+        );
+
+        // Get expenses for this team (all statuses: draft, submitted, approved)
+        const teamExpenses = allExpenses.filter(
+          exp => {
+            if (!exp.reportId) return false;
+            return teamReports.some(r => (r._id as mongoose.Types.ObjectId).toString() === exp.reportId!.toString());
+          }
+        );
+
+        // Calculate spending by status
+        const draftAmount = teamExpenses
+          .filter(e => {
+            if (!e.reportId) return false;
+            if (e.status === ExpenseStatus.DRAFT) return true;
+            const report = teamReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+            return report?.status === ExpenseReportStatus.DRAFT;
+          })
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const submittedAmount = teamExpenses
+          .filter(e => {
+            if (!e.reportId) return false;
+            const report = teamReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+            return report?.status === ExpenseReportStatus.SUBMITTED;
+          })
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const approvedAmount = teamExpenses
+          .filter(e => e.status === ExpenseStatus.APPROVED)
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const totalAmount = teamExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        return {
+          teamId: (team._id as mongoose.Types.ObjectId).toString(),
+          teamName: team.name,
+          totalAmount,
+          draftAmount,
+          submittedAmount,
+          approvedAmount,
+          memberCount: teamMemberUserIds.length,
+        };
+      })
+    );
+
+    // Also include direct reports (users with managerId but not in any team)
+    const directReportIds = teamMembers
+      .filter(m => {
+        const userId = (m._id as any).toString();
+        // Check if user is in any team
+        const isInTeam = teams.some(team =>
+          team.members.some((member: any) => {
+            const memberId = member.userId?._id?.toString() || member.userId?.toString();
+            return memberId === userId;
+          })
+        );
+        return !isInTeam;
+      })
+      .map(m => m._id);
+
+    if (directReportIds.length > 0) {
+      const directReports = allReports.filter(
+        r => directReportIds.some(
+          (id: any) => 
+            (r.userId as any)?._id?.toString() === id.toString() ||
+            (r.userId as any)?.toString() === id.toString()
+        )
+      );
+
+      const directReportExpenses = allExpenses.filter(
+        exp => {
+          if (!exp.reportId) return false;
+          return directReports.some(r => (r._id as mongoose.Types.ObjectId).toString() === exp.reportId!.toString());
+        }
+      );
+
+      const directDraftAmount = directReportExpenses
+        .filter(e => {
+          if (!e.reportId) return false;
+          if (e.status === ExpenseStatus.DRAFT) return true;
+          const report = directReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+          return report?.status === ExpenseReportStatus.DRAFT;
+        })
+        .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+      const directSubmittedAmount = directReportExpenses
+        .filter(e => {
+          if (!e.reportId) return false;
+          const report = directReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+          return report?.status === ExpenseReportStatus.SUBMITTED;
+        })
+        .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+      const directApprovedAmount = directReportExpenses
+        .filter(e => e.status === ExpenseStatus.APPROVED)
+        .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+      const directTotalAmount = directReportExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+      if (directTotalAmount > 0 || directReportIds.length > 0) {
+        teamWiseSpending.push({
+          teamId: 'direct-reports',
+          teamName: 'Direct Reports',
+          totalAmount: directTotalAmount,
+          draftAmount: directDraftAmount,
+          submittedAmount: directSubmittedAmount,
+          approvedAmount: directApprovedAmount,
+          memberCount: directReportIds.length,
+        });
+      }
+    }
+
+    return {
+      teamSize: teamMembers.length,
+      pendingApprovals: pendingReports.length,
+      approvedThisMonth,
+      totalTeamSpend,
+      pendingReports: pendingReports.slice(0, 5).map(r => ({
+        _id: r._id,
+        name: r.name,
+        totalAmount: r.totalAmount || 0,
+        userId: r.userId,
+      })),
+      teamWiseSpending,
+    };
+  }
+
+  /**
+   * Get team spending details with member-wise breakdown
+   */
+  static async getTeamSpendingDetails(
+    managerId: string,
+    teamId: string
+  ): Promise<any> {
+    // Verify manager has access to this team
+    let team;
+    let teamMemberUserIds: mongoose.Types.ObjectId[] = [];
+
+    if (teamId === 'direct-reports') {
+      // Handle direct reports
+      const directTeamMembers = await User.find({
+        managerId: new mongoose.Types.ObjectId(managerId),
+        status: 'ACTIVE',
+        role: UserRole.EMPLOYEE
+      }).select('_id name email').exec();
+
+      teamMemberUserIds = directTeamMembers.map(m => m._id as mongoose.Types.ObjectId);
+
+      // Get all reports from direct reports
+      const directReports = await ExpenseReport.find({
+        userId: { $in: teamMemberUserIds }
+      })
+        .populate('userId', 'name email')
+        .exec();
+
+      // Get all expenses from direct reports
+      const reportIds = directReports.map(r => r._id);
+      const allExpenses = await Expense.find({
+        reportId: { $in: reportIds }
+      }).exec();
+
+      // Calculate member-wise spending
+      const memberSpending = directTeamMembers.map((member) => {
+        const memberReports = directReports.filter(
+          r => {
+            const userId = (r.userId as any)?._id?.toString() || (r.userId as any)?.toString();
+            return userId === (member._id as any).toString();
+          }
+        );
+
+        const memberExpenses = allExpenses.filter(
+          exp => {
+            if (!exp.reportId) return false;
+            return memberReports.some(r => (r._id as mongoose.Types.ObjectId).toString() === exp.reportId!.toString());
+          }
+        );
+
+        const draftAmount = memberExpenses
+          .filter(e => {
+            if (!e.reportId) return false;
+            if (e.status === ExpenseStatus.DRAFT) return true;
+            const report = memberReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+            return report?.status === ExpenseReportStatus.DRAFT;
+          })
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const submittedAmount = memberExpenses
+          .filter(e => {
+            if (!e.reportId) return false;
+            const report = memberReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+            return report?.status === ExpenseReportStatus.SUBMITTED;
+          })
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const approvedAmount = memberExpenses
+          .filter(e => e.status === ExpenseStatus.APPROVED)
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const totalAmount = memberExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        return {
+          userId: (member._id as mongoose.Types.ObjectId).toString(),
+          name: member.name || 'Unknown',
+          email: member.email || '',
+          totalAmount,
+          draftAmount,
+          submittedAmount,
+          approvedAmount,
+        };
+      });
+
+      return {
+        teamId: 'direct-reports',
+        teamName: 'Direct Reports',
+        memberSpending,
+      };
+    } else {
+      // Handle regular team
+      team = await Team.findOne({
+        _id: new mongoose.Types.ObjectId(teamId),
+        managerId: new mongoose.Types.ObjectId(managerId),
+        status: 'ACTIVE'
+      })
+        .populate('members.userId', 'name email')
+        .exec();
+
+      if (!team) {
+        const error: any = new Error('Team not found');
+        error.statusCode = 404;
+        error.code = 'TEAM_NOT_FOUND';
+        throw error;
+      }
+
+      teamMemberUserIds = team.members
+        .map((m: any) => m.userId?._id || m.userId)
+        .filter(Boolean) as mongoose.Types.ObjectId[];
+
+      // Get all reports from team members
+      const teamReports = await ExpenseReport.find({
+        userId: { $in: teamMemberUserIds }
+      })
+        .populate('userId', 'name email')
+        .exec();
+
+      // Get all expenses from team members
+      const reportIds = teamReports.map(r => r._id);
+      const allExpenses = await Expense.find({
+        reportId: { $in: reportIds }
+      }).exec();
+
+      // Calculate member-wise spending
+      const memberSpending = team.members.map((member: any) => {
+        const memberId = member.userId?._id || member.userId;
+        const memberReports = teamReports.filter(
+          r => {
+            const userId = (r.userId as any)?._id?.toString() || (r.userId as any)?.toString();
+            return userId === memberId.toString();
+          }
+        );
+
+        const memberExpenses = allExpenses.filter(
+          exp => {
+            if (!exp.reportId) return false;
+            return memberReports.some(r => (r._id as mongoose.Types.ObjectId).toString() === exp.reportId!.toString());
+          }
+        );
+
+        const draftAmount = memberExpenses
+          .filter(e => {
+            if (!e.reportId) return false;
+            if (e.status === ExpenseStatus.DRAFT) return true;
+            const report = memberReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+            return report?.status === ExpenseReportStatus.DRAFT;
+          })
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const submittedAmount = memberExpenses
+          .filter(e => {
+            if (!e.reportId) return false;
+            const report = memberReports.find(r => (r._id as mongoose.Types.ObjectId).toString() === e.reportId!.toString());
+            return report?.status === ExpenseReportStatus.SUBMITTED;
+          })
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const approvedAmount = memberExpenses
+          .filter(e => e.status === ExpenseStatus.APPROVED)
+          .reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        const totalAmount = memberExpenses.reduce((sum, e) => sum + (e.amount || 0), 0);
+
+        return {
+          userId: memberId.toString(),
+          name: (member.userId as any)?.name || 'Unknown',
+          email: (member.userId as any)?.email || '',
+          totalAmount,
+          draftAmount,
+          submittedAmount,
+          approvedAmount,
+        };
+      });
+
+      return {
+        teamId: (team._id as mongoose.Types.ObjectId).toString(),
+        teamName: team.name,
+        memberSpending,
+      };
+    }
   }
 }
 
