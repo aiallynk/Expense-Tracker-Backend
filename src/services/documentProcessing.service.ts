@@ -124,7 +124,8 @@ export class DocumentProcessingService {
     try {
       // First, parse PDF to get basic info and text content
       // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParse = require('pdf-parse');
+      const pdfParseModule = require('pdf-parse');
+      const pdfParse = pdfParseModule.default || pdfParseModule;
       const pdfData: PdfParseResult = await pdfParse(buffer);
       result.totalPages = pdfData.numpages;
 
