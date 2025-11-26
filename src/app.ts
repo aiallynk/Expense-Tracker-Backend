@@ -9,23 +9,22 @@ import { apiLoggerMiddleware } from './middleware/apiLogger.middleware';
 import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
-
-// Routes
 import adminRoutes from './routes/admin.routes';
 import authRoutes from './routes/auth.routes';
+import bulkUploadRoutes from './routes/bulkUpload.routes';
 import businessHeadRoutes from './routes/businessHead.routes';
 import categoriesRoutes from './routes/categories.routes';
-import expensesRoutes from './routes/expenses.routes';
-import receiptsRoutes from './routes/receipts.routes';
-import ocrRoutes from './routes/ocr.routes';
-import superAdminRoutes from './routes/superAdmin.routes';
 import companyAdminRoutes from './routes/companyAdmin.routes';
 import companySettingsRoutes from './routes/companySettings.routes';
 import departmentsRoutes from './routes/departments.routes';
-import notificationsRoutes from './routes/notifications.routes';
+import expensesRoutes from './routes/expenses.routes';
 import managerRoutes from './routes/manager.routes';
+import notificationsRoutes from './routes/notifications.routes';
+import ocrRoutes from './routes/ocr.routes';
 import projectsRoutes from './routes/projects.routes';
+import receiptsRoutes from './routes/receipts.routes';
 import reportsRoutes from './routes/reports.routes';
+import superAdminRoutes from './routes/superAdmin.routes';
 import usersRoutes from './routes/users.routes';
 
 import { logger } from '@/config/logger';
@@ -168,6 +167,7 @@ export const createApp = (): Express => {
   app.use('/api/v1/reports', reportsRoutes);
   app.use('/api/v1', expensesRoutes);
   app.use('/api/v1', receiptsRoutes);
+  app.use('/api/v1', bulkUploadRoutes);
   app.use('/api/v1/ocr', ocrRoutes);
   app.use('/api/v1/admin', adminRoutes);
   app.use('/api/v1/super-admin', superAdminRoutes);

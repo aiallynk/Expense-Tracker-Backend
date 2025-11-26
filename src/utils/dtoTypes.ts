@@ -159,6 +159,20 @@ export const uploadIntentSchema = z.object({
   sizeBytes: z.number().positive().optional(),
 });
 
+// Bulk Document Upload DTOs
+export const bulkDocumentUploadIntentSchema = z.object({
+  filename: z.string().min(1, 'Filename is required'),
+  mimeType: z.string().min(1, 'MimeType is required'),
+  sizeBytes: z.number().positive().optional(),
+  reportId: z.string().min(1, 'Report ID is required'),
+});
+
+export const bulkDocumentConfirmSchema = z.object({
+  storageKey: z.string().min(1, 'Storage key is required'),
+  mimeType: z.string().min(1, 'MimeType is required'),
+  reportId: z.string().min(1, 'Report ID is required'),
+});
+
 // Query DTOs
 export const paginationSchema = z.object({
   page: z.string().optional().transform((val) => (val ? parseInt(val, 10) : 1)),
@@ -272,4 +286,6 @@ export type UpdateCompanyAdminDto = z.infer<typeof updateCompanyAdminSchema>;
 export type ResetCompanyAdminPasswordDto = z.infer<typeof resetCompanyAdminPasswordSchema>;
 export type CreateDepartmentDto = z.infer<typeof createDepartmentSchema>;
 export type UpdateDepartmentDto = z.infer<typeof updateDepartmentSchema>;
+export type BulkDocumentUploadIntentDto = z.infer<typeof bulkDocumentUploadIntentSchema>;
+export type BulkDocumentConfirmDto = z.infer<typeof bulkDocumentConfirmSchema>;
 
