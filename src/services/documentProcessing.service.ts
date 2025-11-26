@@ -171,14 +171,12 @@ export class DocumentProcessingService {
 
   /**
    * Extract receipts from PDF using AI vision
+   * Converts PDF pages to images first since vision models don't accept PDFs directly
    */
   private static async extractReceiptsFromPdfWithAI(
     buffer: Buffer,
     pdfData: PdfParseResult
   ): Promise<ExtractedReceipt[]> {
-    // Convert PDF buffer to base64 for AI analysis
-    const base64Pdf = buffer.toString('base64');
-    
     // If OCR is disabled, return empty
     if (config.ocr.disableOcr) {
       logger.info('OCR disabled, skipping PDF analysis');
@@ -186,10 +184,27 @@ export class DocumentProcessingService {
     }
 
     const model = getVisionModel();
+    const allReceipts: ExtractedReceipt[] = [];
 
-    const prompt = `You are an expense receipt extraction system. Analyze this PDF document which may contain MULTIPLE expense receipts.
+    try {
+      // Convert PDF pages to images using pdf-to-img
+      // Vision models only accept images, not PDFs directly
+      const { pdf } = await import('pdf-to-img');
+      const pdfDocument = await pdf(buffer, { scale: 2 }); // scale 2 for better quality
 
-IMPORTANT: This PDF may contain multiple receipts on different pages or even multiple receipts on the same page. Extract ALL receipts found.
+      let pageNumber = 0;
+      for await (const pageImage of pdfDocument) {
+        pageNumber++;
+        
+        logger.info({ pageNumber, totalPages: pdfData.numpages }, 'Processing PDF page as image');
+
+        try {
+          // Convert page image buffer to base64
+          const base64Image = Buffer.from(pageImage).toString('base64');
+
+          const prompt = `You are an expense receipt extraction system. Analyze this image which is a page from a PDF document.
+
+This page may contain ONE OR MULTIPLE expense receipts. Extract ALL receipts visible in this image.
 
 For EACH receipt you find, extract the following:
 - vendor: merchant/store name
@@ -200,7 +215,6 @@ For EACH receipt you find, extract the following:
 - categorySuggestion: one of (Travel, Food, Office, Others)
 - lineItems: array of items with description and amount
 - notes: any additional notes
-- pageNumber: which page this receipt is on (1-indexed)
 
 Return a JSON object with this structure:
 {
@@ -211,66 +225,67 @@ Return a JSON object with this structure:
       "totalAmount": 1234.56,
       "currency": "INR",
       "categorySuggestion": "Food",
-      "pageNumber": 1,
       "lineItems": [{"description": "Item 1", "amount": 500}],
       "notes": "Additional info"
-    },
-    // ... more receipts if found
+    }
   ]
 }
 
-If you find multiple receipts, include ALL of them in the receipts array.
-If you cannot find any valid receipts, return: {"receipts": []}
+If you find multiple receipts on this page, include ALL of them.
+If this page doesn't contain any valid receipts, return: {"receipts": []}
 
-IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.
+IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
 
-The document has ${pdfData.numpages} page(s).
-Text content preview (for context): ${pdfData.text.substring(0, 2000)}`;
-
-    try {
-      const response = await togetherAIClient.chat.completions.create({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
+          const response = await togetherAIClient.chat.completions.create({
+            model,
+            messages: [
               {
-                type: 'image_url',
-                image_url: {
-                  url: `data:application/pdf;base64,${base64Pdf}`,
-                  detail: 'high',
-                },
+                role: 'user',
+                content: [
+                  { type: 'text', text: prompt },
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:image/png;base64,${base64Image}`,
+                      detail: 'high',
+                    },
+                  },
+                ],
               },
             ],
-          },
-        ],
-        max_tokens: 4000,
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-      });
+            max_tokens: 2000,
+            response_format: { type: 'json_object' },
+            temperature: 0.1,
+          });
 
-      const content = response.choices[0]?.message?.content;
-      if (!content) {
-        throw new Error('No response from AI');
+          const content = response.choices[0]?.message?.content;
+          if (content) {
+            let cleanedContent = content.trim();
+            if (cleanedContent.startsWith('```json')) {
+              cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+            } else if (cleanedContent.startsWith('```')) {
+              cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+            }
+
+            const parsed = JSON.parse(cleanedContent);
+            const pageReceipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => ({
+              ...r,
+              sourceType: 'pdf' as const,
+              pageNumber,
+              confidence: 0.85,
+            }));
+
+            allReceipts.push(...pageReceipts);
+            logger.info({ pageNumber, receiptsFound: pageReceipts.length }, 'Page processed successfully');
+          }
+        } catch (pageError: any) {
+          logger.error({ pageNumber, error: pageError.message }, 'Failed to process page');
+          // Continue processing other pages
+        }
       }
 
-      let cleanedContent = content.trim();
-      if (cleanedContent.startsWith('```json')) {
-        cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-      } else if (cleanedContent.startsWith('```')) {
-        cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
-      }
-
-      const parsed = JSON.parse(cleanedContent);
-      const receipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => ({
-        ...r,
-        sourceType: 'pdf' as const,
-        confidence: 0.85,
-      }));
-
-      logger.info({ receiptCount: receipts.length }, 'Extracted receipts from PDF');
-      return receipts;
+      logger.info({ totalReceipts: allReceipts.length, totalPages: pageNumber }, 'PDF processing completed');
+      return allReceipts;
     } catch (error: any) {
       logger.error({ error: error.message }, 'AI PDF extraction failed, falling back to text analysis');
       // Fallback: Try to extract from text content
