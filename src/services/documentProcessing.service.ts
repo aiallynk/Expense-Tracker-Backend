@@ -123,10 +123,18 @@ export class DocumentProcessingService {
 
     try {
       // First, parse PDF to get basic info and text content
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const pdfParseModule = require('pdf-parse');
-      const pdfParse = pdfParseModule.default || pdfParseModule;
-      const pdfData: PdfParseResult = await pdfParse(buffer);
+      // Import PDFParse class from pdf-parse v2
+      const { PDFParse } = await import('pdf-parse');
+      const parser = new PDFParse({ data: buffer });
+      const textResult = await parser.getText();
+      const pdfData: PdfParseResult = {
+        numpages: textResult.pages?.length || 1,
+        numrender: textResult.pages?.length || 1,
+        info: {},
+        metadata: {},
+        text: textResult.text || '',
+        version: '2.0',
+      };
       result.totalPages = pdfData.numpages;
 
       logger.info({ 
