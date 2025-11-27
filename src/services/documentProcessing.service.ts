@@ -151,13 +151,16 @@ export class DocumentProcessingService {
       result.receipts = receipts;
 
       // Create expense drafts for each extracted receipt
-      for (const receipt of receipts) {
+      for (let i = 0; i < receipts.length; i++) {
+        const receipt = receipts[i];
         try {
           const expenseId = await this.createExpenseDraft(
             receipt,
             reportId,
             userId,
-            documentReceiptId // Pass document receipt ID for linking
+            documentReceiptId, // Pass document receipt ID for linking
+            'pdf', // Source document type
+            i + 1 // Sequence number (1-indexed)
           );
           result.expensesCreated.push(expenseId);
         } catch (error: any) {
@@ -556,13 +559,16 @@ IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
       logger.info({ receiptCount: result.receipts.length }, 'Extracted receipts from Excel');
 
       // Create expense drafts for each extracted receipt
-      for (const receipt of result.receipts) {
+      for (let i = 0; i < result.receipts.length; i++) {
+        const receipt = result.receipts[i];
         try {
           const expenseId = await this.createExpenseDraft(
             receipt,
             reportId,
             userId,
-            documentReceiptId // Link Excel document to expenses
+            documentReceiptId, // Link Excel document to expenses
+            'excel', // Source document type
+            i + 1 // Row number (1-indexed, excluding header)
           );
           result.expensesCreated.push(expenseId);
         } catch (error: any) {
@@ -702,13 +708,16 @@ IMPORTANT: Return ONLY valid JSON.`;
       result.totalPages = receipts.length;
 
       // Create expense drafts
-      for (const receipt of receipts) {
+      for (let i = 0; i < receipts.length; i++) {
+        const receipt = receipts[i];
         try {
           const expenseId = await this.createExpenseDraft(
             receipt,
             reportId,
             userId,
-            documentReceiptId // Link image document to expenses
+            documentReceiptId, // Link image document to expenses
+            'image', // Source document type
+            i + 1 // Sequence number (1-indexed)
           );
           result.expensesCreated.push(expenseId);
         } catch (error: any) {
@@ -734,7 +743,9 @@ IMPORTANT: Return ONLY valid JSON.`;
     receipt: ExtractedReceipt,
     reportId: string,
     userId: string,
-    documentReceiptId?: string // Receipt ID of the source PDF/Excel/image
+    documentReceiptId?: string, // Receipt ID of the source PDF/Excel/image
+    sourceDocumentType?: 'pdf' | 'excel' | 'image',
+    sourceDocumentSequence?: number // Receipt number in the source document
   ): Promise<string> {
     // Try to find matching category
     let categoryId: mongoose.Types.ObjectId | undefined;
@@ -777,6 +788,9 @@ IMPORTANT: Return ONLY valid JSON.`;
         : undefined),
       receiptIds,
       receiptPrimaryId: documentReceiptId ? new mongoose.Types.ObjectId(documentReceiptId) : undefined,
+      // Bulk upload tracking
+      sourceDocumentType,
+      sourceDocumentSequence,
     });
 
     const saved = await expense.save();

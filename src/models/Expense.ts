@@ -16,6 +16,9 @@ export interface IExpense extends Document {
   notes?: string;
   receiptIds: mongoose.Types.ObjectId[];
   receiptPrimaryId?: mongoose.Types.ObjectId;
+  // Bulk upload tracking
+  sourceDocumentType?: 'pdf' | 'excel' | 'image';
+  sourceDocumentSequence?: number; // Receipt number in the source document (page number for PDF)
   createdAt: Date;
   updatedAt: Date;
 }
@@ -80,6 +83,14 @@ const expenseSchema = new Schema<IExpense>(
     receiptPrimaryId: {
       type: Schema.Types.ObjectId,
       ref: 'Receipt',
+    },
+    // Bulk upload tracking
+    sourceDocumentType: {
+      type: String,
+      enum: ['pdf', 'excel', 'image'],
+    },
+    sourceDocumentSequence: {
+      type: Number, // Receipt number in the source document (page number for PDF, row for Excel)
     },
   },
   {
