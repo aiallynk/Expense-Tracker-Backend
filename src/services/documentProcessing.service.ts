@@ -57,9 +57,10 @@ export class DocumentProcessingService {
     storageKey: string,
     mimeType: string,
     reportId: string,
-    userId: string
+    userId: string,
+    documentReceiptId?: string // Receipt ID of the uploaded document
   ): Promise<DocumentProcessingResult> {
-    logger.info({ storageKey, mimeType, reportId }, 'Processing document');
+    logger.info({ storageKey, mimeType, reportId, documentReceiptId }, 'Processing document');
 
     // Verify report exists and belongs to user
     const report = await ExpenseReport.findById(reportId);
@@ -88,15 +89,15 @@ export class DocumentProcessingService {
 
     // Determine document type and process accordingly
     if (mimeType === 'application/pdf') {
-      return await this.processPdf(buffer, storageKey, reportId, userId);
+      return await this.processPdf(buffer, storageKey, reportId, userId, documentReceiptId);
     } else if (
       mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       mimeType === 'application/vnd.ms-excel' ||
       mimeType === 'text/csv'
     ) {
-      return await this.processExcel(buffer, reportId, userId, mimeType);
+      return await this.processExcel(buffer, reportId, userId, mimeType, documentReceiptId);
     } else if (mimeType.startsWith('image/')) {
-      return await this.processImage(buffer, mimeType, storageKey, reportId, userId);
+      return await this.processImage(buffer, mimeType, storageKey, reportId, userId, documentReceiptId);
     } else {
       throw new Error(`Unsupported document type: ${mimeType}`);
     }
@@ -109,9 +110,10 @@ export class DocumentProcessingService {
     buffer: Buffer,
     storageKey: string,
     reportId: string,
-    userId: string
+    userId: string,
+    documentReceiptId?: string
   ): Promise<DocumentProcessingResult> {
-    logger.info({ storageKey }, 'Processing PDF document');
+    logger.info({ storageKey, documentReceiptId }, 'Processing PDF document');
 
     const result: DocumentProcessingResult = {
       success: true,
@@ -155,7 +157,7 @@ export class DocumentProcessingService {
             receipt,
             reportId,
             userId,
-            storageKey
+            documentReceiptId // Pass document receipt ID for linking
           );
           result.expensesCreated.push(expenseId);
         } catch (error: any) {
@@ -416,9 +418,10 @@ IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
     buffer: Buffer,
     reportId: string,
     userId: string,
-    mimeType: string
+    mimeType: string,
+    documentReceiptId?: string
   ): Promise<DocumentProcessingResult> {
-    logger.info({ mimeType, reportId }, 'Processing Excel document');
+    logger.info({ mimeType, reportId, documentReceiptId }, 'Processing Excel document');
 
     const result: DocumentProcessingResult = {
       success: true,
@@ -559,7 +562,7 @@ IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
             receipt,
             reportId,
             userId,
-            null
+            documentReceiptId // Link Excel document to expenses
           );
           result.expensesCreated.push(expenseId);
         } catch (error: any) {
@@ -590,9 +593,10 @@ IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
     mimeType: string,
     storageKey: string,
     reportId: string,
-    userId: string
+    userId: string,
+    documentReceiptId?: string
   ): Promise<DocumentProcessingResult> {
-    logger.info({ storageKey, mimeType }, 'Processing image document');
+    logger.info({ storageKey, mimeType, documentReceiptId }, 'Processing image document');
 
     const result: DocumentProcessingResult = {
       success: true,
@@ -704,7 +708,7 @@ IMPORTANT: Return ONLY valid JSON.`;
             receipt,
             reportId,
             userId,
-            storageKey
+            documentReceiptId // Link image document to expenses
           );
           result.expensesCreated.push(expenseId);
         } catch (error: any) {
@@ -724,12 +728,13 @@ IMPORTANT: Return ONLY valid JSON.`;
 
   /**
    * Create an expense draft from extracted receipt data
+   * Links the source document as a receipt to the expense
    */
   private static async createExpenseDraft(
     receipt: ExtractedReceipt,
     reportId: string,
     userId: string,
-    _storageKey: string | null
+    documentReceiptId?: string // Receipt ID of the source PDF/Excel/image
   ): Promise<string> {
     // Try to find matching category
     let categoryId: mongoose.Types.ObjectId | undefined;
@@ -751,6 +756,12 @@ IMPORTANT: Return ONLY valid JSON.`;
       }
     }
 
+    // Prepare receipt IDs array - link to source document if provided
+    const receiptIds: mongoose.Types.ObjectId[] = [];
+    if (documentReceiptId) {
+      receiptIds.push(new mongoose.Types.ObjectId(documentReceiptId));
+    }
+
     const expense = new Expense({
       reportId: new mongoose.Types.ObjectId(reportId),
       userId: new mongoose.Types.ObjectId(userId),
@@ -764,7 +775,8 @@ IMPORTANT: Return ONLY valid JSON.`;
       notes: receipt.notes || (receipt.lineItems 
         ? receipt.lineItems.map(item => `${item.description}: ${item.amount}`).join('\n')
         : undefined),
-      receiptIds: [],
+      receiptIds,
+      receiptPrimaryId: documentReceiptId ? new mongoose.Types.ObjectId(documentReceiptId) : undefined,
     });
 
     const saved = await expense.save();

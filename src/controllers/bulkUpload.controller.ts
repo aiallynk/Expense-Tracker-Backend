@@ -1,9 +1,11 @@
 import { randomUUID } from 'crypto';
 
 import { Response } from 'express';
+import mongoose from 'mongoose';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
+import { Receipt } from '../models/Receipt';
 import { DocumentProcessingService } from '../services/documentProcessing.service';
 import { bulkDocumentUploadIntentSchema, bulkDocumentConfirmSchema } from '../utils/dtoTypes';
 import { getPresignedUploadUrl, getObjectUrl } from '../utils/s3';
@@ -42,6 +44,22 @@ export class BulkUploadController {
         storageKey,
       }, 'Creating bulk upload intent');
 
+      // Create Receipt document upfront for the bulk document
+      const receipt = new Receipt({
+        storageKey,
+        mimeType: data.mimeType,
+        sizeBytes: data.sizeBytes,
+        storageUrl: getObjectUrl('receipts', storageKey),
+        uploadConfirmed: false,
+        parsedData: {
+          isBulkDocument: true,
+          originalFilename: data.filename,
+          reportId: data.reportId,
+        },
+      });
+
+      const savedReceipt = await receipt.save();
+
       const uploadUrl = await getPresignedUploadUrl({
         bucketType: 'receipts',
         key: storageKey,
@@ -57,6 +75,7 @@ export class BulkUploadController {
           uploadUrl,
           storageKey,
           storageUrl,
+          receiptId: (savedReceipt._id as mongoose.Types.ObjectId).toString(), // Return receipt ID for linking
           expiresIn: 3600,
           supportedTypes: DocumentProcessingService.getSupportedMimeTypes(),
         },
@@ -66,6 +85,7 @@ export class BulkUploadController {
 
   /**
    * Confirm bulk upload and process document for multiple receipt extraction
+   * Optimized: Reduced delay, streams processing
    */
   static confirmUpload = asyncHandler(
     async (req: AuthRequest, res: Response) => {
@@ -77,18 +97,40 @@ export class BulkUploadController {
         reportId: data.reportId,
         storageKey: data.storageKey,
         mimeType: data.mimeType,
+        receiptId: data.receiptId,
       }, 'Confirming bulk upload and processing document');
 
-      // Small delay to ensure S3 upload has fully propagated
-      await new Promise(resolve => setTimeout(resolve, 1500));
+      // Reduced delay - just 500ms for S3 propagation
+      await new Promise(resolve => setTimeout(resolve, 500));
 
       try {
+        // Update receipt to confirm upload
+        if (data.receiptId) {
+          await Receipt.findByIdAndUpdate(data.receiptId, {
+            uploadConfirmed: true,
+          });
+        }
+
         const result = await DocumentProcessingService.processDocument(
           data.storageKey,
           data.mimeType,
           data.reportId,
-          userId
+          userId,
+          data.receiptId // Pass receipt ID for linking
         );
+
+        // Update receipt with processing results
+        if (data.receiptId) {
+          await Receipt.findByIdAndUpdate(data.receiptId, {
+            parsedData: {
+              isBulkDocument: true,
+              reportId: data.reportId,
+              receiptsExtracted: result.receipts.length,
+              expensesLinked: result.expensesCreated,
+              processedAt: new Date(),
+            },
+          });
+        }
 
         logger.info({
           userId,
@@ -106,6 +148,8 @@ export class BulkUploadController {
             receiptsExtracted: result.receipts.length,
             expensesCreated: result.expensesCreated,
             extractedData: result.receipts,
+            documentReceiptId: data.receiptId, // Include receipt ID for frontend
+            storageKey: data.storageKey,
             errors: result.errors,
           },
           message: result.success 
@@ -113,6 +157,18 @@ export class BulkUploadController {
             : 'Document processing completed with errors',
         });
       } catch (error: any) {
+        // Update receipt with error info
+        if (data.receiptId) {
+          await Receipt.findByIdAndUpdate(data.receiptId, {
+            parsedData: {
+              isBulkDocument: true,
+              reportId: data.reportId,
+              error: error.message,
+              failedAt: new Date(),
+            },
+          });
+        }
+
         logger.error({
           userId,
           reportId: data.reportId,

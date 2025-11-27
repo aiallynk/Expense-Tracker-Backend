@@ -34,6 +34,12 @@ export class ExpensesService {
       throw new Error('Can only add expenses to draft reports');
     }
 
+    // Prepare receipt IDs array - link to source document if provided
+    const receiptIds: mongoose.Types.ObjectId[] = [];
+    if (data.receiptId) {
+      receiptIds.push(new mongoose.Types.ObjectId(data.receiptId));
+    }
+
     const expense = new Expense({
       reportId,
       userId: new mongoose.Types.ObjectId(userId),
@@ -46,7 +52,8 @@ export class ExpensesService {
       status: ExpenseStatus.DRAFT,
       source: data.source,
       notes: data.notes,
-      receiptIds: [],
+      receiptIds,
+      receiptPrimaryId: data.receiptId ? new mongoose.Types.ObjectId(data.receiptId) : undefined,
     });
 
     const saved = await expense.save();

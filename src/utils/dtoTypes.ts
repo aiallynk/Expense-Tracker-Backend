@@ -133,6 +133,7 @@ export const createExpenseSchema = z.object({
   ),
   source: z.nativeEnum(ExpenseSource),
   notes: z.string().optional(),
+  receiptId: z.string().optional(), // Receipt ID to link to expense (e.g., source PDF/Excel document)
 });
 
 export const updateExpenseSchema = z.object({
@@ -171,6 +172,7 @@ export const bulkDocumentConfirmSchema = z.object({
   storageKey: z.string().min(1, 'Storage key is required'),
   mimeType: z.string().min(1, 'MimeType is required'),
   reportId: z.string().min(1, 'Report ID is required'),
+  receiptId: z.string().optional(), // Receipt ID for linking document to expenses
 });
 
 // Query DTOs
