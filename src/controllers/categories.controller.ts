@@ -12,7 +12,7 @@ import {
 export class CategoriesController {
   static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     const categories = await CategoriesService.getAllCategories(companyId);
@@ -25,7 +25,7 @@ export class CategoriesController {
 
   static getAdminCategories = asyncHandler(async (req: AuthRequest, res: Response) => {
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     if (!companyId) {
@@ -67,7 +67,7 @@ export class CategoriesController {
     const data = createCategorySchema.parse(req.body);
     
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     if (!companyId) {
@@ -127,7 +127,7 @@ export class CategoriesController {
     }
 
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     const category = await CategoriesService.getOrCreateCategoryByName(name.trim(), companyId);
@@ -139,7 +139,7 @@ export class CategoriesController {
 
   // Initialize default categories for the company
   static initializeDefaults = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     if (!companyId) {

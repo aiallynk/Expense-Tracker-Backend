@@ -1,7 +1,6 @@
 import mongoose from 'mongoose';
 
 import { Category, ICategory, CategoryStatus } from '../models/Category';
-import { User } from '../models/User';
 import { CreateCategoryDto, UpdateCategoryDto } from '../utils/dtoTypes';
 
 import { logger } from '@/config/logger';

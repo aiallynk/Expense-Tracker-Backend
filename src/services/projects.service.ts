@@ -1,9 +1,6 @@
 import mongoose from 'mongoose';
 
 import { Project, IProject, ProjectStatus } from '../models/Project';
-import { User } from '../models/User';
-
-import { logger } from '@/config/logger';
 
 interface CreateProjectInput {
   name: string;

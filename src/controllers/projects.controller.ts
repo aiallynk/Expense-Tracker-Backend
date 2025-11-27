@@ -8,7 +8,7 @@ import { User } from '../models/User';
 export class ProjectsController {
   static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     if (!companyId) {
@@ -29,7 +29,7 @@ export class ProjectsController {
 
   static getAdminProjects = asyncHandler(async (req: AuthRequest, res: Response) => {
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     if (!companyId) {
@@ -69,7 +69,7 @@ export class ProjectsController {
 
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
     // Get user's company ID
-    const user = await User.findById(req.userId).select('companyId').exec();
+    const user = await User.findById(req.user?.id).select('companyId').exec();
     const companyId = user?.companyId?.toString();
 
     if (!companyId) {

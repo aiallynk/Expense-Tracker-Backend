@@ -2,7 +2,7 @@ import { Router } from 'express';
 
 import { CategoriesController } from '../controllers/categories.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { requireAdmin, requireCompanyAdmin } from '../middleware/role.middleware';
+import { requireCompanyAdmin } from '../middleware/role.middleware';
 import { validate } from '../middleware/validate.middleware';
 import {
   createCategorySchema,
