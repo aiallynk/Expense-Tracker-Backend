@@ -13,12 +13,13 @@ import { logger } from '@/config/logger';
 export class BusinessHeadService {
   /**
    * Get business head dashboard statistics
+   * Only includes data from the BH's department
    */
   static async getDashboardStats(businessHeadId: string): Promise<any> {
     try {
-      // Get business head user to find company
+      // Get business head user to find company and department
       const businessHead = await User.findById(businessHeadId)
-        .select('companyId')
+        .select('companyId departmentId')
         .exec();
 
       if (!businessHead || !businessHead.companyId) {
@@ -29,19 +30,30 @@ export class BusinessHeadService {
           highValueReports: 0,
           companyExpenses: [],
           monthlyTrends: [],
-          pendingReportsByDepartment: [],
+          pendingReportsByManager: [],
         };
       }
 
       const companyId = businessHead.companyId;
 
-      // Get all users in the company
-      const companyUsers = await User.find({
+      // Get managers in the same department as the BH
+      const managersInDepartment = await User.find({
         companyId,
+        role: UserRole.MANAGER,
+        departmentId: businessHead.departmentId,
+        status: 'ACTIVE',
+      }).select('_id name').exec();
+
+      const managerIds = managersInDepartment.map(m => m._id);
+
+      // Get employees who report to these managers
+      const employeesUnderManagers = await User.find({
+        managerId: { $in: managerIds },
         status: 'ACTIVE',
       }).select('_id').exec();
 
-      const userIds = companyUsers.map(u => u._id);
+      // Include managers themselves
+      const userIds = [...employeesUnderManagers.map(u => u._id), ...managerIds];
 
       // Get all approved reports (manager approved and fully approved)
       const approvedReports = await ExpenseReport.find({
@@ -133,20 +145,31 @@ export class BusinessHeadService {
         });
       }
 
-      // Pending reports by department
-      const departmentMap = new Map<string, number>();
+      // Pending reports by manager
+      const managerMap = new Map<string, { name: string; count: number; amount: number }>();
       for (const report of pendingReports) {
         const user = report.userId as any;
-        const departmentName = user?.departmentId?.name || 'Unassigned';
-        departmentMap.set(
-          departmentName,
-          (departmentMap.get(departmentName) || 0) + 1
-        );
+        // Find the manager for this user
+        const employee = await User.findById(user._id || user)
+          .select('managerId')
+          .populate('managerId', 'name')
+          .exec();
+        
+        const manager = employee?.managerId as any;
+        const managerName = manager?.name || 'Unassigned';
+        const managerId = manager?._id?.toString() || 'unassigned';
+        
+        const existing = managerMap.get(managerId) || { name: managerName, count: 0, amount: 0 };
+        existing.count += 1;
+        existing.amount += report.totalAmount || 0;
+        managerMap.set(managerId, existing);
       }
 
-      const pendingReportsByDepartment = Array.from(departmentMap.entries()).map(([name, value]) => ({
-        name,
-        value,
+      const pendingReportsByManager = Array.from(managerMap.entries()).map(([id, data]) => ({
+        managerId: id,
+        name: data.name,
+        count: data.count,
+        amount: Math.round(data.amount * 100) / 100,
       }));
 
       return {
@@ -156,7 +179,7 @@ export class BusinessHeadService {
         highValueReports,
         companyExpenses,
         monthlyTrends,
-        pendingReportsByDepartment,
+        pendingReportsByManager,
       };
     } catch (error: any) {
       logger.error({ error: error }, 'Error getting business head dashboard stats:');
@@ -165,21 +188,23 @@ export class BusinessHeadService {
   }
 
   /**
-   * Get all managers in the company
+   * Get managers in the same department as the BH
    */
   static async getManagers(businessHeadId: string): Promise<any[]> {
     try {
       const businessHead = await User.findById(businessHeadId)
-        .select('companyId')
+        .select('companyId departmentId')
         .exec();
 
       if (!businessHead || !businessHead.companyId) {
         return [];
       }
 
+      // Only get managers in the same department as the BH
       const managers = await User.find({
         companyId: businessHead.companyId,
         role: UserRole.MANAGER,
+        departmentId: businessHead.departmentId, // Same department as BH
         status: 'ACTIVE',
       })
         .select('name email phone departmentId')
@@ -436,29 +461,48 @@ export class BusinessHeadService {
 
   /**
    * Get pending reports (manager approved, waiting for BH approval)
+   * Only shows reports from managers in the same department as the BH
    */
   static async getPendingReports(businessHeadId: string): Promise<any[]> {
     try {
       const businessHead = await User.findById(businessHeadId)
-        .select('companyId')
+        .select('companyId departmentId')
         .exec();
 
       if (!businessHead || !businessHead.companyId) {
         return [];
       }
 
-      const companyUsers = await User.find({
+      // Get managers in the same department as the BH
+      const managersInDepartment = await User.find({
         companyId: businessHead.companyId,
+        role: UserRole.MANAGER,
+        departmentId: businessHead.departmentId, // Same department as BH
         status: 'ACTIVE',
       }).select('_id').exec();
 
-      const userIds = companyUsers.map(u => u._id);
+      const managerIds = managersInDepartment.map(m => m._id);
+
+      // Get employees who report to these managers
+      const employeesUnderManagers = await User.find({
+        managerId: { $in: managerIds },
+        status: 'ACTIVE',
+      }).select('_id').exec();
+
+      const userIds = employeesUnderManagers.map(u => u._id);
+
+      // Also include the managers themselves (they might have their own expenses)
+      const allUserIds = [...userIds, ...managerIds];
+
+      if (allUserIds.length === 0) {
+        return [];
+      }
 
       const reports = await ExpenseReport.find({
-        userId: { $in: userIds },
+        userId: { $in: allUserIds },
         status: ExpenseReportStatus.MANAGER_APPROVED,
       })
-        .populate('userId', 'name email departmentId')
+        .populate('userId', 'name email departmentId managerId')
         .populate('projectId', 'name')
         .sort({ submittedAt: -1 })
         .exec();
