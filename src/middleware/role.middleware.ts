@@ -30,3 +30,5 @@ export const requireRole = (...allowedRoles: UserRole[]) => {
 
 export const requireAdmin = requireRole(UserRole.ADMIN, UserRole.BUSINESS_HEAD, UserRole.COMPANY_ADMIN, UserRole.SUPER_ADMIN);
 
+export const requireCompanyAdmin = requireRole(UserRole.COMPANY_ADMIN, UserRole.SUPER_ADMIN);
+

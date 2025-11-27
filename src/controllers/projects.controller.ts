@@ -3,14 +3,45 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { ProjectsService } from '../services/projects.service';
-import {
-  createProjectSchema,
-  updateProjectSchema,
-} from '../utils/dtoTypes';
+import { User } from '../models/User';
 
 export class ProjectsController {
-  static getAll = asyncHandler(async (_req: AuthRequest, res: Response) => {
-    const projects = await ProjectsService.getAllProjects();
+  static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Get user's company ID
+    const user = await User.findById(req.userId).select('companyId').exec();
+    const companyId = user?.companyId?.toString();
+
+    if (!companyId) {
+      res.status(200).json({
+        success: true,
+        data: [],
+      });
+      return;
+    }
+
+    const projects = await ProjectsService.getAllProjects(companyId);
+
+    res.status(200).json({
+      success: true,
+      data: projects,
+    });
+  });
+
+  static getAdminProjects = asyncHandler(async (req: AuthRequest, res: Response) => {
+    // Get user's company ID
+    const user = await User.findById(req.userId).select('companyId').exec();
+    const companyId = user?.companyId?.toString();
+
+    if (!companyId) {
+      res.status(400).json({
+        success: false,
+        message: 'User is not associated with a company',
+        code: 'NO_COMPANY',
+      });
+      return;
+    }
+
+    const projects = await ProjectsService.getAdminProjects(companyId);
 
     res.status(200).json({
       success: true,
@@ -37,8 +68,30 @@ export class ProjectsController {
   });
 
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const data = createProjectSchema.parse(req.body);
-    const project = await ProjectsService.createProject(data);
+    // Get user's company ID
+    const user = await User.findById(req.userId).select('companyId').exec();
+    const companyId = user?.companyId?.toString();
+
+    if (!companyId) {
+      res.status(400).json({
+        success: false,
+        message: 'User is not associated with a company',
+        code: 'NO_COMPANY',
+      });
+      return;
+    }
+
+    const project = await ProjectsService.createProject({
+      name: req.body.name,
+      code: req.body.code,
+      description: req.body.description,
+      companyId,
+      managerId: req.body.managerId,
+      startDate: req.body.startDate,
+      endDate: req.body.endDate,
+      budget: req.body.budget,
+      status: req.body.status,
+    });
 
     res.status(201).json({
       success: true,
@@ -47,8 +100,16 @@ export class ProjectsController {
   });
 
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const data = updateProjectSchema.parse(req.body);
-    const project = await ProjectsService.updateProject(req.params.id, data);
+    const project = await ProjectsService.updateProject(req.params.id, {
+      name: req.body.name,
+      code: req.body.code,
+      description: req.body.description,
+      managerId: req.body.managerId,
+      startDate: req.body.startDate,
+      endDate: req.body.endDate,
+      budget: req.body.budget,
+      status: req.body.status,
+    });
 
     res.status(200).json({
       success: true,
@@ -65,4 +126,3 @@ export class ProjectsController {
     });
   });
 }
-
