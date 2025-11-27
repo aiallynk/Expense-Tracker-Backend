@@ -478,26 +478,34 @@ export class ReportsService {
       throw new Error('Access denied');
     }
 
-    // Allow submitting if report is DRAFT or if it was SUBMITTED but has pending changes
-    // (in which case we allow resubmission after fixing expenses)
+    // Allow submitting if report is DRAFT or CHANGES_REQUESTED (for resubmission)
     const canSubmit = 
       report.status === ExpenseReportStatus.DRAFT || 
-      report.status === ExpenseReportStatus.SUBMITTED;
+      report.status === ExpenseReportStatus.CHANGES_REQUESTED;
 
     if (!canSubmit) {
       throw new Error('Cannot submit this report in its current status');
     }
 
-    // If report was previously SUBMITTED, check if there are any PENDING expenses
-    // If so, allow resubmission (this is a resubmission after fixing changes)
-    if (report.status === ExpenseReportStatus.SUBMITTED) {
+    // If report was previously CHANGES_REQUESTED, check if there are any PENDING or REJECTED expenses
+    // These must be addressed before resubmission
+    if (report.status === ExpenseReportStatus.CHANGES_REQUESTED) {
       const pendingExpensesCount = await Expense.countDocuments({ 
         reportId: id, 
         status: ExpenseStatus.PENDING 
       });
       
+      const rejectedExpensesCount = await Expense.countDocuments({ 
+        reportId: id, 
+        status: ExpenseStatus.REJECTED 
+      });
+      
       if (pendingExpensesCount > 0) {
         throw new Error('Please update all expenses that need changes before resubmitting');
+      }
+      
+      if (rejectedExpensesCount > 0) {
+        throw new Error('Please update or delete all rejected expenses before resubmitting');
       }
     }
 

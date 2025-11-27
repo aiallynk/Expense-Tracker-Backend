@@ -70,8 +70,9 @@ export class DocumentProcessingService {
     if (report.userId.toString() !== userId) {
       throw new Error('Access denied');
     }
-    if (report.status !== 'DRAFT') {
-      throw new Error('Can only add expenses to draft reports');
+    // Allow adding expenses if report is DRAFT or CHANGES_REQUESTED
+    if (report.status !== 'DRAFT' && report.status !== 'CHANGES_REQUESTED') {
+      throw new Error('Can only add expenses to draft reports or reports with changes requested');
     }
 
     const bucket = getS3Bucket('receipts');

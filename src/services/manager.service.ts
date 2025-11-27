@@ -785,6 +785,13 @@ export class ManagerService {
     expense.managerComment = comment;
     await expense.save();
 
+    // Update report status to CHANGES_REQUESTED so employee knows to make changes
+    if (report.status === ExpenseReportStatus.SUBMITTED) {
+      await ExpenseReport.findByIdAndUpdate(report._id, {
+        status: ExpenseReportStatus.CHANGES_REQUESTED
+      });
+    }
+
     // Audit log
     await AuditService.log(
       managerId,
@@ -795,7 +802,8 @@ export class ManagerService {
     );
 
     // Emit real-time event to manager
-    emitManagerReportUpdate(managerId, 'EXPENSE_REJECTED', report.toObject());
+    const updatedReport = await ExpenseReport.findById(report._id).populate('userId', 'name email').exec();
+    emitManagerReportUpdate(managerId, 'EXPENSE_REJECTED', updatedReport?.toObject() || report.toObject());
 
     // Emit real-time event to employee (expense owner)
     try {
@@ -860,6 +868,13 @@ export class ManagerService {
     expense.managerActionAt = new Date();
     expense.managerComment = comment;
     await expense.save();
+
+    // Update report status to CHANGES_REQUESTED so employee knows to make changes
+    if (report.status === ExpenseReportStatus.SUBMITTED) {
+      await ExpenseReport.findByIdAndUpdate(report._id, {
+        status: ExpenseReportStatus.CHANGES_REQUESTED
+      });
+    }
     
     // Audit log
     await AuditService.log(
@@ -871,7 +886,8 @@ export class ManagerService {
     );
 
     // Emit real-time event to manager
-    emitManagerReportUpdate(managerId, 'EXPENSE_CHANGES_REQUESTED', report.toObject());
+    const updatedReport = await ExpenseReport.findById(report._id).populate('userId', 'name email').exec();
+    emitManagerReportUpdate(managerId, 'EXPENSE_CHANGES_REQUESTED', updatedReport?.toObject() || report.toObject());
 
     // Emit real-time event to employee (expense owner)
     try {
