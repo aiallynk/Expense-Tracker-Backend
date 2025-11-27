@@ -1115,12 +1115,19 @@ export class ManagerService {
       pendingApprovals: pendingReports.length,
       approvedThisMonth,
       totalTeamSpend,
-      pendingReports: pendingReports.slice(0, 5).map(r => ({
-        _id: r._id,
-        name: r.name,
-        totalAmount: r.totalAmount || 0,
-        userId: r.userId,
-      })),
+      pendingReports: pendingReports.slice(0, 5).map(r => {
+        // Count expenses for this report
+        const reportExpenses = allExpenses.filter(
+          exp => exp.reportId && (exp.reportId as any).toString() === (r._id as mongoose.Types.ObjectId).toString()
+        );
+        return {
+          _id: r._id,
+          name: r.name,
+          totalAmount: r.totalAmount || 0,
+          userId: r.userId,
+          expensesCount: reportExpenses.length,
+        };
+      }),
       teamWiseSpending,
     };
   }
