@@ -4,16 +4,28 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { CategoriesService } from '../services/categories.service';
 import { User } from '../models/User';
+import { CompanyAdmin } from '../models/CompanyAdmin';
 import {
   createCategorySchema,
   updateCategorySchema,
 } from '../utils/dtoTypes';
 
+// Helper function to get company ID for both regular users and company admins
+async function getCompanyId(req: AuthRequest): Promise<string | undefined> {
+  // If user is COMPANY_ADMIN, look in CompanyAdmin collection
+  if (req.user?.role === 'COMPANY_ADMIN') {
+    const companyAdmin = await CompanyAdmin.findById(req.user.id).select('companyId').exec();
+    return companyAdmin?.companyId?.toString();
+  }
+  
+  // Otherwise look in User collection
+  const user = await User.findById(req.user?.id).select('companyId').exec();
+  return user?.companyId?.toString();
+}
+
 export class CategoriesController {
   static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     const categories = await CategoriesService.getAllCategories(companyId);
 
@@ -24,9 +36,7 @@ export class CategoriesController {
   });
 
   static getAdminCategories = asyncHandler(async (req: AuthRequest, res: Response) => {
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     if (!companyId) {
       res.status(400).json({
@@ -66,9 +76,7 @@ export class CategoriesController {
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = createCategorySchema.parse(req.body);
     
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     if (!companyId) {
       res.status(400).json({
@@ -126,9 +134,7 @@ export class CategoriesController {
       return;
     }
 
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     const category = await CategoriesService.getOrCreateCategoryByName(name.trim(), companyId);
     res.status(200).json({
@@ -139,8 +145,7 @@ export class CategoriesController {
 
   // Initialize default categories for the company
   static initializeDefaults = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     if (!companyId) {
       res.status(400).json({

@@ -4,12 +4,24 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { ProjectsService } from '../services/projects.service';
 import { User } from '../models/User';
+import { CompanyAdmin } from '../models/CompanyAdmin';
+
+// Helper function to get company ID for both regular users and company admins
+async function getCompanyId(req: AuthRequest): Promise<string | undefined> {
+  // If user is COMPANY_ADMIN, look in CompanyAdmin collection
+  if (req.user?.role === 'COMPANY_ADMIN') {
+    const companyAdmin = await CompanyAdmin.findById(req.user.id).select('companyId').exec();
+    return companyAdmin?.companyId?.toString();
+  }
+  
+  // Otherwise look in User collection
+  const user = await User.findById(req.user?.id).select('companyId').exec();
+  return user?.companyId?.toString();
+}
 
 export class ProjectsController {
   static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     if (!companyId) {
       res.status(200).json({
@@ -28,9 +40,7 @@ export class ProjectsController {
   });
 
   static getAdminProjects = asyncHandler(async (req: AuthRequest, res: Response) => {
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     if (!companyId) {
       res.status(400).json({
@@ -68,9 +78,7 @@ export class ProjectsController {
   });
 
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
-    // Get user's company ID
-    const user = await User.findById(req.user?.id).select('companyId').exec();
-    const companyId = user?.companyId?.toString();
+    const companyId = await getCompanyId(req);
 
     if (!companyId) {
       res.status(400).json({
