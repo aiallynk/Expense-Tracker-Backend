@@ -19,6 +19,10 @@ export interface IExpense extends Document {
   // Bulk upload tracking
   sourceDocumentType?: 'pdf' | 'excel' | 'image';
   sourceDocumentSequence?: number; // Receipt number in the source document (page number for PDF)
+  // Manager feedback
+  managerComment?: string; // Comment from manager when rejecting/requesting changes
+  managerAction?: 'approve' | 'reject' | 'request_changes'; // Last manager action
+  managerActionAt?: Date; // When manager took action
   createdAt: Date;
   updatedAt: Date;
 }
@@ -91,6 +95,18 @@ const expenseSchema = new Schema<IExpense>(
     },
     sourceDocumentSequence: {
       type: Number, // Receipt number in the source document (page number for PDF, row for Excel)
+    },
+    // Manager feedback
+    managerComment: {
+      type: String,
+      trim: true,
+    },
+    managerAction: {
+      type: String,
+      enum: ['approve', 'reject', 'request_changes'],
+    },
+    managerActionAt: {
+      type: Date,
     },
   },
   {

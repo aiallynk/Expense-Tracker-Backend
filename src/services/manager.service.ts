@@ -360,6 +360,31 @@ export class ManagerService {
       throw error;
     }
 
+    // Check for pending or rejected expenses
+    const pendingExpenses = await Expense.countDocuments({
+      reportId: new mongoose.Types.ObjectId(reportId),
+      status: ExpenseStatus.PENDING
+    });
+
+    if (pendingExpenses > 0) {
+      const error: any = new Error(`Cannot approve report: ${pendingExpenses} expense(s) are pending changes. Please wait for employee to update them or approve/reject individually.`);
+      error.statusCode = 400;
+      error.code = 'PENDING_EXPENSES';
+      throw error;
+    }
+
+    const rejectedExpenses = await Expense.countDocuments({
+      reportId: new mongoose.Types.ObjectId(reportId),
+      status: ExpenseStatus.REJECTED
+    });
+
+    if (rejectedExpenses > 0) {
+      const error: any = new Error(`Cannot approve report: ${rejectedExpenses} expense(s) are rejected. Please wait for employee to update or delete them.`);
+      error.statusCode = 400;
+      error.code = 'REJECTED_EXPENSES';
+      throw error;
+    }
+
     // Update approvers array
     const approverIndex = report.approvers.findIndex(
       (a: any) => a.userId.toString() === managerId && a.level === 1
@@ -677,8 +702,11 @@ export class ManagerService {
       throw error;
     }
 
-    // Update expense status
+    // Update expense status and manager feedback
     expense.status = ExpenseStatus.APPROVED;
+    expense.managerAction = 'approve';
+    expense.managerActionAt = new Date();
+    expense.managerComment = comment || undefined;
     await expense.save();
 
     // Audit log
@@ -750,8 +778,11 @@ export class ManagerService {
       throw error;
     }
 
-    // Update expense status
+    // Update expense status and manager feedback
     expense.status = ExpenseStatus.REJECTED;
+    expense.managerAction = 'reject';
+    expense.managerActionAt = new Date();
+    expense.managerComment = comment;
     await expense.save();
 
     // Audit log
@@ -825,6 +856,9 @@ export class ManagerService {
 
     // For request changes, we set status to PENDING to indicate changes are needed
     expense.status = ExpenseStatus.PENDING;
+    expense.managerAction = 'request_changes';
+    expense.managerActionAt = new Date();
+    expense.managerComment = comment;
     await expense.save();
     
     // Audit log

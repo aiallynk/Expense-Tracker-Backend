@@ -103,13 +103,15 @@ export class ExpensesService {
 
     // Allow updating expenses if:
     // 1. Report is DRAFT, OR
-    // 2. Report is SUBMITTED and expense status is PENDING (changes requested)
+    // 2. Report is SUBMITTED and expense status is PENDING (changes requested), OR
+    // 3. Report is SUBMITTED and expense status is REJECTED (employee can fix rejected expenses)
     const canUpdate = 
       report.status === ExpenseReportStatus.DRAFT || 
-      (report.status === ExpenseReportStatus.SUBMITTED && expense.status === ExpenseStatus.PENDING);
+      (report.status === ExpenseReportStatus.SUBMITTED && 
+       (expense.status === ExpenseStatus.PENDING || expense.status === ExpenseStatus.REJECTED));
 
     if (!canUpdate) {
-      throw new Error('Can only update expenses in draft reports or expenses with pending changes');
+      throw new Error('Can only update expenses in draft reports or expenses with pending/rejected status');
     }
 
     if (data.vendor !== undefined) {
@@ -140,10 +142,14 @@ export class ExpensesService {
       expense.notes = data.notes;
     }
 
-    // If expense status was PENDING (changes requested), update it back to DRAFT
+    // If expense status was PENDING or REJECTED, update it back to DRAFT
     // This indicates the employee has made the requested changes
-    if (expense.status === ExpenseStatus.PENDING) {
+    if (expense.status === ExpenseStatus.PENDING || expense.status === ExpenseStatus.REJECTED) {
       expense.status = ExpenseStatus.DRAFT;
+      // Clear manager feedback since employee has addressed the issue
+      expense.managerComment = undefined;
+      expense.managerAction = undefined;
+      expense.managerActionAt = undefined;
     }
 
     const saved = await expense.save();
@@ -387,12 +393,15 @@ export class ExpensesService {
       throw new Error('Access denied');
     }
 
-    // Only allow deletion if report is DRAFT (for employees) or if admin
-    if (
-      report.userId.toString() === userId &&
-      report.status !== ExpenseReportStatus.DRAFT
-    ) {
-      throw new Error('Can only delete expenses from draft reports');
+    // Only allow deletion if:
+    // 1. Report is DRAFT, OR
+    // 2. Expense is REJECTED (employee can delete rejected expenses and resubmit)
+    const canDelete = 
+      report.status === ExpenseReportStatus.DRAFT || 
+      expense.status === ExpenseStatus.REJECTED;
+
+    if (report.userId.toString() === userId && !canDelete) {
+      throw new Error('Can only delete expenses from draft reports or rejected expenses');
     }
 
     const reportId = report._id.toString();
