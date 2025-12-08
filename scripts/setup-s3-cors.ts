@@ -21,10 +21,11 @@ async function setupS3CORS() {
         AllowedOrigins: [
           config.app.frontendUrlApp,
           config.app.frontendUrlAdmin,
+          'https://nexpense-aially.vercel.app', // Production Vercel deployment
           'http://localhost:5173', // Vite dev server
           'http://localhost:3000', // Common React dev port
           'http://localhost:5174', // Alternative Vite port
-        ],
+        ].filter(Boolean), // Remove undefined values
         ExposeHeaders: ['ETag', 'x-amz-server-side-encryption', 'x-amz-request-id', 'x-amz-id-2'],
         MaxAgeSeconds: 3600,
       },
