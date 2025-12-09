@@ -80,5 +80,52 @@ export class ReceiptsController {
       throw error;
     }
   });
+
+  static uploadFile = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const receiptId = req.params.receiptId;
+    
+    // Handle both raw binary and FormData
+    let fileBuffer: Buffer;
+    let mimeType: string;
+
+    if (req.body instanceof Buffer) {
+      // Raw binary upload
+      fileBuffer = req.body;
+      mimeType = (req.headers['content-type'] || 'application/octet-stream').split(';')[0];
+    } else if (req.body && typeof req.body === 'object' && 'file' in req.body) {
+      // FormData upload (if multer is used)
+      const file = (req.body as any).file;
+      fileBuffer = file.buffer || Buffer.from(file);
+      mimeType = file.mimetype || file.type || 'application/octet-stream';
+    } else {
+      res.status(400).json({
+        success: false,
+        message: 'No file provided or invalid format',
+        code: 'NO_FILE',
+      });
+      return;
+    }
+
+    if (!fileBuffer || fileBuffer.length === 0) {
+      res.status(400).json({
+        success: false,
+        message: 'File is empty',
+        code: 'EMPTY_FILE',
+      });
+      return;
+    }
+
+    await ReceiptsService.uploadFile(
+      receiptId,
+      req.user!.id,
+      fileBuffer,
+      mimeType
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'File uploaded successfully',
+    });
+  });
 }
 

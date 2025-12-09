@@ -7,7 +7,7 @@ import { Receipt, IReceipt } from '../models/Receipt';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused - accessed via populate
 import { UploadIntentDto } from '../utils/dtoTypes';
-import { getPresignedUploadUrl, getObjectUrl, getPresignedDownloadUrl } from '../utils/s3';
+import { getPresignedUploadUrl, getObjectUrl, getPresignedDownloadUrl, uploadToS3 } from '../utils/s3';
 
 
 
@@ -89,6 +89,46 @@ export class ReceiptsService {
       uploadUrl,
       storageKey,
     };
+  }
+
+  /**
+   * Upload file directly to S3 via backend (bypasses CORS)
+   */
+  static async uploadFile(
+    receiptId: string,
+    userId: string,
+    fileBuffer: Buffer,
+    mimeType: string
+  ): Promise<void> {
+    const receipt = await Receipt.findById(receiptId).populate({
+      path: 'expenseId',
+      populate: { path: 'reportId' },
+    });
+
+    if (!receipt) {
+      throw new Error('Receipt not found');
+    }
+
+    // Check access via report
+    const expense = receipt.expenseId as any;
+    const report = expense.reportId as any;
+
+    if (report && report.userId.toString() !== userId) {
+      throw new Error('Access denied');
+    }
+
+    // Upload to S3
+    await uploadToS3('receipts', receipt.storageKey, fileBuffer, mimeType);
+
+    // Update receipt with file size
+    receipt.sizeBytes = fileBuffer.length;
+    await receipt.save();
+
+    logger.info({
+      receiptId,
+      storageKey: receipt.storageKey,
+      sizeBytes: fileBuffer.length,
+    }, 'File uploaded to S3 via backend');
   }
 
   static async confirmUpload(

@@ -52,6 +52,27 @@ export const getObjectUrl = (bucketType: 'receipts' | 'exports', key: string): s
 };
 
 /**
+ * Upload file buffer directly to S3 (server-side upload, bypasses CORS)
+ */
+export const uploadToS3 = async (
+  bucketType: 'receipts' | 'exports',
+  key: string,
+  buffer: Buffer,
+  mimeType: string
+): Promise<void> => {
+  const bucket = getS3Bucket(bucketType);
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: buffer,
+    ContentType: mimeType,
+  });
+
+  await s3Client.send(command);
+  logger.info({ bucket, key, mimeType, size: buffer.length }, 'File uploaded to S3');
+};
+
+/**
  * Check if an S3 bucket exists
  */
 export const bucketExists = async (bucketName: string): Promise<boolean> => {

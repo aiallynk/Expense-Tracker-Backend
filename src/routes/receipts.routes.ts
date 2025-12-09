@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import express from 'express';
 
 import { ReceiptsController } from '../controllers/receipts.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -25,6 +26,15 @@ router.post(
 );
 
 router.get('/receipts/:id', ReceiptsController.getById);
+
+// Upload file via backend (bypasses CORS)
+// Use raw body parser for binary file uploads
+router.post(
+  '/receipts/:receiptId/upload',
+  receiptUploadRateLimiter,
+  express.raw({ type: '*/*', limit: '10mb' }),
+  ReceiptsController.uploadFile
+);
 
 export default router;
 
