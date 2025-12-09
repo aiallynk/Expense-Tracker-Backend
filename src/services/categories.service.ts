@@ -28,15 +28,23 @@ export class CategoriesService {
    * Get all categories for admin management (all statuses)
    */
   static async getAdminCategories(companyId: string): Promise<ICategory[]> {
-    return Category.find({
+    const query: any = {
       $or: [
         { companyId: new mongoose.Types.ObjectId(companyId) },
         { companyId: { $exists: false } },
         { companyId: null },
       ],
-    })
+    };
+    
+    logger.debug({ companyId, query }, 'Fetching admin categories');
+    
+    const categories = await Category.find(query)
       .sort({ isCustom: 1, name: 1 })
       .exec();
+    
+    logger.debug({ count: categories.length, companyId }, 'Admin categories fetched');
+    
+    return categories;
   }
 
   static async getCategoryById(id: string): Promise<ICategory | null> {
@@ -49,6 +57,8 @@ export class CategoriesService {
   static async createCategory(
     data: CreateCategoryDto & { companyId?: string; description?: string }
   ): Promise<ICategory> {
+    logger.debug({ data }, 'Creating category');
+    
     const category = new Category({
       name: data.name,
       code: data.code,
@@ -57,7 +67,11 @@ export class CategoriesService {
       status: CategoryStatus.ACTIVE,
       isCustom: true,
     });
-    return category.save();
+    
+    const saved = await category.save();
+    logger.info({ categoryId: saved._id, companyId: data.companyId, name: data.name }, 'Category created successfully');
+    
+    return saved;
   }
 
   static async updateCategory(

@@ -90,7 +90,7 @@ export class CategoriesController {
     const category = await CategoriesService.createCategory({
       ...data,
       companyId,
-      description: req.body.description,
+      description: data.description || req.body.description,
     });
 
     res.status(201).json({
