@@ -1,7 +1,16 @@
 [
   {
-    "AllowedHeaders": ["*"],
-    "AllowedMethods": ["GET", "PUT", "POST", "HEAD"],
+    "AllowedHeaders": [
+      "*",
+      "Content-Type",
+      "Content-Length",
+      "x-amz-content-sha256",
+      "x-amz-date",
+      "x-amz-security-token",
+      "x-amz-checksum-crc32",
+      "x-amz-sdk-checksum-algorithm"
+    ],
+    "AllowedMethods": ["GET", "PUT", "POST", "HEAD", "DELETE"],
     "AllowedOrigins": [
       "https://nexpense-aially.vercel.app",
       "http://localhost:5173",
@@ -13,7 +22,8 @@
       "ETag",
       "x-amz-server-side-encryption",
       "x-amz-request-id",
-      "x-amz-id-2"
+      "x-amz-id-2",
+      "x-amz-version-id"
     ],
     "MaxAgeSeconds": 3600
   }
