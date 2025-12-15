@@ -73,9 +73,47 @@ export class CompanyAdminDashboardService {
 
     // Build queries
     const reportQuery = { userId: { $in: userIds } };
-    const expenseQuery = { userId: { $in: userIds } };
+
+    // Only include expenses whose reports are at/after manager or BH approval
+    const approvedReportStatuses = [
+      ExpenseReportStatus.MANAGER_APPROVED,
+      ExpenseReportStatus.BH_APPROVED,
+      ExpenseReportStatus.APPROVED,
+    ];
+
+    const approvedReports = await ExpenseReport.find({
+      ...reportQuery,
+      status: { $in: approvedReportStatuses },
+    })
+      .select('_id')
+      .exec();
+
+    const approvedReportIds = approvedReports.map((r) => r._id);
+
+    const baseApprovedExpenseQuery: any = {
+      userId: { $in: userIds },
+    };
+
+    if (approvedReportIds.length > 0) {
+      baseApprovedExpenseQuery.reportId = { $in: approvedReportIds };
+    } else {
+      // No approved reports → no approved spend
+      return {
+        totalUsers: await User.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId) }),
+        employees: companyUsers.filter(u => u.role === 'EMPLOYEE').length,
+        managers: companyUsers.filter(u => u.role === 'MANAGER').length,
+        businessHeads: companyUsers.filter(u => u.role === 'BUSINESS_HEAD').length,
+        totalReports: await ExpenseReport.countDocuments(reportQuery),
+        pendingApprovals: await ExpenseReport.countDocuments({ ...reportQuery, status: ExpenseReportStatus.SUBMITTED }),
+        totalSpendThisMonth: 0,
+        userTrend: 0,
+        reportsTrend: 0,
+        spendTrend: 0,
+      };
+    }
+
     const monthExpenseQuery = {
-      ...expenseQuery,
+      ...baseApprovedExpenseQuery,
       expenseDate: {
         $gte: startOfMonth,
         $lte: endOfMonth,
@@ -86,7 +124,7 @@ export class CompanyAdminDashboardService {
     const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
     const lastMonthEnd = new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59);
     const lastMonthExpenseQuery = {
-      ...expenseQuery,
+      ...baseApprovedExpenseQuery,
       expenseDate: {
         $gte: lastMonthStart,
         $lte: lastMonthEnd,

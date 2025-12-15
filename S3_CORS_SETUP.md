@@ -97,3 +97,6 @@ The current `s3-cors-config.json` allows:
 - **Headers**: All headers (including Content-Type and AWS-specific headers)
 - **Max Age**: 3600 seconds (1 hour)
 
+
+
+
