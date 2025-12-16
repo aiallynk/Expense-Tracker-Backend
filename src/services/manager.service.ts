@@ -20,22 +20,45 @@ export class ManagerService {
    * Checks both:
    * 1. Direct reports (user.managerId matches managerId)
    * 2. Team members (user is in a team where managerId is the team leader)
+   * 
+   * SECURITY: Also verifies user and manager belong to the same company
    */
   static async isUserInManagerTeam(userId: string, managerId: string): Promise<boolean> {
-    // Check direct manager relationship
-    const user = await User.findById(userId).select('managerId').exec();
-    if (user && user.managerId?.toString() === managerId) {
-      return true;
+    // Get manager's companyId for security isolation
+    const manager = await User.findById(managerId).select('companyId').exec();
+    if (!manager) {
+      return false;
     }
 
-    // Check team membership
+    // Check direct manager relationship AND companyId match
+    const user = await User.findById(userId).select('managerId companyId').exec();
+    if (user && user.managerId?.toString() === managerId) {
+      // Verify companyId matches (or both are null/undefined)
+      const userCompanyId = user.companyId?.toString();
+      const managerCompanyId = manager.companyId?.toString();
+      
+      // Both must have same companyId (both null/undefined is also valid)
+      if (userCompanyId === managerCompanyId) {
+        return true;
+      }
+    }
+
+    // Check team membership (teams should already be filtered by company, but verify user's companyId)
     const teams = await Team.find({
       managerId: new mongoose.Types.ObjectId(managerId),
       status: 'ACTIVE',
       'members.userId': new mongoose.Types.ObjectId(userId)
     }).limit(1).exec();
 
-    return teams.length > 0;
+    if (teams.length > 0 && user) {
+      // Verify companyId matches
+      const userCompanyId = user.companyId?.toString();
+      const managerCompanyId = manager.companyId?.toString();
+      
+      return userCompanyId === managerCompanyId;
+    }
+
+    return false;
   }
 
   /**
@@ -43,14 +66,33 @@ export class ManagerService {
    * Includes both:
    * 1. Direct reports (employees with managerId matching this manager)
    * 2. Team members (employees in teams where this manager is the team leader)
+   * 
+   * SECURITY: Only returns team members from the same company as the manager
    */
   static async getTeamMembers(managerId: string): Promise<IUser[]> {
-    // Step 1: Get direct team members
-    const directTeamMembers = await User.find({ 
+    // Get manager's companyId for security isolation
+    const manager = await User.findById(managerId).select('companyId').exec();
+    if (!manager) {
+      logger.warn({ managerId }, 'Manager not found');
+      return [];
+    }
+
+    // Step 1: Get direct team members (only from same company)
+    const directTeamQuery: any = { 
       managerId: new mongoose.Types.ObjectId(managerId),
       status: 'ACTIVE',
       role: UserRole.EMPLOYEE
-    })
+    };
+    
+    // Add companyId filter for multi-tenant isolation
+    if (manager.companyId) {
+      directTeamQuery.companyId = manager.companyId;
+    } else {
+      // If manager has no companyId, only return users with no companyId
+      directTeamQuery.companyId = { $exists: false };
+    }
+
+    const directTeamMembers = await User.find(directTeamQuery)
       .select('-passwordHash')
       .populate('departmentId', 'name code')
       .sort({ name: 1 })
@@ -74,13 +116,23 @@ export class ManagerService {
       }
     });
 
-    // Step 3: Get User records for team members
+    // Step 3: Get User records for team members (only from same company)
+    const teamMemberQuery: any = {
+      _id: { $in: teamMemberIds },
+      status: 'ACTIVE',
+      role: UserRole.EMPLOYEE
+    };
+    
+    // Add companyId filter for multi-tenant isolation
+    if (manager.companyId) {
+      teamMemberQuery.companyId = manager.companyId;
+    } else {
+      // If manager has no companyId, only return users with no companyId
+      teamMemberQuery.companyId = { $exists: false };
+    }
+
     const teamMemberUsers = teamMemberIds.length > 0
-      ? await User.find({
-          _id: { $in: teamMemberIds },
-          status: 'ACTIVE',
-          role: UserRole.EMPLOYEE
-        })
+      ? await User.find(teamMemberQuery)
           .select('-passwordHash')
           .populate('departmentId', 'name code')
           .sort({ name: 1 })
@@ -122,11 +174,27 @@ export class ManagerService {
       pageSize?: number;
     }
   ): Promise<{ reports: any[]; total: number }> {
-    // Step 1: Get direct team members (employees with managerId matching this manager)
-    const directTeamMembers = await User.find({ 
+    // Get manager's companyId for security isolation
+    const manager = await User.findById(managerId).select('companyId').exec();
+    if (!manager) {
+      logger.warn({ managerId }, 'Manager not found');
+      return { reports: [], total: 0 };
+    }
+
+    // Step 1: Get direct team members (only from same company)
+    const directTeamQuery: any = { 
       managerId: new mongoose.Types.ObjectId(managerId),
       status: 'ACTIVE'
-    }).select('_id').exec();
+    };
+    
+    // Add companyId filter for multi-tenant isolation
+    if (manager.companyId) {
+      directTeamQuery.companyId = manager.companyId;
+    } else {
+      directTeamQuery.companyId = { $exists: false };
+    }
+
+    const directTeamMembers = await User.find(directTeamQuery).select('_id').exec();
     
     const directTeamMemberIds = directTeamMembers.map(m => m._id);
 
@@ -224,11 +292,27 @@ export class ManagerService {
       pageSize?: number;
     }
   ): Promise<{ expenses: any[]; total: number }> {
-    // Step 1: Get direct team members
-    const directTeamMembers = await User.find({ 
+    // Get manager's companyId for security isolation
+    const manager = await User.findById(managerId).select('companyId').exec();
+    if (!manager) {
+      logger.warn({ managerId }, 'Manager not found');
+      return { expenses: [], total: 0 };
+    }
+
+    // Step 1: Get direct team members (only from same company)
+    const directTeamQuery: any = { 
       managerId: new mongoose.Types.ObjectId(managerId),
       status: 'ACTIVE'
-    }).select('_id').exec();
+    };
+    
+    // Add companyId filter for multi-tenant isolation
+    if (manager.companyId) {
+      directTeamQuery.companyId = manager.companyId;
+    } else {
+      directTeamQuery.companyId = { $exists: false };
+    }
+
+    const directTeamMembers = await User.find(directTeamQuery).select('_id').exec();
     
     const directTeamMemberIds = directTeamMembers.map(m => m._id);
 
