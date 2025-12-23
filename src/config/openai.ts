@@ -1,24 +1,39 @@
 import OpenAI from 'openai';
+
 import { logger } from './logger';
+
 import { config } from './index';
 
-// Initialize OpenAI Client (for Vision & Text)
-export const openaiClient = new OpenAI({
-  apiKey: config.openai.apiKey,
-  baseURL: config.openai.baseUrl,
+// Together AI uses OpenAI-compatible API
+export const togetherAIClient = new OpenAI({
+  apiKey: config.togetherAI.apiKey,
+  baseURL: config.togetherAI.baseUrl,
+  defaultHeaders: {
+    ...(config.togetherAI.userKey && { 'X-Together-User-Key': config.togetherAI.userKey }),
+  },
 });
 
-export const getVisionModel = (): string => {
-  return config.openai.modelVision;
-};
-
-export const getTextModel = (): string => {
-  return config.openai.modelVision; // Use vision model by default unless you want a specific text model
-};
-
-// Log config usage on startup
-if (config.openai.apiKey) {
-  logger.info({ model: config.openai.modelVision, using: 'OpenAI', baseUrl: config.openai.baseUrl }, 'OpenAI API configured');
+// Log configuration on initialization
+if (config.togetherAI.apiKey) {
+  logger.info(
+    {
+      model: config.togetherAI.modelVision,
+      baseUrl: config.togetherAI.baseUrl,
+      hasUserKey: !!config.togetherAI.userKey,
+    },
+    'Together AI configured'
+  );
 } else {
-  logger.warn('OpenAI API key not configured');
+  logger.warn('Together AI API key not configured');
 }
+
+export const getVisionModel = (): string => {
+  return config.togetherAI.modelVision;
+};
+
+// Legacy exports for compatibility
+export const openaiClient = togetherAIClient;
+export const getTextModel = (): string => {
+  return config.togetherAI.modelVision; // Use same model for text
+};
+

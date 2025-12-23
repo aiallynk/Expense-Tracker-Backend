@@ -1,9 +1,49 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
 export interface IGlobalSettings extends Document {
-  // ... other sections unchanged
+  fileUpload: {
+    maxFileSize: number; // MB
+    allowedTypes: string[];
+    autoDeleteMonths: number;
+  };
+  features: {
+    ocrEnabled: boolean;
+    pdfExportEnabled: boolean;
+    teamBuilderEnabled: boolean;
+    businessHeadApprovalEnabled: boolean;
+    darkModeEnabled: boolean;
+    maintenanceMode: boolean;
+    registrationEnabled: boolean;
+  };
+  security: {
+    sessionTimeout: number; // minutes
+    maxLoginAttempts: number;
+    rateLimitPerMinute: number;
+    ipRestrictions: boolean;
+    requireMfa: boolean;
+    passwordMinLength: number;
+  };
+  notifications: {
+    emailEnabled: boolean;
+    smsEnabled: boolean;
+    pushEnabled: boolean;
+    defaultEmailFrom: string;
+  };
+  storage: {
+    maxStoragePerCompany: number; // GB
+    maxStoragePerUser: number; // GB
+    cleanupEnabled: boolean;
+  };
+  system: {
+    platformName: string;
+    supportEmail: string;
+    supportPhone: string;
+    timezone: string;
+    dateFormat: string;
+    currency: string;
+  };
   integrations: {
-    openAiApiKey: string; // NEW
+    togetherAiApiKey: string;
     awsS3AccessKey: string;
     awsS3SecretKey: string;
     awsS3Region: string;
@@ -20,9 +60,49 @@ export interface IGlobalSettings extends Document {
 
 const globalSettingsSchema = new Schema<IGlobalSettings>(
   {
-    // ...other config sections...
+    fileUpload: {
+      maxFileSize: { type: Number, default: 10 },
+      allowedTypes: { type: [String], default: ['jpg', 'jpeg', 'png', 'pdf'] },
+      autoDeleteMonths: { type: Number, default: 12 },
+    },
+    features: {
+      ocrEnabled: { type: Boolean, default: true },
+      pdfExportEnabled: { type: Boolean, default: true },
+      teamBuilderEnabled: { type: Boolean, default: true },
+      businessHeadApprovalEnabled: { type: Boolean, default: true },
+      darkModeEnabled: { type: Boolean, default: false },
+      maintenanceMode: { type: Boolean, default: false },
+      registrationEnabled: { type: Boolean, default: true },
+    },
+    security: {
+      sessionTimeout: { type: Number, default: 30 },
+      maxLoginAttempts: { type: Number, default: 5 },
+      rateLimitPerMinute: { type: Number, default: 60 },
+      ipRestrictions: { type: Boolean, default: false },
+      requireMfa: { type: Boolean, default: false },
+      passwordMinLength: { type: Number, default: 8 },
+    },
+    notifications: {
+      emailEnabled: { type: Boolean, default: true },
+      smsEnabled: { type: Boolean, default: false },
+      pushEnabled: { type: Boolean, default: true },
+      defaultEmailFrom: { type: String, default: 'no-reply@aially.in' },
+    },
+    storage: {
+      maxStoragePerCompany: { type: Number, default: 100 }, // GB
+      maxStoragePerUser: { type: Number, default: 10 }, // GB
+      cleanupEnabled: { type: Boolean, default: true },
+    },
+    system: {
+      platformName: { type: String, default: 'Expense Tracker' },
+      supportEmail: { type: String, default: 'support@aially.in' },
+      supportPhone: { type: String, default: '' },
+      timezone: { type: String, default: 'Asia/Kolkata' },
+      dateFormat: { type: String, default: 'DD/MM/YYYY' },
+      currency: { type: String, default: 'INR' },
+    },
     integrations: {
-      openAiApiKey: { type: String, default: '' }, // NEW
+      togetherAiApiKey: { type: String, default: '' },
       awsS3AccessKey: { type: String, default: '' },
       awsS3SecretKey: { type: String, default: '' },
       awsS3Region: { type: String, default: 'ap-south-1' },
@@ -43,9 +123,7 @@ const globalSettingsSchema = new Schema<IGlobalSettings>(
   }
 );
 
-// Only export new openAiApiKey; togetherAiApiKey is removed
-// Helper remains unchanged
-
+// Ensure only one settings document exists
 globalSettingsSchema.statics.getSettings = async function () {
   let settings = await this.findOne();
   if (!settings) {
@@ -55,3 +133,4 @@ globalSettingsSchema.statics.getSettings = async function () {
 };
 
 export const GlobalSettings = mongoose.model<IGlobalSettings>('GlobalSettings', globalSettingsSchema);
+
