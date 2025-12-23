@@ -1615,9 +1615,9 @@ export class SuperAdminController {
     // Mask sensitive fields
     const safeSettings = settings.toObject();
     if (safeSettings.integrations) {
-      if (safeSettings.integrations.togetherAiApiKey) {
-        safeSettings.integrations.togetherAiApiKey = 
-          safeSettings.integrations.togetherAiApiKey.substring(0, 7) + '••••••••••••••••••••';
+      if (safeSettings.integrations.openAiApiKey) {
+        safeSettings.integrations.openAiApiKey = 
+          safeSettings.integrations.openAiApiKey.substring(0, 7) + '••••••••••••••••••••';
       }
       if (safeSettings.integrations.awsS3AccessKey) {
         safeSettings.integrations.awsS3AccessKey = 
@@ -1648,9 +1648,9 @@ export class SuperAdminController {
     // Mask sensitive fields in response
     const safeSettings = settings.toObject();
     if (safeSettings.integrations) {
-      if (safeSettings.integrations.togetherAiApiKey) {
-        safeSettings.integrations.togetherAiApiKey = 
-          safeSettings.integrations.togetherAiApiKey.substring(0, 7) + '••••••••••••••••••••';
+      if (safeSettings.integrations.openAiApiKey) {
+        safeSettings.integrations.openAiApiKey = 
+          safeSettings.integrations.openAiApiKey.substring(0, 7) + '••••••••••••••••••••';
       }
       if (safeSettings.integrations.awsS3AccessKey) {
         safeSettings.integrations.awsS3AccessKey = 
@@ -1681,9 +1681,9 @@ export class SuperAdminController {
     // Mask sensitive fields in response
     const safeSettings = settings.toObject();
     if (safeSettings.integrations) {
-      if (safeSettings.integrations.togetherAiApiKey) {
-        safeSettings.integrations.togetherAiApiKey = 
-          safeSettings.integrations.togetherAiApiKey.substring(0, 7) + '••••••••••••••••••••';
+      if (safeSettings.integrations.openAiApiKey) {
+        safeSettings.integrations.openAiApiKey = 
+          safeSettings.integrations.openAiApiKey.substring(0, 7) + '••••••••••••••••••••';
       }
       if (safeSettings.integrations.awsS3AccessKey) {
         safeSettings.integrations.awsS3AccessKey = 

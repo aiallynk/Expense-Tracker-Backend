@@ -29,10 +29,10 @@ const envSchema = z.object({
   AWS_ACCESS_KEY_ID: z.string().min(1, 'AWS_ACCESS_KEY_ID is required'),
   AWS_SECRET_ACCESS_KEY: z.string().min(1, 'AWS_SECRET_ACCESS_KEY is required'),
 
-  // Together AI
-  TOGETHER_AI_API_KEY: z.string().optional(),
-  TOGETHER_AI_USER_KEY: z.string().optional(),
-  TOGETHER_AI_MODEL_VISION: z.string().default('Qwen/Qwen2.5-VL-72B-Instruct'),
+  // OpenAI
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL_VISION: z.string().default('gpt-4o'),
+  OPENAI_BASE_URL: z.string().url().optional(),
 
   // Firebase (optional)
   FIREBASE_PROJECT_ID: z.string().optional(),

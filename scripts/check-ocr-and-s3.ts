@@ -2,7 +2,7 @@
  * Diagnostic script to check:
  * 1. If S3 is configured correctly
  * 2. If OCR worker is running and processing jobs
- * 3. If Together AI is being called
+ * 3. If OpenAI is being called
  * 
  * Run: npm run check:ocr-s3
  * Or: tsx scripts/check-ocr-and-s3.ts
@@ -96,12 +96,12 @@ async function checkRedis() {
   }
 }
 
-async function checkTogetherAI() {
-  console.log('\n=== Checking Together AI Configuration ===');
+async function checkOpenAI() {
+  console.log('\n=== Checking OpenAI Configuration ===');
   
-  console.log(`Together AI API Key: ${config.togetherAI.apiKey ? `${config.togetherAI.apiKey.substring(0, 8)}...` : 'NOT SET'}`);
-  console.log(`Together AI Model: ${config.togetherAI.modelVision}`);
-  console.log(`Together AI Base URL: ${config.togetherAI.baseUrl}`);
+  console.log(`OpenAI API Key: ${config.openai.apiKey ? `${config.openai.apiKey.substring(0, 8)}...` : 'NOT SET'}`);
+  console.log(`OpenAI Vision Model: ${config.openai.modelVision}`);
+  console.log(`OpenAI Base URL: ${config.openai.baseUrl}`);
   console.log(`OCR Disabled: ${config.ocr.disableOcr ? '✅ YES (OCR is disabled)' : '❌ NO (OCR is enabled)'}`);
 
   if (config.ocr.disableOcr) {
@@ -109,8 +109,8 @@ async function checkTogetherAI() {
     return false;
   }
 
-  if (!config.togetherAI.apiKey) {
-    console.log('\n❌ Together AI API key is not set. Set TOGETHER_AI_API_KEY in .env');
+  if (!config.openai.apiKey) {
+    console.log('\n❌ OpenAI API key is not set. Set OPENAI_API_KEY in .env');
     return false;
   }
 
@@ -196,14 +196,14 @@ async function main() {
     // Run checks
     const s3Ok = await checkS3();
     const redisOk = await checkRedis();
-    const togetherAIOk = await checkTogetherAI();
+    const openAIOk = await checkOpenAI();
     await checkRecentJobs();
 
     console.log('\n' + '='.repeat(50));
     console.log('\n📊 Summary:');
     console.log(`S3: ${s3Ok ? '✅ OK' : '❌ ISSUES'}`);
     console.log(`Redis: ${redisOk ? '✅ OK' : '❌ ISSUES'}`);
-    console.log(`Together AI: ${togetherAIOk ? '✅ OK' : '❌ ISSUES'}`);
+    console.log(`OpenAI: ${openAIOk ? '✅ OK' : '❌ ISSUES'}`);
 
     if (!s3Ok) {
       console.log('\n⚠️  S3 Issues:');
@@ -219,11 +219,11 @@ async function main() {
       console.log('   - Start the OCR worker: npm run worker');
     }
 
-    if (!togetherAIOk) {
-      console.log('\n⚠️  Together AI Issues:');
-      console.log('   - Set TOGETHER_AI_API_KEY in .env');
+    if (!openAIOk) {
+      console.log('\n⚠️  OpenAI Issues:');
+      console.log('   - Set OPENAI_API_KEY in .env');
       console.log('   - Set DISABLE_OCR=false to enable OCR');
-      console.log('   - Verify model name is correct');
+      console.log('   - Verify model name is correct (gpt-4o recommended)');
     }
 
     console.log('\n✅ Diagnostic check complete!\n');
@@ -238,4 +238,3 @@ async function main() {
 }
 
 main();
-

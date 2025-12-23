@@ -42,7 +42,7 @@ const ocrJobSchema = new Schema<IOcrJob>(
     },
     provider: {
       type: String,
-      default: 'TOGETHER_AI',
+      default: 'OPENAI',
     },
     resultJson: {
       type: Schema.Types.Mixed,

@@ -2,17 +2,12 @@ import dotenv from 'dotenv';
 
 import { validateEnv } from './env';
 
-// Load environment variables
 dotenv.config();
-
-// Validate environment variables (fail fast if invalid)
-// Must be called before importing logger to avoid circular dependency
 validateEnv();
 
 export const config = {
   app: {
     env: process.env.APP_ENV || 'development',
-    // Render provides PORT environment variable, fallback to APP_PORT or 4000
     port: parseInt(process.env.PORT || process.env.APP_PORT || '4000', 10),
     frontendUrlApp: process.env.APP_FRONTEND_URL_APP || 'http://localhost:3000',
     frontendUrlAdmin: process.env.APP_FRONTEND_URL_ADMIN || 'http://localhost:3001',
@@ -24,7 +19,6 @@ export const config = {
   jwt: {
     accessSecret: process.env.JWT_ACCESS_SECRET || 'changeme',
     refreshSecret: process.env.JWT_REFRESH_SECRET || 'changeme',
-    // For testing: Set to very long expiration (100 years) - change back to '15m' for production
     accessExpiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '100y',
     refreshExpiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '100y',
   },
@@ -34,14 +28,10 @@ export const config = {
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
     s3BucketName: process.env.S3_BUCKET_NAME || 'expense-tracker-aially',
   },
-  togetherAI: {
-    apiKey: process.env.TOGETHER_AI_API_KEY || '',
-    userKey: process.env.TOGETHER_AI_USER_KEY || '',
-    // Default to a serverless vision model
-    // User can override with TOGETHER_AI_MODEL_VISION in .env
-    // Note: Some models require dedicated endpoints - check Together AI docs
-    modelVision: process.env.TOGETHER_AI_MODEL_VISION || 'Qwen/Qwen2.5-VL-72B-Instruct',
-    baseUrl: 'https://api.together.xyz/v1',
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY || '',
+    modelVision: process.env.OPENAI_MODEL_VISION || 'gpt-4o',
+    baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   },
   firebase: {
     projectId: process.env.FIREBASE_PROJECT_ID || '',
@@ -68,4 +58,3 @@ export const config = {
     concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '3', 10),
   },
 };
-

@@ -3,16 +3,13 @@ import mongoose from 'mongoose';
 
 import { s3Client, getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
-import { togetherAIClient, getVisionModel } from '../config/openai';
+import { openaiClient, getVisionModel } from '../config/openai';
 import { Expense } from '../models/Expense';
 import { OcrJob, IOcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
 import { OcrJobStatus } from '../utils/enums';
 
-
 import { logger } from '@/config/logger';
-
-
 
 export interface OcrResult {
   vendor?: string;
@@ -56,7 +53,7 @@ export class OcrService {
     // Create OCR job
     const ocrJob = new OcrJob({
       status: OcrJobStatus.PROCESSING,
-      provider: 'TOGETHER_AI',
+      provider: 'OPENAI',
       receiptId,
       attempts: 0,
     });
@@ -168,10 +165,10 @@ export class OcrService {
         imageSize: base64Image.length,
         mimeType: receiptPopulated.mimeType,
         jobId,
-      }, 'Calling Together AI Vision API')
+      }, 'Calling OpenAI Vision API')
 
-      // Call Together AI Vision API
-      const result = await this.callTogetherAIVision(base64Image, receiptPopulated.mimeType);
+      // Call OpenAI Vision API
+      const result = await this.callOpenAIVision(base64Image, receiptPopulated.mimeType);
       
       logger.info({
         extractedFields: Object.keys(result),
@@ -179,7 +176,7 @@ export class OcrService {
         hasAmount: !!result.totalAmount,
         hasDate: !!result.date,
         jobId,
-      }, 'Together AI Vision API call successful')
+      }, 'OpenAI Vision API call successful')
 
       // Save result to both result and resultJson for compatibility
       job.status = OcrJobStatus.COMPLETED;
@@ -309,46 +306,23 @@ export class OcrService {
     });
   }
 
-  private static async callTogetherAIVision(
+  private static async callOpenAIVision(
     base64Image: string,
     mimeType: string
   ): Promise<OcrResult> {
     const model = getVisionModel();
 
-    const prompt = `You are a receipt OCR system. Extract all information from this receipt image and return ONLY a valid JSON object with no additional text or markdown formatting.
-
-Extract the following fields:
-- vendor: merchant/store name (string)
-- date: transaction date in ISO format YYYY-MM-DD (string)
-- totalAmount: total amount as a number (number)
-- currency: currency code like INR, USD, EUR (string)
-- tax: tax amount if visible (number, optional)
-- categorySuggestion: one of Travel, Food, Office, Others (string)
-- lineItems: array of items with description and amount (array of {description: string, amount: number})
-- notes: any additional notes or information (string, optional)
-
-IMPORTANT: Return ONLY valid JSON. No markdown, no code blocks, no explanations. Just the JSON object.
-
-Example format:
-{
-  "vendor": "Store Name",
-  "date": "2024-01-15",
-  "totalAmount": 1234.56,
-  "currency": "INR",
-  "categorySuggestion": "Food",
-  "lineItems": [{"description": "Item 1", "amount": 500}, {"description": "Item 2", "amount": 734.56}],
-  "notes": "Additional info"
-}`;
+    const prompt = `Extract receipt data as JSON only. Fields: vendor (string), date (YYYY-MM-DD), totalAmount (number), currency (INR/USD/EUR), tax (number, optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes (string, optional). Return JSON only, no markdown.`;
 
     try {
       logger.info({
         model,
         imageSize: base64Image.length,
         mimeType,
-      }, 'Preparing Together AI API request')
+      }, 'Preparing OpenAI API request')
 
-      // Together AI vision API format
-      const response = await togetherAIClient.chat.completions.create({
+      // OpenAI vision API format
+      const response = await openaiClient.chat.completions.create({
         model,
         messages: [
           {
@@ -368,21 +342,21 @@ Example format:
             ],
           },
         ],
-        max_tokens: 2000,
+        max_tokens: 1500, // Reduced for faster response
         response_format: { type: 'json_object' }, // Force JSON response format
-        temperature: 0.1, // Lower temperature for more consistent results
+        temperature: 0.0, // Zero temperature for fastest, most consistent results
       });
 
       logger.info({
         model,
         usage: response.usage,
         finishReason: response.choices[0]?.finish_reason,
-      }, 'Together AI API call successful')
+      }, 'OpenAI API call successful')
 
       const content = response.choices[0]?.message?.content;
       if (!content) {
-        logger.error('Together AI returned empty response');
-        throw new Error('No response from Together AI');
+        logger.error('OpenAI returned empty response');
+        throw new Error('No response from OpenAI');
       }
 
       // Clean the content - remove markdown code blocks if present
@@ -420,7 +394,7 @@ Example format:
         logger.warn({
           content: cleanedContent.substring(0, 200), // Log first 200 chars
           error: error instanceof Error ? error.message : String(error),
-        }, 'Together AI response not in JSON format, attempting to parse:')
+        }, 'OpenAI response not in JSON format, attempting to parse:')
         const parsed = this.parseUnstructuredResponse(cleanedContent);
         logger.info({ parsed }, 'Parsed unstructured response');
         return parsed;
@@ -433,65 +407,39 @@ Example format:
         code: error.code,
         model,
         stack: error.stack,
-      }, 'Together AI API call failed')
+      }, 'OpenAI API call failed')
       
       // Provide more helpful error messages
-      if (error.message?.includes('non-serverless') || error.message?.includes('dedicated endpoint')) {
+      if (error.message?.includes('model') || error.code === 'invalid_model' || error.status === 404) {
         throw new Error(
-          `Together AI model "${model}" requires a dedicated endpoint (non-serverless).\n` +
-          `\n` +
-          `SOLUTION OPTIONS:\n` +
-          `\n` +
-          `Option 1: Create a dedicated endpoint (recommended for production)\n` +
-          `1. Visit: https://api.together.ai/models/${model}\n` +
-          `2. Create and start a dedicated endpoint\n` +
-          `3. Use the endpoint name in TOGETHER_AI_MODEL_VISION\n` +
-          `\n` +
-          `Option 2: Use a different model that supports serverless\n` +
-          `Check your Together AI dashboard for available serverless vision models:\n` +
-          `- Visit: https://api.together.ai/models\n` +
-          `- Look for models marked as "Serverless" with vision/image support\n` +
-          `- Common serverless vision models may include:\n` +
-          `  * meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo (if available)\n` +
-          `  * Qwen/Qwen2-VL-2B-Instruct (if available)\n` +
-          `  * Or check Together AI docs for latest serverless models\n` +
-          `\n` +
-          `Option 3: Check your Together AI account plan\n` +
-          `- Some models require specific subscription tiers\n` +
-          `- Visit: https://together.ai/pricing\n` +
-          `\n` +
-          `After updating, restart the backend server.`
-        );
-      } else if (error.message?.includes('model') || error.code === 'invalid_model' || error.status === 404) {
-        throw new Error(
-          `Together AI model "${model}" not found or not available.\n` +
+          `OpenAI model "${model}" not found or not available.\n` +
           `Please check:\n` +
-          `1. Model name is correct in .env file (TOGETHER_AI_MODEL_VISION)\n` +
-          `2. Model is available in your Together AI account\n` +
+          `1. Model name is correct in .env file (OPENAI_MODEL_VISION)\n` +
+          `2. Model is available in your OpenAI account\n` +
           `3. Model supports vision/image inputs\n` +
-          `Recommended serverless vision models: Qwen/Qwen2-VL-7B-Instruct, Qwen/Qwen2-VL-2B-Instruct, meta-llama/Llama-3.2-11B-Vision-Instruct-Turbo`
+          `Recommended vision models: gpt-4o, gpt-4o-mini, gpt-4-turbo`
         );
       } else if (error.message?.includes('vision') || error.message?.includes('image')) {
         throw new Error(
-          `Together AI model "${model}" may not support vision/image inputs.\n` +
-          `Please use a vision-capable model like: Qwen/Qwen2-VL-7B-Instruct`
+          `OpenAI model "${model}" may not support vision/image inputs.\n` +
+          `Please use a vision-capable model like: gpt-4o`
         );
       } else if (error.status === 401 || error.message?.includes('authentication') || error.message?.includes('Unauthorized')) {
         throw new Error(
-          'Together AI authentication failed.\n' +
+          'OpenAI authentication failed.\n' +
           'Please check:\n' +
-          '1. TOGETHER_AI_API_KEY is set correctly in .env file\n' +
+          '1. OPENAI_API_KEY is set correctly in .env file\n' +
           '2. API key is valid and has sufficient credits\n' +
-          '3. TOGETHER_AI_USER_KEY is set if required'
+          '3. API key has access to vision models'
         );
       } else if (error.status === 429 || error.message?.includes('rate limit')) {
         throw new Error(
-          'Together AI rate limit exceeded.\n' +
-          'Please wait a moment and try again, or check your Together AI account limits.'
+          'OpenAI rate limit exceeded.\n' +
+          'Please wait a moment and try again, or check your OpenAI account limits.'
         );
       }
       
-      throw new Error(`Together AI API error: ${error.message || 'Unknown error'}\nStatus: ${error.status || 'N/A'}\nCode: ${error.code || 'N/A'}`);
+      throw new Error(`OpenAI API error: ${error.message || 'Unknown error'}\nStatus: ${error.status || 'N/A'}\nCode: ${error.code || 'N/A'}`);
     }
   }
 
@@ -589,4 +537,3 @@ Example format:
     return OcrJob.findById(id).populate('receiptId').exec();
   }
 }
-

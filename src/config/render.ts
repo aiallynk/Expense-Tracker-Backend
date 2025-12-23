@@ -18,7 +18,7 @@
  *    - Build: npm install && npm run build
  *    - Start: npm run worker:prod (runs node dist/worker/ocr.worker.js)
  *    - Environment: production
- *    - Requires: MongoDB, Redis, AWS S3, Together AI
+ *    - Requires: MongoDB, Redis, AWS S3, OpenAI
  * 
  * DEPLOYMENT STEPS:
  * 
@@ -61,9 +61,9 @@
  * 
  * Optional:
  * - AWS_REGION (default: ap-south-1)
- * - TOGETHER_AI_API_KEY
- * - TOGETHER_AI_USER_KEY
- * - TOGETHER_AI_MODEL_VISION
+ * - OPENAI_API_KEY
+ * - OPENAI_MODEL_VISION (default: gpt-4o)
+ * - OPENAI_BASE_URL (optional, defaults to https://api.openai.com/v1)
  * - FIREBASE_PROJECT_ID
  * - FIREBASE_CLIENT_EMAIL
  * - FIREBASE_PRIVATE_KEY

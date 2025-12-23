@@ -6,7 +6,7 @@ import { Readable } from 'stream';
 
 import { s3Client, getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
-import { togetherAIClient, getVisionModel } from '../config/openai';
+import { openaiClient, getVisionModel } from '../config/openai';
 import { Category } from '../models/Category';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
@@ -217,41 +217,9 @@ export class DocumentProcessingService {
           // Convert page image buffer to base64
           const base64Image = Buffer.from(pageImage).toString('base64');
 
-          const prompt = `You are an expense receipt extraction system. Analyze this image which is a page from a PDF document.
+          const prompt = `Extract ALL receipts from this PDF page. For each receipt return: vendor, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. If no receipts, return {"receipts": []}. JSON only, no markdown.`;
 
-This page may contain ONE OR MULTIPLE expense receipts. Extract ALL receipts visible in this image.
-
-For EACH receipt you find, extract the following:
-- vendor: merchant/store name
-- date: transaction date in ISO format YYYY-MM-DD
-- totalAmount: total amount as a number
-- currency: currency code (INR, USD, EUR, etc.)
-- tax: tax amount if visible
-- categorySuggestion: one of (Travel, Food, Office, Others)
-- lineItems: array of items with description and amount
-- notes: any additional notes
-
-Return a JSON object with this structure:
-{
-  "receipts": [
-    {
-      "vendor": "Store Name",
-      "date": "2024-01-15",
-      "totalAmount": 1234.56,
-      "currency": "INR",
-      "categorySuggestion": "Food",
-      "lineItems": [{"description": "Item 1", "amount": 500}],
-      "notes": "Additional info"
-    }
-  ]
-}
-
-If you find multiple receipts on this page, include ALL of them.
-If this page doesn't contain any valid receipts, return: {"receipts": []}
-
-IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
-
-          const response = await togetherAIClient.chat.completions.create({
+          const response = await openaiClient.chat.completions.create({
             model,
             messages: [
               {
@@ -268,9 +236,9 @@ IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
                 ],
               },
             ],
-            max_tokens: 2000,
+            max_tokens: 1500, // Reduced for faster response
             response_format: { type: 'json_object' },
-            temperature: 0.1,
+            temperature: 0.0, // Zero temperature for fastest, most consistent results
           });
 
           const content = response.choices[0]?.message?.content;
@@ -634,37 +602,9 @@ IMPORTANT: Return ONLY valid JSON. No markdown, no explanations.`;
       const base64Image = processedBuffer.toString('base64');
       const model = getVisionModel();
 
-      const prompt = `You are a receipt OCR system. Extract all information from this receipt image.
-If this image contains MULTIPLE receipts, extract ALL of them.
+      const prompt = `Extract ALL receipts from this image. For each: vendor, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. JSON only, no markdown.`;
 
-For EACH receipt found, extract:
-- vendor: merchant/store name
-- date: transaction date in ISO format YYYY-MM-DD
-- totalAmount: total amount as a number
-- currency: currency code (INR, USD, EUR, etc.)
-- tax: tax amount if visible
-- categorySuggestion: one of (Travel, Food, Office, Others)
-- lineItems: array of items with description and amount
-- notes: any additional notes
-
-Return a JSON object:
-{
-  "receipts": [
-    {
-      "vendor": "Store Name",
-      "date": "2024-01-15",
-      "totalAmount": 1234.56,
-      "currency": "INR",
-      "categorySuggestion": "Food",
-      "lineItems": [{"description": "Item 1", "amount": 500}],
-      "notes": "Additional info"
-    }
-  ]
-}
-
-IMPORTANT: Return ONLY valid JSON.`;
-
-      const response = await togetherAIClient.chat.completions.create({
+      const response = await openaiClient.chat.completions.create({
         model,
         messages: [
           {
@@ -681,9 +621,9 @@ IMPORTANT: Return ONLY valid JSON.`;
             ],
           },
         ],
-        max_tokens: 2000,
+        max_tokens: 1500, // Reduced for faster response
         response_format: { type: 'json_object' },
-        temperature: 0.1,
+        temperature: 0.0, // Zero temperature for fastest, most consistent results
       });
 
       const content = response.choices[0]?.message?.content;
@@ -843,4 +783,3 @@ IMPORTANT: Return ONLY valid JSON.`;
     return this.getSupportedMimeTypes().includes(mimeType) || mimeType.startsWith('image/');
   }
 }
-
