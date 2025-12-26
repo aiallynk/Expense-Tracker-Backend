@@ -648,22 +648,53 @@ export class DocumentProcessingService {
       result.receipts = receipts;
       result.totalPages = receipts.length;
 
-      // Create expense drafts
-      for (let i = 0; i < receipts.length; i++) {
-        const receipt = receipts[i];
+      // Create expense drafts - ensure at least one draft is created per image
+      if (receipts.length === 0) {
+        // If no receipts extracted, create a placeholder draft expense
         try {
+          const placeholderReceipt: ExtractedReceipt = {
+            vendor: 'Receipt Processing...',
+            totalAmount: 0,
+            currency: 'INR',
+            date: new Date().toISOString().split('T')[0],
+            categorySuggestion: 'Others',
+            notes: 'Please review and enter details manually',
+            sourceType: 'image',
+            confidence: 0,
+          };
           const expenseId = await this.createExpenseDraft(
-            receipt,
+            placeholderReceipt,
             reportId,
             userId,
-            documentReceiptId, // Link image document to expenses
-            'image', // Source document type
-            i + 1 // Sequence number (1-indexed)
+            documentReceiptId,
+            'image',
+            1
           );
           result.expensesCreated.push(expenseId);
+          result.receipts.push(placeholderReceipt);
+          logger.info({ expenseId, documentReceiptId }, 'Created placeholder expense draft for image with no extracted receipts');
         } catch (error: any) {
-          logger.error({ error: error.message }, 'Failed to create expense draft from image');
-          result.errors.push(`Failed to create expense: ${error.message}`);
+          logger.error({ error: error.message }, 'Failed to create placeholder expense draft');
+          result.errors.push(`Failed to create placeholder expense: ${error.message}`);
+        }
+      } else {
+        // Create expense drafts for each extracted receipt
+        for (let i = 0; i < receipts.length; i++) {
+          const receipt = receipts[i];
+          try {
+            const expenseId = await this.createExpenseDraft(
+              receipt,
+              reportId,
+              userId,
+              documentReceiptId, // Link image document to expenses
+              'image', // Source document type
+              i + 1 // Sequence number (1-indexed)
+            );
+            result.expensesCreated.push(expenseId);
+          } catch (error: any) {
+            logger.error({ error: error.message }, 'Failed to create expense draft from image');
+            result.errors.push(`Failed to create expense: ${error.message}`);
+          }
         }
       }
 
