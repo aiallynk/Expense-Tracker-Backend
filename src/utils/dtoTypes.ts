@@ -77,6 +77,21 @@ export const updateCategorySchema = z.object({
   description: z.string().optional(),
 });
 
+// Cost Centre DTOs
+export const createCostCentreSchema = z.object({
+  name: z.string().min(1),
+  code: z.string().optional(),
+  description: z.string().optional(),
+  budget: z.number().min(0).optional(),
+});
+
+export const updateCostCentreSchema = z.object({
+  name: z.string().min(1).optional(),
+  code: z.string().optional(),
+  description: z.string().optional(),
+  budget: z.number().min(0).optional(),
+});
+
 // Expense Report DTOs
 export const createReportSchema = z.object({
   name: z.string().min(1),
@@ -122,6 +137,7 @@ export const reportActionSchema = z.object({
 export const createExpenseSchema = z.object({
   vendor: z.string().min(1),
   categoryId: z.string().optional(),
+  costCentreId: z.string().optional(), // Cost Centre is optional
   projectId: z.string().optional(),
   amount: z.number().min(0), // Allow 0 for DRAFT expenses (will be updated after OCR)
   currency: z.string().default('INR'),
@@ -141,6 +157,7 @@ export const createExpenseSchema = z.object({
 export const updateExpenseSchema = z.object({
   vendor: z.string().min(1).optional(),
   categoryId: z.string().optional(),
+  costCentreId: z.string().optional().nullable(), // Cost Centre is optional and can be null
   projectId: z.string().optional(),
   amount: z.number().positive().optional(),
   currency: z.string().optional(),
@@ -194,6 +211,7 @@ export const reportFiltersSchema = paginationSchema.extend({
 export const expenseFiltersSchema = paginationSchema.extend({
   status: z.nativeEnum(ExpenseStatus).optional(),
   categoryId: z.string().optional(),
+  costCentreId: z.string().optional(), // Filter by cost centre
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   q: z.string().optional(),
@@ -290,6 +308,8 @@ export type UpdateCompanyAdminDto = z.infer<typeof updateCompanyAdminSchema>;
 export type ResetCompanyAdminPasswordDto = z.infer<typeof resetCompanyAdminPasswordSchema>;
 export type CreateDepartmentDto = z.infer<typeof createDepartmentSchema>;
 export type UpdateDepartmentDto = z.infer<typeof updateDepartmentSchema>;
+export type CreateCostCentreDto = z.infer<typeof createCostCentreSchema>;
+export type UpdateCostCentreDto = z.infer<typeof updateCostCentreSchema>;
 export type BulkDocumentUploadIntentDto = z.infer<typeof bulkDocumentUploadIntentSchema>;
 export type BulkDocumentConfirmDto = z.infer<typeof bulkDocumentConfirmSchema>;
 

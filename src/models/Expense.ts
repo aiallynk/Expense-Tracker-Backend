@@ -7,6 +7,7 @@ export interface IExpense extends Document {
   userId: mongoose.Types.ObjectId;
   vendor: string;
   categoryId?: mongoose.Types.ObjectId;
+  costCentreId?: mongoose.Types.ObjectId; // Cost Centre reference
   projectId?: mongoose.Types.ObjectId;
   amount: number;
   currency: string;
@@ -46,6 +47,10 @@ const expenseSchema = new Schema<IExpense>(
     categoryId: {
       type: Schema.Types.ObjectId,
       ref: 'Category',
+    },
+    costCentreId: {
+      type: Schema.Types.ObjectId,
+      ref: 'CostCentre',
     },
     projectId: {
       type: Schema.Types.ObjectId,
@@ -118,6 +123,7 @@ const expenseSchema = new Schema<IExpense>(
 expenseSchema.index({ reportId: 1 });
 expenseSchema.index({ userId: 1 });
 expenseSchema.index({ categoryId: 1, expenseDate: 1 });
+expenseSchema.index({ costCentreId: 1, expenseDate: 1 }); // Index for cost centre queries
 expenseSchema.index({ projectId: 1 });
 expenseSchema.index({ status: 1 });
 expenseSchema.index({ vendor: 1, expenseDate: 1 });

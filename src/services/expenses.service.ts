@@ -46,6 +46,7 @@ export class ExpensesService {
       userId: new mongoose.Types.ObjectId(userId),
       vendor: data.vendor,
       categoryId: data.categoryId ? new mongoose.Types.ObjectId(data.categoryId) : undefined,
+      costCentreId: data.costCentreId ? new mongoose.Types.ObjectId(data.costCentreId) : undefined,
       projectId: data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined,
       amount: data.amount,
       currency: data.currency || 'INR',
@@ -125,6 +126,11 @@ export class ExpensesService {
       expense.categoryId = data.categoryId ? new mongoose.Types.ObjectId(data.categoryId) : undefined;
     }
 
+    if (data.costCentreId !== undefined) {
+      // Handle null explicitly to allow clearing cost centre
+      expense.costCentreId = data.costCentreId ? new mongoose.Types.ObjectId(data.costCentreId) : undefined;
+    }
+
     if (data.projectId !== undefined) {
       expense.projectId = data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined;
     }
@@ -198,6 +204,7 @@ export class ExpensesService {
     const expense = await Expense.findById(id)
       .populate('reportId')
       .populate('categoryId', 'name code')
+      .populate('costCentreId', 'name code')
       .populate('receiptPrimaryId')
       .exec();
 
@@ -249,6 +256,11 @@ export class ExpensesService {
       query.categoryId = filters.categoryId;
     }
 
+    // Cost Centre filter
+    if (filters.costCentreId) {
+      query.costCentreId = filters.costCentreId;
+    }
+
     // Date range filters
     if (filters.from || filters.to) {
       query.expenseDate = {};
@@ -288,6 +300,7 @@ export class ExpensesService {
       Expense.find(query)
         .populate('reportId', 'name status')
         .populate('categoryId', 'name code')
+        .populate('costCentreId', 'name code')
         .sort({ expenseDate: -1 })
         .skip(skip)
         .limit(pageSize)
@@ -335,6 +348,7 @@ export class ExpensesService {
       Expense.find(query)
         .populate('reportId', 'name status userId')
         .populate('categoryId', 'name code')
+        .populate('costCentreId', 'name code')
         .sort({ expenseDate: -1 })
         .skip(skip)
         .limit(pageSize)

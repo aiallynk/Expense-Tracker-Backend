@@ -14,6 +14,7 @@ import authRoutes from './routes/auth.routes';
 import bulkUploadRoutes from './routes/bulkUpload.routes';
 import businessHeadRoutes from './routes/businessHead.routes';
 import categoriesRoutes from './routes/categories.routes';
+import costCentresRoutes from './routes/costCentres.routes';
 import companyAdminRoutes from './routes/companyAdmin.routes';
 import companySettingsRoutes from './routes/companySettings.routes';
 import departmentsRoutes from './routes/departments.routes';
@@ -164,6 +165,7 @@ export const createApp = (): Express => {
   app.use('/api/v1/users', usersRoutes);
   app.use('/api/v1/projects', projectsRoutes);
   app.use('/api/v1/categories', categoriesRoutes);
+  app.use('/api/v1/cost-centres', costCentresRoutes);
   app.use('/api/v1/reports', reportsRoutes);
   app.use('/api/v1', expensesRoutes);
   app.use('/api/v1', receiptsRoutes);
