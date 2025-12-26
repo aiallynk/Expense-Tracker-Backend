@@ -28,6 +28,7 @@ router.post(
 
 router.get('/:id', ReportsController.getById);
 router.patch('/:id', validate(updateReportSchema), ReportsController.update);
+router.delete('/:id', ReportsController.delete);
 router.post('/:id/submit', ReportsController.submit);
 router.post('/:id/action', validate(reportActionSchema), ReportsController.action);
 

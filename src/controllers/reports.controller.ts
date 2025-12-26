@@ -123,5 +123,18 @@ export class ReportsController {
       },
     });
   });
+
+  static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
+    await ReportsService.deleteReport(
+      req.params.id,
+      req.user!.id,
+      req.user!.role
+    );
+
+    res.status(200).json({
+      success: true,
+      message: 'Report deleted successfully',
+    });
+  });
 }
 

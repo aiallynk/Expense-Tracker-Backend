@@ -789,5 +789,61 @@ export class ReportsService {
 
     await ExpenseReport.findByIdAndUpdate(reportId, { totalAmount });
   }
+
+  static async deleteReport(
+    reportId: string,
+    userId: string,
+    userRole: string
+  ): Promise<void> {
+    const report = await ExpenseReport.findById(reportId);
+
+    if (!report) {
+      throw new Error('Report not found');
+    }
+
+    // Check access: owner or admin
+    if (
+      report.userId.toString() !== userId &&
+      userRole !== UserRole.ADMIN &&
+      userRole !== UserRole.BUSINESS_HEAD
+    ) {
+      throw new Error('Access denied');
+    }
+
+    // Only allow deletion if report is DRAFT
+    if (report.status !== ExpenseReportStatus.DRAFT) {
+      throw new Error(`Only draft reports can be deleted. This report has status: ${report.status}`);
+    }
+
+    // Delete all expenses associated with this report
+    await Expense.deleteMany({ reportId });
+
+    // Get companyId from user before deleting
+    const user = await User.findById(userId).select('companyId').exec();
+    const reportUserId = report.userId.toString();
+
+    // Delete all expenses associated with this report
+    await Expense.deleteMany({ reportId });
+
+    // Delete the report
+    await ExpenseReport.findByIdAndDelete(reportId);
+
+    // Log audit
+    await AuditService.log(userId, 'ExpenseReport', reportId, AuditAction.DELETE);
+
+    // Emit socket events
+    try {
+      if (user && user.companyId) {
+        const companyId = user.companyId.toString();
+        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+        emitCompanyAdminDashboardUpdate(companyId, stats);
+      }
+    } catch (error) {
+      // Don't fail deletion if real-time updates fail
+      logger.error({ error }, 'Error emitting company admin dashboard update after report deletion');
+    }
+
+    emitManagerDashboardUpdate(reportUserId);
+  }
 }
 
