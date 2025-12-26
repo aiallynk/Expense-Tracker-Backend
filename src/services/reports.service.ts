@@ -47,10 +47,22 @@ export class ReportsService {
         }
       }
 
+      // Validate costCentreId - if provided, it must be a valid ObjectId
+      let costCentreId: mongoose.Types.ObjectId | undefined = undefined;
+      if (data.costCentreId && data.costCentreId.trim() !== '') {
+        if (mongoose.Types.ObjectId.isValid(data.costCentreId)) {
+          costCentreId = new mongoose.Types.ObjectId(data.costCentreId);
+          logger.debug({ costCentreId }, 'Valid costCentreId provided');
+        } else {
+          logger.warn({ costCentreId: data.costCentreId }, 'Invalid costCentreId provided (not a valid ObjectId), ignoring');
+        }
+      }
+
       const report = new ExpenseReport({
         userId,
         projectId,
         projectName: data.projectName?.trim() || undefined,
+        costCentreId,
         name: data.name,
         notes: data.notes,
         fromDate: new Date(data.fromDate),
@@ -374,6 +386,14 @@ export class ReportsService {
 
     if (data.projectName !== undefined) {
       report.projectName = data.projectName.trim() || undefined;
+    }
+
+    if (data.costCentreId !== undefined) {
+      if (data.costCentreId === null || data.costCentreId === '') {
+        report.costCentreId = undefined;
+      } else if (mongoose.Types.ObjectId.isValid(data.costCentreId)) {
+        report.costCentreId = new mongoose.Types.ObjectId(data.costCentreId);
+      }
     }
 
     if (data.fromDate !== undefined) {

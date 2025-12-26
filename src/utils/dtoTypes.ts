@@ -98,6 +98,7 @@ export const createReportSchema = z.object({
   // projectId is optional and can be any string (will be validated in service)
   // If it's not a valid ObjectId, it will be ignored
   projectId: z.string().optional().or(z.literal('')),
+  costCentreId: z.string().optional().or(z.literal('')),
   projectName: z.string().optional(),
   notes: z.string().optional(),
   // Use coerce to handle various datetime formats, then validate
@@ -123,6 +124,7 @@ export const updateReportSchema = z.object({
   name: z.string().min(1).optional(),
   projectId: z.string().optional(),
   projectName: z.string().optional(),
+  costCentreId: z.string().optional().or(z.literal('')).nullable(),
   notes: z.string().optional(),
   fromDate: z.string().datetime().optional(),
   toDate: z.string().datetime().optional(),

@@ -15,6 +15,7 @@ export interface IExpenseReport extends Document {
   userId: mongoose.Types.ObjectId;
   projectId?: mongoose.Types.ObjectId;
   projectName?: string;
+  costCentreId?: mongoose.Types.ObjectId;
   name: string;
   notes?: string;
   fromDate: Date;
@@ -45,6 +46,10 @@ const expenseReportSchema = new Schema<IExpenseReport>(
     projectName: {
       type: String,
       trim: true,
+    },
+    costCentreId: {
+      type: Schema.Types.ObjectId,
+      ref: 'CostCentre',
     },
     name: {
       type: String,
