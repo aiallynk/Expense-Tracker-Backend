@@ -36,8 +36,13 @@ export class AccountantService {
 
       const companyId = accountant.companyId;
 
+      // Get users in this company to filter reports
+      const companyUsers = await User.find({ companyId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+
       // Get all approved reports for the company
       const approvedReports = await ExpenseReport.find({
+        userId: { $in: userIds },
         status: ExpenseReportStatus.APPROVED,
       })
         .populate('userId', 'name departmentId')
@@ -58,11 +63,13 @@ export class AccountantService {
 
       // Get all reports count
       const totalReports = await ExpenseReport.countDocuments({
+        userId: { $in: userIds },
         status: { $in: [ExpenseReportStatus.SUBMITTED, ExpenseReportStatus.MANAGER_APPROVED, ExpenseReportStatus.APPROVED] },
       });
 
       // Get pending approvals count
       const pendingApprovals = await ExpenseReport.countDocuments({
+        userId: { $in: userIds },
         status: { $in: [ExpenseReportStatus.SUBMITTED, ExpenseReportStatus.MANAGER_APPROVED] },
       });
 
@@ -149,8 +156,13 @@ export class AccountantService {
       const projectSpend: any[] = [];
 
       for (const project of projects) {
+        // Get users in this company to filter reports
+        const companyUsers = await User.find({ companyId }).select('_id').exec();
+        const userIds = companyUsers.map(u => u._id);
+        
         const reports = await ExpenseReport.find({
           projectId: project._id,
+          userId: { $in: userIds },
           status: ExpenseReportStatus.APPROVED,
         }).select('totalAmount currency').exec();
 
@@ -195,8 +207,13 @@ export class AccountantService {
       const costCentreSpend: any[] = [];
 
       for (const costCentre of costCentres) {
+        // Get users in this company to filter reports
+        const companyUsers = await User.find({ companyId }).select('_id').exec();
+        const userIds = companyUsers.map(u => u._id);
+        
         const reports = await ExpenseReport.find({
           costCentreId: costCentre._id,
+          userId: { $in: userIds },
           status: ExpenseReportStatus.APPROVED,
         }).select('totalAmount currency').exec();
 
@@ -244,7 +261,12 @@ export class AccountantService {
         const monthDate = new Date(now.getFullYear(), now.getMonth() - i, 1);
         const nextMonth = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
 
+        // Get users in this company to filter reports
+        const companyUsers = await User.find({ companyId }).select('_id').exec();
+        const userIds = companyUsers.map(u => u._id);
+        
         const reports = await ExpenseReport.find({
+          userId: { $in: userIds },
           status: ExpenseReportStatus.APPROVED,
           approvedAt: {
             $gte: monthDate,
