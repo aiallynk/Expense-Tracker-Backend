@@ -9,6 +9,9 @@ export interface IApprover {
   decidedAt?: Date;
   action?: string;
   comment?: string;
+  isAdditionalApproval?: boolean; // Flag to mark budget-triggered additional approvals
+  approvalRuleId?: mongoose.Types.ObjectId; // Reference to the rule that triggered this approval
+  triggerReason?: string; // Human-readable reason (e.g., "Report exceeds ₹50,000")
 }
 
 export interface IExpenseReport extends Document {
@@ -106,6 +109,17 @@ const expenseReportSchema = new Schema<IExpenseReport>(
           enum: ['approve', 'reject', 'request_changes'],
         },
         comment: {
+          type: String,
+        },
+        isAdditionalApproval: {
+          type: Boolean,
+          default: false,
+        },
+        approvalRuleId: {
+          type: Schema.Types.ObjectId,
+          ref: 'ApprovalRule',
+        },
+        triggerReason: {
           type: String,
         },
       },

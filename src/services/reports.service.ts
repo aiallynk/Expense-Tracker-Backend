@@ -7,6 +7,9 @@ import {
   IApprover,
 } from '../models/ExpenseReport';
 import { User } from '../models/User';
+import { Project } from '../models/Project';
+import { CostCentre } from '../models/CostCentre';
+import { ApprovalRule, ApprovalRuleTriggerType, ApprovalRuleApproverRole } from '../models/ApprovalRule';
 import { emitCompanyAdminDashboardUpdate, emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
 import { CreateReportDto, UpdateReportDto, ReportFiltersDto } from '../utils/dtoTypes';
 import { ExpenseReportStatus, UserRole, ExpenseStatus , AuditAction } from '../utils/enums';
@@ -427,6 +430,7 @@ export class ReportsService {
       throw new Error('Report owner not found');
     }
 
+    // STEP 1: Build normal hierarchy-based approval chain
     // Level 1: Manager (if employee has a manager)
     if (reportUser.managerId) {
       const manager = await User.findById(reportUser.managerId);
@@ -484,7 +488,157 @@ export class ReportsService {
       }
     }
 
+    // STEP 2: Evaluate additional approval rules and inject approvers if conditions match
+    if (reportUser.companyId) {
+      const additionalApprovers = await this.evaluateAdditionalApprovalRules(report, reportUser.companyId);
+      
+      // Insert additional approvers after the last normal approver
+      // They should be at a level higher than the highest existing level
+      const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
+      
+      additionalApprovers.forEach((additionalApprover, index) => {
+        approvers.push({
+          ...additionalApprover,
+          level: maxLevel + index + 1, // Ensure additional approvals come after normal approvals
+        });
+      });
+    }
+
     return approvers;
+  }
+
+  /**
+   * Evaluate additional approval rules based on budget thresholds
+   * Returns additional approvers that should be added to the approval chain
+   */
+  static async evaluateAdditionalApprovalRules(
+    report: IExpenseReport,
+    companyId: mongoose.Types.ObjectId
+  ): Promise<IApprover[]> {
+    const additionalApprovers: IApprover[] = [];
+    
+    try {
+      // Get all active approval rules for this company
+      const activeRules = await ApprovalRule.find({
+        companyId,
+        active: true,
+      }).exec();
+
+      if (activeRules.length === 0) {
+        return additionalApprovers;
+      }
+
+      // Evaluate each rule
+      for (const rule of activeRules) {
+        let shouldTrigger = false;
+        let triggerReason = '';
+
+        switch (rule.triggerType) {
+          case ApprovalRuleTriggerType.REPORT_AMOUNT_EXCEEDS:
+            if (report.totalAmount >= rule.thresholdValue) {
+              shouldTrigger = true;
+              triggerReason = `Report total (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${rule.thresholdValue.toLocaleString('en-IN')})`;
+            }
+            break;
+
+          case ApprovalRuleTriggerType.PROJECT_BUDGET_EXCEEDS:
+            if (report.projectId) {
+              const project = await Project.findById(report.projectId).exec();
+              if (project && project.budget && project.thresholdPercentage) {
+                // Calculate what the spent amount would be after this report is approved
+                const currentSpent = project.spentAmount || 0;
+                const projectedSpent = currentSpent + report.totalAmount;
+                const thresholdAmount = (project.budget * project.thresholdPercentage) / 100;
+                
+                if (projectedSpent >= thresholdAmount) {
+                  shouldTrigger = true;
+                  triggerReason = `Project budget threshold (${project.thresholdPercentage}% = ₹${thresholdAmount.toLocaleString('en-IN')}) will be exceeded`;
+                }
+              }
+            }
+            break;
+
+          case ApprovalRuleTriggerType.COST_CENTRE_BUDGET_EXCEEDS:
+            if (report.costCentreId) {
+              const costCentre = await CostCentre.findById(report.costCentreId).exec();
+              if (costCentre && costCentre.budget && costCentre.thresholdPercentage) {
+                // Calculate what the spent amount would be after this report is approved
+                const currentSpent = costCentre.spentAmount || 0;
+                const projectedSpent = currentSpent + report.totalAmount;
+                const thresholdAmount = (costCentre.budget * costCentre.thresholdPercentage) / 100;
+                
+                if (projectedSpent >= thresholdAmount) {
+                  shouldTrigger = true;
+                  triggerReason = `Cost centre budget threshold (${costCentre.thresholdPercentage}% = ₹${thresholdAmount.toLocaleString('en-IN')}) will be exceeded`;
+                }
+              }
+            }
+            break;
+        }
+
+        // If rule should trigger, find an approver with the specified role
+        if (shouldTrigger) {
+          const approver = await this.findAdditionalApprover(
+            companyId,
+            rule.approverRole
+          );
+
+          if (approver) {
+            // Check if this approver is already in the chain to avoid duplicates
+            const isDuplicate = additionalApprovers.some(
+              a => a.userId.toString() === approver._id.toString()
+            );
+
+            if (!isDuplicate) {
+              additionalApprovers.push({
+                level: 0, // Will be set correctly in computeApproverChain
+                userId: approver._id as mongoose.Types.ObjectId,
+                role: approver.role,
+                isAdditionalApproval: true,
+                approvalRuleId: rule._id as mongoose.Types.ObjectId,
+                triggerReason: triggerReason || rule.description || 'Budget oversight approval required',
+              });
+            }
+          }
+        }
+      }
+    } catch (error) {
+      logger.error({ error, reportId: report._id, companyId }, 'Error evaluating additional approval rules');
+      // Don't throw - if rule evaluation fails, continue with normal approval chain
+    }
+
+    return additionalApprovers;
+  }
+
+  /**
+   * Find an approver with the specified role for additional approvals
+   */
+  static async findAdditionalApprover(
+    companyId: mongoose.Types.ObjectId,
+    approverRole: ApprovalRuleApproverRole
+  ): Promise<any> {
+    // Map ApprovalRuleApproverRole to UserRole
+    const roleMap: Record<ApprovalRuleApproverRole, UserRole[]> = {
+      [ApprovalRuleApproverRole.ADMIN]: [UserRole.ADMIN],
+      [ApprovalRuleApproverRole.BUSINESS_HEAD]: [UserRole.BUSINESS_HEAD],
+      [ApprovalRuleApproverRole.ACCOUNTANT]: [UserRole.ACCOUNTANT],
+      [ApprovalRuleApproverRole.COMPANY_ADMIN]: [UserRole.COMPANY_ADMIN],
+    };
+
+    const targetRoles = roleMap[approverRole] || [];
+    
+    if (targetRoles.length === 0) {
+      return null;
+    }
+
+    // Find first active user with the target role in the company
+    const approver = await User.findOne({
+      companyId,
+      role: { $in: targetRoles },
+      status: 'ACTIVE',
+    }).exec();
+
+    return approver;
   }
 
   static async submitReport(id: string, userId: string): Promise<IExpenseReport> {

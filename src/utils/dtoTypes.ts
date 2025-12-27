@@ -32,8 +32,8 @@ export const createUserSchema = z.object({
   name: z.string().min(1, 'Name is required').trim(),
   password: z.string().min(6, 'Password must be at least 6 characters'),
   phone: z.string().optional(),
-  role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD'], {
-    errorMap: () => ({ message: 'Role must be EMPLOYEE, MANAGER, or BUSINESS_HEAD' })
+  role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'], {
+    errorMap: () => ({ message: 'Role must be EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT' })
   }),
   companyId: z.string().optional(),
   managerId: z.string().optional(),
@@ -44,7 +44,7 @@ export const createUserSchema = z.object({
 export const updateUserSchema = z.object({
   name: z.string().min(1, 'Name is required').trim().optional(),
   email: z.string().email('Valid email is required').trim().toLowerCase().optional(),
-  role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD']).optional(),
+  role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT']).optional(),
   managerId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),

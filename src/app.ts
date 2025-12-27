@@ -10,6 +10,7 @@ import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
 import adminRoutes from './routes/admin.routes';
+import accountantRoutes from './routes/accountant.routes';
 import authRoutes from './routes/auth.routes';
 import bulkUploadRoutes from './routes/bulkUpload.routes';
 import businessHeadRoutes from './routes/businessHead.routes';
@@ -183,6 +184,9 @@ export const createApp = (): Express => {
 
   // Business Head routes
   app.use('/api/v1/business-head', businessHeadRoutes);
+
+  // Accountant routes
+  app.use('/api/v1/accountant', accountantRoutes);
 
   // 404 handler
   app.use((_req, res) => {

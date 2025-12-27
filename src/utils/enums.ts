@@ -5,6 +5,7 @@ export enum UserRole {
   BUSINESS_HEAD = 'BUSINESS_HEAD',
   MANAGER = 'MANAGER',
   EMPLOYEE = 'EMPLOYEE',
+  ACCOUNTANT = 'ACCOUNTANT',
 }
 
 export enum UserStatus {

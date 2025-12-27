@@ -10,6 +10,8 @@ export interface ICostCentre extends Document {
   code?: string;
   description?: string;
   budget?: number;
+  spentAmount?: number; // Total amount spent on this cost centre
+  thresholdPercentage?: number; // Percentage threshold for additional approval (e.g., 80 = 80% of budget)
   companyId?: mongoose.Types.ObjectId;
   status: CostCentreStatus;
   createdAt: Date;
@@ -35,6 +37,17 @@ const costCentreSchema = new Schema<ICostCentre>(
     budget: {
       type: Number,
       min: 0,
+    },
+    spentAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    thresholdPercentage: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 80, // Default 80% threshold
     },
     companyId: {
       type: Schema.Types.ObjectId,

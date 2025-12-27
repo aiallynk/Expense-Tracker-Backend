@@ -15,6 +15,8 @@ export interface IProject extends Document {
   startDate?: Date;
   endDate?: Date;
   budget?: number;
+  spentAmount?: number; // Total amount spent on this project
+  thresholdPercentage?: number; // Percentage threshold for additional approval (e.g., 80 = 80% of budget)
   status: ProjectStatus;
   metadata?: Record<string, any>;
   createdAt: Date;
@@ -55,6 +57,17 @@ const projectSchema = new Schema<IProject>(
     budget: {
       type: Number,
       min: 0,
+    },
+    spentAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    thresholdPercentage: {
+      type: Number,
+      min: 0,
+      max: 100,
+      default: 80, // Default 80% threshold
     },
     status: {
       type: String,
