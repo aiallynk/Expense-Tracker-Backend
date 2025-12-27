@@ -103,19 +103,22 @@ export class UsersController {
     let companyId = data.companyId;
 
     // If user is COMPANY_ADMIN, use their companyId and ensure role is not admin
-    if (requestingUser.role === 'COMPANY_ADMIN') {
+    if (requestingUser.role === 'COMPANY_ADMIN' || requestingUser.role === UserRole.COMPANY_ADMIN) {
       // Get company admin details to get companyId
       const { CompanyAdmin } = await import('../models/CompanyAdmin');
       const companyAdmin = await CompanyAdmin.findById(requestingUser.id).exec();
       if (companyAdmin && companyAdmin.companyId) {
         companyId = companyAdmin.companyId.toString();
+      } else if (requestingUser.companyId) {
+        // Fallback to companyId from JWT token if available
+        companyId = requestingUser.companyId;
       }
       
-      // Ensure COMPANY_ADMIN cannot create admin roles - only EMPLOYEE, MANAGER, BUSINESS_HEAD
-      if (![UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD].includes(role)) {
+      // Ensure COMPANY_ADMIN cannot create admin roles - only EMPLOYEE, MANAGER, BUSINESS_HEAD, ACCOUNTANT
+      if (![UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD, UserRole.ACCOUNTANT].includes(role)) {
         res.status(403).json({
           success: false,
-          message: 'Company admins can only create users with EMPLOYEE, MANAGER, or BUSINESS_HEAD roles',
+          message: 'Company admins can only create users with EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT roles',
           code: 'INVALID_ROLE',
         });
         return;

@@ -15,7 +15,12 @@ export const requireRole = (...allowedRoles: UserRole[]) => {
       return;
     }
 
-    if (!allowedRoles.includes(req.user.role as UserRole)) {
+    // Check if user role matches any allowed role (handle both string and enum)
+    const userRole = req.user.role;
+    const allowedRoleStrings = allowedRoles.map(role => role.toString());
+    const isAllowed = allowedRoleStrings.includes(userRole) || allowedRoles.includes(userRole as UserRole);
+    
+    if (!isAllowed) {
       res.status(403).json({
         success: false,
         message: 'Insufficient permissions',
