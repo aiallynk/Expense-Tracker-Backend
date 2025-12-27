@@ -215,14 +215,14 @@ export class UsersService {
     }
 
     // Exclude admin roles (COMPANY_ADMIN, SUPER_ADMIN, ADMIN) if requested
-    // Only show EMPLOYEE, MANAGER, and BUSINESS_HEAD
+    // Only show EMPLOYEE, MANAGER, BUSINESS_HEAD, and ACCOUNTANT (exclude ADMIN, COMPANY_ADMIN, SUPER_ADMIN)
     if (filters.excludeAdminRoles) {
       // If specific role is requested and it's a valid non-admin role, use it
-      if (filters.role && [UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD].includes(filters.role as UserRole)) {
+      if (filters.role && [UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD, UserRole.ACCOUNTANT].includes(filters.role as UserRole)) {
         query.role = filters.role;
       } else {
         // Otherwise, filter to only show non-admin roles
-        query.role = { $in: [UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD] };
+        query.role = { $in: [UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD, UserRole.ACCOUNTANT] };
       }
     } else if (filters.role) {
       // If not excluding admin roles, filter by the requested role
@@ -403,8 +403,8 @@ export class UsersService {
       }
       
       // Ensure COMPANY_ADMIN cannot change role to admin roles
-      if (data.role && ![UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD].includes(data.role as UserRole)) {
-        const error: any = new Error('Company admins can only assign EMPLOYEE, MANAGER, or BUSINESS_HEAD roles');
+      if (data.role && ![UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD, UserRole.ACCOUNTANT].includes(data.role as UserRole)) {
+        const error: any = new Error('Company admins can only assign EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT roles');
         error.statusCode = 403;
         error.code = 'INVALID_ROLE';
         throw error;

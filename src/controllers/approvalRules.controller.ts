@@ -3,7 +3,7 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { ApprovalRulesService } from '../services/approvalRules.service';
-import { User } from '../models/User';
+import { CompanyAdmin } from '../models/CompanyAdmin';
 
 export class ApprovalRulesController {
   /**
@@ -11,17 +11,18 @@ export class ApprovalRulesController {
    * GET /api/v1/company-admin/approval-rules
    */
   static getApprovalRules = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await User.findById(req.user!.id).select('companyId').exec();
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
     
-    if (!user || !user.companyId) {
+    if (!companyAdmin || !companyAdmin.companyId) {
       res.status(404).json({
         success: false,
-        message: 'User not found or company not associated',
+        message: 'Company admin not found or company not associated',
       });
       return;
     }
 
-    const rules = await ApprovalRulesService.getApprovalRules(user.companyId.toString());
+    const rules = await ApprovalRulesService.getApprovalRules(companyAdmin.companyId.toString());
 
     res.status(200).json({
       success: true,
@@ -34,18 +35,19 @@ export class ApprovalRulesController {
    * POST /api/v1/company-admin/approval-rules
    */
   static createApprovalRule = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await User.findById(req.user!.id).select('companyId').exec();
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
     
-    if (!user || !user.companyId) {
+    if (!companyAdmin || !companyAdmin.companyId) {
       res.status(404).json({
         success: false,
-        message: 'User not found or company not associated',
+        message: 'Company admin not found or company not associated',
       });
       return;
     }
 
     const rule = await ApprovalRulesService.createApprovalRule(
-      user.companyId.toString(),
+      companyAdmin.companyId.toString(),
       req.body
     );
 
@@ -61,19 +63,20 @@ export class ApprovalRulesController {
    * PUT /api/v1/company-admin/approval-rules/:id
    */
   static updateApprovalRule = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await User.findById(req.user!.id).select('companyId').exec();
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
     
-    if (!user || !user.companyId) {
+    if (!companyAdmin || !companyAdmin.companyId) {
       res.status(404).json({
         success: false,
-        message: 'User not found or company not associated',
+        message: 'Company admin not found or company not associated',
       });
       return;
     }
 
     const rule = await ApprovalRulesService.updateApprovalRule(
       req.params.id,
-      user.companyId.toString(),
+      companyAdmin.companyId.toString(),
       req.body
     );
 
@@ -89,19 +92,20 @@ export class ApprovalRulesController {
    * DELETE /api/v1/company-admin/approval-rules/:id
    */
   static deleteApprovalRule = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await User.findById(req.user!.id).select('companyId').exec();
+    // Get company ID from company admin
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
     
-    if (!user || !user.companyId) {
+    if (!companyAdmin || !companyAdmin.companyId) {
       res.status(404).json({
         success: false,
-        message: 'User not found or company not associated',
+        message: 'Company admin not found or company not associated',
       });
       return;
     }
 
     await ApprovalRulesService.deleteApprovalRule(
       req.params.id,
-      user.companyId.toString()
+      companyAdmin.companyId.toString()
     );
 
     res.status(200).json({

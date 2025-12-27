@@ -62,7 +62,7 @@ export class UsersController {
       if (companyAdmin && companyAdmin.companyId) {
         companyId = companyAdmin.companyId.toString();
       }
-      // Exclude admin roles - only show EMPLOYEE, MANAGER, BUSINESS_HEAD
+      // Exclude admin roles - only show EMPLOYEE, MANAGER, BUSINESS_HEAD, ACCOUNTANT
       excludeAdminRoles = true;
     }
 
