@@ -436,8 +436,9 @@ export class ManagerService {
       throw error;
     }
 
-    // Verify report is in SUBMITTED status
-    if (report.status !== ExpenseReportStatus.SUBMITTED) {
+    // Verify report is in PENDING_APPROVAL_L1 status (or legacy SUBMITTED for backward compatibility)
+    if (report.status !== ExpenseReportStatus.PENDING_APPROVAL_L1 && 
+        report.status !== ExpenseReportStatus.SUBMITTED) {
       const error: any = new Error(`Cannot approve report with status: ${report.status}`);
       error.statusCode = 400;
       error.code = 'INVALID_STATUS';
@@ -489,12 +490,10 @@ export class ManagerService {
       report.approvers.push(approverData);
     }
 
-    // Update report status
-    report.status = ExpenseReportStatus.MANAGER_APPROVED;
-    report.approvedAt = new Date();
-    report.updatedBy = new mongoose.Types.ObjectId(managerId);
-
-    await report.save();
+    // Use ReportsService.handleReportAction for proper multi-level approval handling
+    // This will set the status to PENDING_APPROVAL_L2 if there are more approvers, or APPROVED if this is the last approver
+    const { ReportsService } = await import('./reports.service');
+    const updatedReport = await ReportsService.handleReportAction(reportId, managerId, 'approve', comment);
 
     // Approve all expenses in the report and emit real-time events
     try {
@@ -536,14 +535,14 @@ export class ManagerService {
 
     // Send notification to employee
     try {
-      const reportUser = report.userId as any;
+      const reportUser = updatedReport.userId as any;
       if (reportUser) {
         const userId = reportUser._id?.toString() || reportUser.toString();
         await NotificationDataService.createNotification({
           userId,
           type: NotificationType.REPORT_APPROVED,
           title: 'Report Approved',
-          description: `Your report "${report.name}" has been approved by your manager.`,
+          description: `Your report "${updatedReport.name}" has been approved by your manager.`,
           link: `/reports/${reportId}`,
           companyId: reportUser.companyId?.toString()
         });

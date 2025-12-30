@@ -498,9 +498,10 @@ export class BusinessHeadService {
         return [];
       }
 
+      // Check for both new PENDING_APPROVAL_L2 status and legacy MANAGER_APPROVED for backward compatibility
       const reports = await ExpenseReport.find({
         userId: { $in: allUserIds },
-        status: ExpenseReportStatus.MANAGER_APPROVED,
+        status: { $in: [ExpenseReportStatus.PENDING_APPROVAL_L2, ExpenseReportStatus.MANAGER_APPROVED] },
       })
         .populate('userId', 'name email departmentId managerId')
         .populate('projectId', 'name')
@@ -605,51 +606,29 @@ export class BusinessHeadService {
       throw error;
     }
 
-    // Verify report is in MANAGER_APPROVED status
-    if (report.status !== ExpenseReportStatus.MANAGER_APPROVED) {
+    // Verify report is in PENDING_APPROVAL_L2 status (or legacy MANAGER_APPROVED for backward compatibility)
+    if (report.status !== ExpenseReportStatus.PENDING_APPROVAL_L2 && 
+        report.status !== ExpenseReportStatus.MANAGER_APPROVED) {
       const error: any = new Error(`Cannot approve report with status: ${report.status}`);
       error.statusCode = 400;
       error.code = 'INVALID_STATUS';
       throw error;
     }
 
-    // Update approvers array
-    const approverIndex = report.approvers.findIndex(
-      (a: any) => a.userId.toString() === businessHeadId && a.level === 2
-    );
-
-    const approverData = {
-      level: 2,
-      userId: new mongoose.Types.ObjectId(businessHeadId),
-      role: 'BUSINESS_HEAD',
-      decidedAt: new Date(),
-      action: 'approve',
-      comment: comment || undefined,
-    };
-
-    if (approverIndex >= 0) {
-      report.approvers[approverIndex] = approverData;
-    } else {
-      report.approvers.push(approverData);
-    }
-
-    // Update report status to APPROVED
-    report.status = ExpenseReportStatus.APPROVED;
-    report.approvedAt = new Date();
-    report.updatedBy = new mongoose.Types.ObjectId(businessHeadId);
-
-    await report.save();
-
+    // Use ReportsService.handleReportAction for proper multi-level approval handling
+    const { ReportsService } = await import('./reports.service');
+    const updatedReport = await ReportsService.handleReportAction(reportId, businessHeadId, 'approve', comment);
+    
     // Send notification
     try {
       const { NotificationDataService } = await import('./notificationData.service');
       const { NotificationType } = await import('../models/Notification');
-      const reportUser = report.userId as any;
+      const reportUser = updatedReport.userId as any;
       await NotificationDataService.createNotification({
         userId: reportUser._id?.toString() || reportUser.toString(),
         type: NotificationType.REPORT_APPROVED,
         title: 'Report Approved',
-        description: `Your report "${report.name}" has been approved by the business head.`,
+        description: `Your report "${updatedReport.name}" has been approved by the business head.`,
         link: `/reports/${reportId}`,
         companyId: reportUser.companyId?.toString()
       });
@@ -657,7 +636,7 @@ export class BusinessHeadService {
       logger.error({ error: error }, 'Error sending notification:');
     }
 
-    return report;
+    return updatedReport;
   }
 
   /**
@@ -679,59 +658,18 @@ export class BusinessHeadService {
       throw error;
     }
 
-    // Verify report is in MANAGER_APPROVED status
-    if (report.status !== ExpenseReportStatus.MANAGER_APPROVED) {
+    // Verify report is in PENDING_APPROVAL_L2 status (or legacy MANAGER_APPROVED for backward compatibility)
+    if (report.status !== ExpenseReportStatus.PENDING_APPROVAL_L2 && 
+        report.status !== ExpenseReportStatus.MANAGER_APPROVED) {
       const error: any = new Error(`Cannot reject report with status: ${report.status}`);
       error.statusCode = 400;
       error.code = 'INVALID_STATUS';
       throw error;
     }
 
-    // Update approvers array
-    const approverIndex = report.approvers.findIndex(
-      (a: any) => a.userId.toString() === businessHeadId && a.level === 2
-    );
-
-    const approverData = {
-      level: 2,
-      userId: new mongoose.Types.ObjectId(businessHeadId),
-      role: 'BUSINESS_HEAD',
-      decidedAt: new Date(),
-      action: 'reject',
-      comment: comment || undefined,
-    };
-
-    if (approverIndex >= 0) {
-      report.approvers[approverIndex] = approverData;
-    } else {
-      report.approvers.push(approverData);
-    }
-
-    // Update report status to REJECTED
-    report.status = ExpenseReportStatus.REJECTED;
-    report.rejectedAt = new Date();
-    report.updatedBy = new mongoose.Types.ObjectId(businessHeadId);
-
-    await report.save();
-
-    // Send notification
-    try {
-      const { NotificationDataService } = await import('./notificationData.service');
-      const { NotificationType } = await import('../models/Notification');
-      const reportUser = report.userId as any;
-      await NotificationDataService.createNotification({
-        userId: reportUser._id?.toString() || reportUser.toString(),
-        type: NotificationType.REPORT_REJECTED,
-        title: 'Report Rejected',
-        description: `Your report "${report.name}" has been rejected by the business head.${comment ? ` Reason: ${comment}` : ''}`,
-        link: `/reports/${reportId}`,
-        companyId: reportUser.companyId?.toString()
-      });
-    } catch (error) {
-      logger.error({ error: error }, 'Error sending notification:');
-    }
-
-    return report;
+    // Use ReportsService.handleReportAction for proper multi-level approval handling
+    const { ReportsService } = await import('./reports.service');
+    return await ReportsService.handleReportAction(reportId, businessHeadId, 'reject', comment);
   }
 }
 
