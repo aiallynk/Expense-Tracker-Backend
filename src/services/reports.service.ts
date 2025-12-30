@@ -435,11 +435,24 @@ export class ReportsService {
 
     // Get company settings to determine approval levels
     let companySettings = null;
-    let approvalLevels = 2; // Default to 2 levels
+    let approvalLevels = 2; // Default to 2 levels (L1 and L2 are always required)
+    let approvalMatrix = null;
     if (reportUser.companyId) {
       companySettings = await CompanySettings.findOne({ companyId: reportUser.companyId }).exec();
       if (companySettings) {
-        approvalLevels = companySettings.approvalFlow.multiLevelApproval || 2;
+        // Use approvalMatrix if available, otherwise fallback to legacy approvalFlow
+        if (companySettings.approvalMatrix) {
+          approvalMatrix = companySettings.approvalMatrix;
+          // Count enabled optional levels (L3, L4, L5)
+          let enabledOptionalLevels = 0;
+          if (approvalMatrix.level3?.enabled) enabledOptionalLevels++;
+          if (approvalMatrix.level4?.enabled) enabledOptionalLevels++;
+          if (approvalMatrix.level5?.enabled) enabledOptionalLevels++;
+          approvalLevels = 2 + enabledOptionalLevels; // L1 + L2 + optional levels
+        } else {
+          // Legacy: use approvalFlow.multiLevelApproval
+          approvalLevels = companySettings.approvalFlow.multiLevelApproval || 2;
+        }
       }
     }
 
@@ -489,55 +502,168 @@ export class ReportsService {
         }
       }
 
-      // Level 2-5: Build chain based on hierarchy
-      for (let level = 2; level <= approvalLevels; level++) {
-        if (approvers.length > 0) {
-          const lastApprover = approvers[approvers.length - 1];
-          const lastApproverUser = await User.findById(lastApprover.userId);
-          if (lastApproverUser && lastApproverUser.managerId) {
-            const nextApprover = await User.findById(lastApproverUser.managerId);
-            if (nextApprover && nextApprover.status === 'ACTIVE') {
+      // Level 2: Business Approval (always required)
+      if (approvers.length > 0 && approvalLevels >= 2) {
+        const lastApprover = approvers[approvers.length - 1];
+        const lastApproverUser = await User.findById(lastApprover.userId);
+        if (lastApproverUser && lastApproverUser.managerId) {
+          const level2Approver = await User.findById(lastApproverUser.managerId);
+          if (level2Approver && level2Approver.status === 'ACTIVE') {
+            approvers.push({
+              level: 2,
+              userId: level2Approver._id as mongoose.Types.ObjectId,
+              role: level2Approver.role,
+            });
+          } else {
+            // Fallback: Find Business Head or Admin
+            const fallbackApprover = await User.findOne({
+              companyId: reportUser.companyId,
+              role: { $in: [UserRole.BUSINESS_HEAD, UserRole.ADMIN] },
+              status: 'ACTIVE',
+            }).exec();
+            if (fallbackApprover) {
+              approvers.push({
+                level: 2,
+                userId: fallbackApprover._id as mongoose.Types.ObjectId,
+                role: fallbackApprover.role,
+              });
+            }
+          }
+        }
+      }
+
+      // Level 3-5: Use approvalMatrix if configured, otherwise use hierarchy
+      if (approvalMatrix) {
+        // Use approvalMatrix configuration for optional levels
+        const optionalLevels = [
+          { level: 3, config: approvalMatrix.level3 },
+          { level: 4, config: approvalMatrix.level4 },
+          { level: 5, config: approvalMatrix.level5 },
+        ];
+
+        for (const { level, config } of optionalLevels) {
+          if (config?.enabled && config.approverRoles && config.approverRoles.length > 0) {
+            // Find approver with one of the specified roles
+            const approver = await User.findOne({
+              companyId: reportUser.companyId,
+              role: { $in: config.approverRoles },
+              status: 'ACTIVE',
+              _id: { $nin: approvers.map(a => a.userId) }, // Don't duplicate
+            }).exec();
+
+            if (approver) {
               approvers.push({
                 level: level,
-                userId: nextApprover._id as mongoose.Types.ObjectId,
-                role: nextApprover.role,
+                userId: approver._id as mongoose.Types.ObjectId,
+                role: approver.role,
               });
+            } else {
+              // If no approver found for this level, stop here
+              break;
+            }
+          }
+        }
+      } else {
+        // Legacy: Build chain based on hierarchy for levels 3-5
+        for (let level = 3; level <= approvalLevels; level++) {
+          if (approvers.length > 0) {
+            const lastApprover = approvers[approvers.length - 1];
+            const lastApproverUser = await User.findById(lastApprover.userId);
+            if (lastApproverUser && lastApproverUser.managerId) {
+              const nextApprover = await User.findById(lastApproverUser.managerId);
+              if (nextApprover && nextApprover.status === 'ACTIVE') {
+                approvers.push({
+                  level: level,
+                  userId: nextApprover._id as mongoose.Types.ObjectId,
+                  role: nextApprover.role,
+                });
+              } else {
+                break; // Stop if no more approvers in chain
+              }
             } else {
               break; // Stop if no more approvers in chain
             }
           } else {
-            break; // Stop if no more approvers in chain
+            break; // Stop if no base approver found
           }
-        } else {
-          break; // Stop if no base approver found
         }
       }
     }
 
-    // STEP 3: Amount-based validation - if total > INR 5,000, add additional approval level
+    // STEP 3: Amount-based validation - if total > INR 5,000, use next enabled level
     const AMOUNT_THRESHOLD = 5000;
     if (report.totalAmount > AMOUNT_THRESHOLD) {
       const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
-      const requiredLevels = approvalLevels + 1; // Add one more level
+      
+      // If approvalMatrix is configured, use next enabled level
+      if (approvalMatrix) {
+        const nextLevel = maxLevel + 1;
+        let nextLevelConfig = null;
+        
+        if (nextLevel === 3 && approvalMatrix.level3?.enabled) {
+          nextLevelConfig = approvalMatrix.level3;
+        } else if (nextLevel === 4 && approvalMatrix.level4?.enabled) {
+          nextLevelConfig = approvalMatrix.level4;
+        } else if (nextLevel === 5 && approvalMatrix.level5?.enabled) {
+          nextLevelConfig = approvalMatrix.level5;
+        }
 
-      // If we don't have enough levels, find an additional approver
-      if (maxLevel < requiredLevels && reportUser.companyId) {
-        // Try to find a Business Head or Admin as additional approver
-        const additionalApprover = await User.findOne({
-          companyId: reportUser.companyId,
-          role: { $in: [UserRole.BUSINESS_HEAD, UserRole.ADMIN, UserRole.COMPANY_ADMIN] },
-          status: 'ACTIVE',
-          _id: { $nin: approvers.map(a => a.userId) }, // Don't duplicate
-        }).exec();
+        if (nextLevelConfig && nextLevelConfig.approverRoles && nextLevelConfig.approverRoles.length > 0) {
+          const additionalApprover = await User.findOne({
+            companyId: reportUser.companyId,
+            role: { $in: nextLevelConfig.approverRoles },
+            status: 'ACTIVE',
+            _id: { $nin: approvers.map(a => a.userId) }, // Don't duplicate
+          }).exec();
 
-        if (additionalApprover) {
-          approvers.push({
-            level: requiredLevels,
-            userId: additionalApprover._id as mongoose.Types.ObjectId,
-            role: additionalApprover.role,
-            isAdditionalApproval: true,
-            triggerReason: `Report amount (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${AMOUNT_THRESHOLD.toLocaleString('en-IN')})`,
-          });
+          if (additionalApprover) {
+            approvers.push({
+              level: nextLevel,
+              userId: additionalApprover._id as mongoose.Types.ObjectId,
+              role: additionalApprover.role,
+              isAdditionalApproval: true,
+              triggerReason: `Report amount (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${AMOUNT_THRESHOLD.toLocaleString('en-IN')})`,
+            });
+          }
+        } else {
+          // Fallback: Find Business Head or Admin if no enabled level matches
+          const additionalApprover = await User.findOne({
+            companyId: reportUser.companyId,
+            role: { $in: [UserRole.BUSINESS_HEAD, UserRole.ADMIN, UserRole.COMPANY_ADMIN] },
+            status: 'ACTIVE',
+            _id: { $nin: approvers.map(a => a.userId) }, // Don't duplicate
+          }).exec();
+
+          if (additionalApprover) {
+            approvers.push({
+              level: maxLevel + 1,
+              userId: additionalApprover._id as mongoose.Types.ObjectId,
+              role: additionalApprover.role,
+              isAdditionalApproval: true,
+              triggerReason: `Report amount (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${AMOUNT_THRESHOLD.toLocaleString('en-IN')})`,
+            });
+          }
+        }
+      } else {
+        // Legacy: Add one more level
+        const requiredLevels = approvalLevels + 1;
+        if (maxLevel < requiredLevels && reportUser.companyId) {
+          const additionalApprover = await User.findOne({
+            companyId: reportUser.companyId,
+            role: { $in: [UserRole.BUSINESS_HEAD, UserRole.ADMIN, UserRole.COMPANY_ADMIN] },
+            status: 'ACTIVE',
+            _id: { $nin: approvers.map(a => a.userId) }, // Don't duplicate
+          }).exec();
+
+          if (additionalApprover) {
+            approvers.push({
+              level: requiredLevels,
+              userId: additionalApprover._id as mongoose.Types.ObjectId,
+              role: additionalApprover.role,
+              isAdditionalApproval: true,
+              triggerReason: `Report amount (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${AMOUNT_THRESHOLD.toLocaleString('en-IN')})`,
+            });
+          }
         }
       }
     }

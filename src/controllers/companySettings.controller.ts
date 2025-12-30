@@ -62,17 +62,36 @@ export class CompanySettingsController {
       return;
     }
 
-    const settings = await CompanySettingsService.updateSettings(
-      companyId,
-      updates,
-      req.user!.id
-    );
+    // Validate approvalMatrix if provided
+    if (updates.approvalMatrix && typeof updates.approvalMatrix !== 'object') {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid approvalMatrix settings format',
+        code: 'VALIDATION_ERROR',
+      });
+      return;
+    }
 
-    res.status(200).json({
-      success: true,
-      message: 'Settings updated successfully',
-      data: settings,
-    });
+    try {
+      const settings = await CompanySettingsService.updateSettings(
+        companyId,
+        updates,
+        req.user!.id
+      );
+
+      res.status(200).json({
+        success: true,
+        message: 'Settings updated successfully',
+        data: settings,
+      });
+    } catch (error: any) {
+      res.status(400).json({
+        success: false,
+        message: error.message || 'Failed to update settings',
+        code: 'VALIDATION_ERROR',
+      });
+      return;
+    }
   });
 
   /**

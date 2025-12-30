@@ -20,6 +20,35 @@ export class CompanySettingsService {
   }
 
   /**
+   * Validate approvalMatrix configuration
+   */
+  static validateApprovalMatrix(approvalMatrix: any): { valid: boolean; error?: string } {
+    if (!approvalMatrix) return { valid: true };
+
+    // Validate level dependencies
+    if (approvalMatrix.level4?.enabled && !approvalMatrix.level3?.enabled) {
+      return { valid: false, error: 'Level 4 cannot be enabled without Level 3' };
+    }
+
+    if (approvalMatrix.level5?.enabled && !approvalMatrix.level4?.enabled) {
+      return { valid: false, error: 'Level 5 cannot be enabled without Level 4' };
+    }
+
+    // Validate that enabled levels have at least one approver role
+    const levels = ['level3', 'level4', 'level5'] as const;
+    for (const level of levels) {
+      const levelConfig = approvalMatrix[level];
+      if (levelConfig?.enabled) {
+        if (!levelConfig.approverRoles || levelConfig.approverRoles.length === 0) {
+          return { valid: false, error: `${level.toUpperCase()} is enabled but has no approver roles selected` };
+        }
+      }
+    }
+
+    return { valid: true };
+  }
+
+  /**
    * Update company settings
    */
   static async updateSettings(
@@ -27,6 +56,14 @@ export class CompanySettingsService {
     updates: Partial<ICompanySettings>,
     userId: string
   ): Promise<ICompanySettings> {
+    // Validate approvalMatrix if provided
+    if (updates.approvalMatrix) {
+      const validation = this.validateApprovalMatrix(updates.approvalMatrix);
+      if (!validation.valid) {
+        throw new Error(validation.error);
+      }
+    }
+
     let settings = await CompanySettings.findOne({ companyId });
     
     if (!settings) {
@@ -40,7 +77,7 @@ export class CompanySettingsService {
       // Merge updates with existing settings
       if (settings) {
         Object.keys(updates).forEach((key) => {
-          if (key === 'approvalFlow' || key === 'expense' || key === 'general' || key === 'notifications') {
+          if (key === 'approvalFlow' || key === 'expense' || key === 'general' || key === 'notifications' || key === 'approvalMatrix') {
             (settings as any)[key] = {
               ...(settings as any)[key],
               ...(updates as any)[key],

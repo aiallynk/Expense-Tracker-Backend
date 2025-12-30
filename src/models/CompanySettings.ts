@@ -3,13 +3,29 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface ICompanySettings extends Document {
   companyId: mongoose.Types.ObjectId;
   
-  // Approval Flow Settings
+  // Approval Flow Settings (Legacy - kept for backward compatibility)
   approvalFlow: {
     requireManagerApproval: boolean;
     requireBusinessHeadApproval: boolean;
     multiLevelApproval: number; // 1-5 levels
     autoApproveThreshold?: number; // Amount threshold for auto-approval (optional)
     defaultApproverId?: mongoose.Types.ObjectId; // Default manager/user ID
+  };
+
+  // Approval Matrix Configuration (New - replaces approvalFlow for L3-L5)
+  approvalMatrix?: {
+    level3?: {
+      enabled: boolean;
+      approverRoles: string[]; // e.g., ['BUSINESS_HEAD', 'ADMIN']
+    };
+    level4?: {
+      enabled: boolean;
+      approverRoles: string[]; // e.g., ['ADMIN', 'COMPANY_ADMIN']
+    };
+    level5?: {
+      enabled: boolean;
+      approverRoles: string[]; // e.g., ['COMPANY_ADMIN']
+    };
   };
 
   // Expense Settings
@@ -67,6 +83,20 @@ const companySettingsSchema = new Schema<ICompanySettings>(
       multiLevelApproval: { type: Number, default: 2, min: 1, max: 5 },
       autoApproveThreshold: { type: Number, min: 0 },
       defaultApproverId: { type: Schema.Types.ObjectId, ref: 'User' },
+    },
+    approvalMatrix: {
+      level3: {
+        enabled: { type: Boolean, default: false },
+        approverRoles: { type: [String], default: [] },
+      },
+      level4: {
+        enabled: { type: Boolean, default: false },
+        approverRoles: { type: [String], default: [] },
+      },
+      level5: {
+        enabled: { type: Boolean, default: false },
+        approverRoles: { type: [String], default: [] },
+      },
     },
     expense: {
       requireReceipt: { type: Boolean, default: true },
