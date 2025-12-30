@@ -20,6 +20,11 @@ export const authMiddleware = async (
   next: NextFunction
 ): Promise<void> => {
   try {
+    // Skip authentication for health check endpoints
+    if (req.path === '/health' || req.path === '/healthz') {
+      return next();
+    }
+
     logger.debug(`Auth middleware - ${req.method} ${req.path}`);
     const authHeader = req.headers.authorization;
 
