@@ -2,7 +2,6 @@ import mongoose from 'mongoose';
 
 import { ApproverMapping, IApproverMapping } from '../models/ApproverMapping';
 import { User } from '../models/User';
-import { logger } from '@/config/logger';
 
 /**
  * Approver Mapping Service

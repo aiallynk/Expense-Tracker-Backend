@@ -490,7 +490,6 @@ export class ReportsService {
       }
 
       // Level 2-5: Build chain based on hierarchy
-      let currentUser = reportUser;
       for (let level = 2; level <= approvalLevels; level++) {
         if (approvers.length > 0) {
           const lastApprover = approvers[approvers.length - 1];

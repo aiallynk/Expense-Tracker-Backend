@@ -14,7 +14,7 @@ import { Project } from '../models/Project';
 import { CompanySettings } from '../models/CompanySettings';
 import { ExportFormat } from '../utils/enums';
 import { getObjectUrl } from '../utils/s3';
-import { getFinancialYear, getCurrentFinancialYear } from '../utils/financialYear';
+import { getFinancialYear } from '../utils/financialYear';
 
 // import { logger } from '@/config/logger'; // Unused
 
@@ -402,7 +402,7 @@ export class ExportService {
           exp.invoiceId || '',
           invoiceDate,
           `"${(exp.vendor || '').replace(/"/g, '""')}"`,
-          `"${((exp.categoryId?.name || 'N/A') || '').replace(/"/g, '""')}"`,
+          `"${((exp.categoryId as any)?.name || 'N/A').replace(/"/g, '""')}"`,
           exp.amount.toString(),
           exp.currency || 'INR',
           `"${((exp.notes || '').replace(/"/g, '""')).replace(/,/g, ';')}"`,
@@ -459,7 +459,7 @@ export class ExportService {
         // Header with logo
         if (logoBuffer) {
           try {
-            doc.image(logoBuffer, 50, 50, { width: 100, height: 50 });
+            (doc as any).image(logoBuffer, 50, 50, { width: 100, height: 50 });
           } catch (error) {
             console.error('Error adding logo to PDF:', error);
           }
@@ -468,8 +468,8 @@ export class ExportService {
         doc.fontSize(20).text('Expense Report', { align: 'center' });
         
         // Add "Powered by AI Ally" text
-        doc.fontSize(8).fillColor('gray').text('Powered by AI Ally', { align: 'right' });
-        doc.fillColor('black');
+        (doc as any).fontSize(8).fillColor('gray').text('Powered by AI Ally', { align: 'right' });
+        (doc as any).fillColor('black');
         doc.moveDown();
 
       // Summary
@@ -506,9 +506,6 @@ export class ExportService {
             doc.addPage();
             y = 50;
           }
-          const receipt = exp.receiptPrimaryId as any;
-          const receiptFilename = receipt?.storageKey ? receipt.storageKey.split('/').pop() : 'N/A';
-          
           doc.fontSize(8);
           doc.text(exp.expenseDate.toISOString().split('T')[0], 50, y);
           doc.text(exp.vendor.substring(0, 25), 100, y);
