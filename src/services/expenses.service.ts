@@ -190,12 +190,13 @@ export class ExpensesService {
       const user = await User.findById(userId).select('companyId').exec();
       
       if (user && user.companyId) {
+        const expenseId = (expense._id as mongoose.Types.ObjectId).toString();
         const duplicateCheck = await DuplicateInvoiceService.checkDuplicate(
           expense.invoiceId,
           expense.vendor,
           expense.invoiceDate,
           expense.amount,
-          expense._id.toString(), // Exclude current expense
+          expenseId, // Exclude current expense
           user.companyId
         );
 

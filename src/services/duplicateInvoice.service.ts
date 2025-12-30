@@ -70,11 +70,12 @@ export class DuplicateInvoiceService {
       if (duplicateExpense) {
         const report = duplicateExpense.reportId as any;
         const user = duplicateExpense.userId as any;
+        const expenseId = (duplicateExpense._id as mongoose.Types.ObjectId).toString();
 
         return {
           isDuplicate: true,
           duplicateExpense: {
-            expenseId: duplicateExpense._id.toString(),
+            expenseId,
             reportId: report?._id?.toString(),
             reportName: report?.name,
             reportStatus: report?.status,
@@ -111,18 +112,19 @@ export class DuplicateInvoiceService {
 
     for (const expense of expenses) {
       if (expense.invoiceId && expense.vendor && expense.invoiceDate && expense.amount) {
+        const expenseId = (expense._id as mongoose.Types.ObjectId).toString();
         const check = await this.checkDuplicate(
           expense.invoiceId,
           expense.vendor,
           expense.invoiceDate,
           expense.amount,
-          expense._id.toString(),
+          expenseId,
           companyId
         );
 
         if (check.isDuplicate && check.message) {
           duplicates.push({
-            expenseId: expense._id.toString(),
+            expenseId,
             message: check.message,
           });
         }

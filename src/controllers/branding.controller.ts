@@ -77,22 +77,36 @@ export class BrandingController {
   });
 
   /**
-   * Get company logo URL
-   * GET /api/v1/company-admin/branding/logo
+   * Get company logo URL (for any authenticated user)
+   * GET /api/v1/branding/logo
    */
   static getLogo = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
-    
-    if (!companyAdmin || !companyAdmin.companyId) {
+    let companyId: string | undefined;
+
+    // Try to get company ID from user
+    if (req.user!.role === 'COMPANY_ADMIN') {
+      const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+      if (companyAdmin && companyAdmin.companyId) {
+        companyId = companyAdmin.companyId.toString();
+      }
+    } else {
+      // For regular users, get company from user record
+      const { User } = await import('../models/User');
+      const user = await User.findById(req.user!.id).select('companyId').exec();
+      if (user && user.companyId) {
+        companyId = (user.companyId as any)._id?.toString() || user.companyId.toString();
+      }
+    }
+
+    if (!companyId) {
       res.status(404).json({
         success: false,
-        message: 'Company admin not found or company not associated',
+        message: 'Company not found or user not associated with a company',
         code: 'COMPANY_NOT_FOUND',
       });
       return;
     }
 
-    const companyId = companyAdmin.companyId.toString();
     const logoUrl = await BrandingService.getLogoUrl(companyId);
 
     res.status(200).json({
