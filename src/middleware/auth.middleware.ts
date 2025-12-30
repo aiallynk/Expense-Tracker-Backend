@@ -8,10 +8,67 @@ import { logger } from '@/config/logger';
 export interface AuthRequest extends Request {
   user?: {
     id: string;
-    email: string;
+    email?: string;
     role: string;
     companyId?: string;
+    serviceAccountId?: string; // For service accounts
   };
+}
+
+/**
+ * Validate API key from X-API-Key header
+ * Note: Since API keys are hashed, we must check all active accounts
+ * Optimized by filtering expired accounts first
+ */
+async function validateApiKey(apiKey: string): Promise<{
+  id: string;
+  companyId?: string;
+} | null> {
+  const { ServiceAccount } = await import('../models/ServiceAccount');
+  
+  const now = new Date();
+  
+  // Get all active, non-expired service accounts
+  // Filter expired accounts at query level for efficiency
+  const serviceAccounts = await ServiceAccount.find({
+    isActive: true,
+    $or: [
+      { expiresAt: { $exists: false } },
+      { expiresAt: { $gt: now } },
+    ],
+  })
+    .select('apiKeyHash companyId')
+    .exec();
+
+  // Check each service account's API key
+  // Early exit on first match
+  for (const account of serviceAccounts) {
+    try {
+      // Compare API key using bcrypt
+      const isValid = await account.compareApiKey(apiKey);
+      if (isValid) {
+        // Update lastUsedAt (fire and forget, don't wait)
+        ServiceAccount.findByIdAndUpdate(account._id, {
+          lastUsedAt: new Date(),
+        }).exec().catch((err) => {
+          logger.error({ error: err, accountId: account._id }, 'Error updating lastUsedAt');
+        });
+
+        return {
+          id: (account._id as any).toString(),
+          companyId: account.companyId
+            ? (account.companyId as any).toString()
+            : undefined,
+        };
+      }
+    } catch (error) {
+      // Skip this account if comparison fails
+      logger.debug({ error, accountId: account._id }, 'Error comparing API key');
+      continue;
+    }
+  }
+
+  return null;
 }
 
 export const authMiddleware = async (
@@ -26,6 +83,63 @@ export const authMiddleware = async (
     }
 
     logger.debug(`Auth middleware - ${req.method} ${req.path}`);
+
+    // PRIORITY 1: Check for API Key (for service accounts)
+    const apiKey = req.headers['x-api-key'] as string;
+    if (apiKey) {
+      logger.debug('Auth middleware - API key detected, validating...');
+      
+      try {
+        const serviceAccount = await validateApiKey(apiKey);
+        
+        if (serviceAccount) {
+          req.user = {
+            id: serviceAccount.id,
+            role: 'SERVICE_ACCOUNT',
+            companyId: serviceAccount.companyId,
+            serviceAccountId: serviceAccount.id,
+          };
+
+          logger.debug(
+            `Auth middleware - API key validated for service account: ${serviceAccount.id}`
+          );
+          
+          // Log service account request
+          logger.info(
+            {
+              serviceAccountId: serviceAccount.id,
+              method: req.method,
+              path: req.path,
+              companyId: serviceAccount.companyId,
+            },
+            'Service account API request'
+          );
+          
+          return next();
+        } else {
+          logger.warn(
+            { method: req.method, path: req.path },
+            'Auth middleware - Invalid API key'
+          );
+          res.status(401).json({
+            success: false,
+            message: 'Invalid API key',
+            code: 'INVALID_API_KEY',
+          });
+          return;
+        }
+      } catch (error) {
+        logger.error({ error }, 'Auth middleware - Error validating API key');
+        res.status(500).json({
+          success: false,
+          message: 'Error validating API key',
+          code: 'AUTH_ERROR',
+        });
+        return;
+      }
+    }
+
+    // PRIORITY 2: Check for JWT Bearer token (for regular users)
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -39,7 +153,7 @@ export const authMiddleware = async (
     }
 
     const token = authHeader.substring(7);
-    logger.debug('Auth middleware - Token received, verifying...');
+    logger.debug('Auth middleware - JWT token received, verifying...');
 
     try {
       const decoded = jwt.verify(token, config.jwt.accessSecret) as {

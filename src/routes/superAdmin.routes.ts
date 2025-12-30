@@ -3,6 +3,10 @@ import { Router } from 'express';
 import { SuperAdminController } from '../controllers/superAdmin.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/role.middleware';
+import {
+  requireServiceAccountReadOnly,
+  validateServiceAccountEndpoint,
+} from '../middleware/serviceAccount.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { createCompanySchema, updateCompanySchema } from '../utils/dtoTypes';
 import { UserRole } from '../utils/enums';
@@ -11,16 +15,16 @@ import '../models/Company';
 
 const router = Router();
 
-// All routes require authentication and SUPER_ADMIN role
+// All routes require authentication
 router.use(authMiddleware);
+
+// Analytics endpoints (read-only) - allow service accounts
+router.get('/dashboard/stats', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getDashboardStats);
+router.get('/system-analytics', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getSystemAnalytics);
+router.get('/system-analytics/detailed', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getSystemAnalyticsDetailed);
+
+// Other routes require SUPER_ADMIN role (no service accounts)
 router.use(requireRole(UserRole.SUPER_ADMIN));
-
-// Dashboard
-router.get('/dashboard/stats', SuperAdminController.getDashboardStats);
-
-// System Analytics
-router.get('/system-analytics', SuperAdminController.getSystemAnalytics);
-router.get('/system-analytics/detailed', SuperAdminController.getSystemAnalyticsDetailed);
 
 // Platform Stats
 router.get('/platform/stats', SuperAdminController.getPlatformStats);

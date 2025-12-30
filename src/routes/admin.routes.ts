@@ -4,11 +4,22 @@ import { ActivityController } from '../controllers/activity.controller';
 import { AdminController } from '../controllers/admin.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireAdmin } from '../middleware/role.middleware';
+import {
+  requireServiceAccountReadOnly,
+  validateServiceAccountEndpoint,
+} from '../middleware/serviceAccount.middleware';
 
 const router = Router();
 
-// All routes require authentication and admin role
+// All routes require authentication
 router.use(authMiddleware);
+
+// Analytics endpoints (read-only) - allow service accounts
+router.get('/summary/dashboard', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getDashboard);
+router.get('/summary/storage-growth', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getStorageGrowth);
+router.get('/export/csv', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkCsvExport);
+
+// Other routes require admin role (no service accounts)
 router.use(requireAdmin);
 
 // Reports

@@ -15,6 +15,17 @@ export const requireRole = (...allowedRoles: UserRole[]) => {
       return;
     }
 
+    // Service accounts are handled separately and should not reach here
+    // If they do, deny access (service accounts use different middleware)
+    if (req.user.role === 'SERVICE_ACCOUNT') {
+      res.status(403).json({
+        success: false,
+        message: 'Service accounts cannot access this endpoint',
+        code: 'FORBIDDEN',
+      });
+      return;
+    }
+
     // Check if user role matches any allowed role (handle both string and enum)
     const userRole = req.user.role;
     const allowedRoleStrings = allowedRoles.map(role => role.toString());

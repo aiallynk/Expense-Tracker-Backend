@@ -26,6 +26,7 @@ import ocrRoutes from './routes/ocr.routes';
 import projectsRoutes from './routes/projects.routes';
 import receiptsRoutes from './routes/receipts.routes';
 import reportsRoutes from './routes/reports.routes';
+import serviceAccountRoutes from './routes/serviceAccount.routes';
 import superAdminRoutes from './routes/superAdmin.routes';
 import usersRoutes from './routes/users.routes';
 
@@ -178,6 +179,7 @@ export const createApp = (): Express => {
   app.use('/api/v1/company-admin', companySettingsRoutes);
   app.use('/api/v1/departments', departmentsRoutes);
   app.use('/api/v1/notifications', notificationsRoutes);
+  app.use('/api/v1/service-accounts', serviceAccountRoutes);
 
   // Manager routes
   app.use('/api/v1/manager', managerRoutes);
