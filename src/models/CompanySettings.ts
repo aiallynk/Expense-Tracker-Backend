@@ -30,6 +30,14 @@ export interface ICompanySettings extends Document {
     companyName?: string;
   };
 
+  // Financial Year Settings
+  financialYear: {
+    startMonth: number; // 1-12 (1 = January, 4 = April)
+    startDay: number; // 1-31
+    endMonth: number; // 1-12
+    endDay: number; // 1-31
+  };
+
   // Notifications Settings
   notifications: {
     emailNotifications: boolean;
@@ -73,6 +81,13 @@ const companySettingsSchema = new Schema<ICompanySettings>(
       currency: { type: String, default: 'INR' },
       dateFormat: { type: String, default: 'DD/MM/YYYY' },
       companyName: { type: String },
+    },
+    // Financial Year Settings (default: April 1 - March 31)
+    financialYear: {
+      startMonth: { type: Number, default: 4, min: 1, max: 12 }, // April
+      startDay: { type: Number, default: 1, min: 1, max: 31 },
+      endMonth: { type: Number, default: 3, min: 1, max: 12 }, // March
+      endDay: { type: Number, default: 31, min: 1, max: 31 },
     },
     notifications: {
       emailNotifications: { type: Boolean, default: true },

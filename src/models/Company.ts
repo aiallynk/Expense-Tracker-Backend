@@ -33,6 +33,9 @@ export interface ICompany extends Document {
   status: CompanyStatus;
   plan: CompanyPlan;
   domain?: string;
+  // Branding fields
+  logoUrl?: string; // URL to company logo (stored in S3)
+  logoStorageKey?: string; // S3 storage key for logo
   createdAt: Date;
   updatedAt: Date;
 }
@@ -75,6 +78,15 @@ const companySchema = new Schema<ICompany>(
       type: String,
       trim: true,
       lowercase: true,
+    },
+    // Branding fields
+    logoUrl: {
+      type: String,
+      trim: true,
+    },
+    logoStorageKey: {
+      type: String,
+      trim: true,
     },
   },
   {

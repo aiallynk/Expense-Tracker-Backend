@@ -17,6 +17,9 @@ router.post('/reports/:id/approve', AdminController.approveReport);
 router.post('/reports/:id/reject', AdminController.rejectReport);
 router.get('/reports/:id/export', AdminController.exportReport);
 
+// Bulk CSV Export (Admin & Accountant only)
+router.get('/export/csv', AdminController.bulkCsvExport);
+
 // Expenses
 router.get('/expenses', AdminController.getAllExpenses);
 router.post('/expenses/:id/approve', AdminController.approveExpense);

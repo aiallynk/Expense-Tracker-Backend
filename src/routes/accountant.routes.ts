@@ -23,5 +23,8 @@ router.get('/expenses/department-wise', AccountantController.getDepartmentWiseEx
 router.get('/expenses/project-wise', AccountantController.getProjectWiseExpenses);
 router.get('/expenses/cost-centre-wise', AccountantController.getCostCentreWiseExpenses);
 
+// Bulk CSV Export
+router.get('/export/csv', AccountantController.bulkCsvExport);
+
 export default router;
 

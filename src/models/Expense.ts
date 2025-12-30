@@ -12,6 +12,9 @@ export interface IExpense extends Document {
   amount: number;
   currency: string;
   expenseDate: Date;
+  // Invoice fields for duplicate detection
+  invoiceId?: string; // Invoice number/ID
+  invoiceDate?: Date; // Invoice date
   status: ExpenseStatus;
   source: ExpenseSource;
   notes?: string;
@@ -68,6 +71,14 @@ const expenseSchema = new Schema<IExpense>(
     expenseDate: {
       type: Date,
       required: true,
+    },
+    // Invoice fields for duplicate detection
+    invoiceId: {
+      type: String,
+      trim: true,
+    },
+    invoiceDate: {
+      type: Date,
     },
     status: {
       type: String,
@@ -128,6 +139,8 @@ expenseSchema.index({ projectId: 1 });
 expenseSchema.index({ status: 1 });
 expenseSchema.index({ vendor: 1, expenseDate: 1 });
 expenseSchema.index({ expenseDate: -1 });
+// Index for duplicate invoice detection
+expenseSchema.index({ invoiceId: 1, vendor: 1, invoiceDate: 1, amount: 1 }, { sparse: true });
 
 export const Expense = mongoose.model<IExpense>('Expense', expenseSchema);
 

@@ -154,6 +154,16 @@ export const createExpenseSchema = z.object({
   source: z.nativeEnum(ExpenseSource),
   notes: z.string().optional(),
   receiptId: z.string().optional(), // Receipt ID to link to expense (e.g., source PDF/Excel document)
+  // Invoice fields for duplicate detection
+  invoiceId: z.string().optional(),
+  invoiceDate: z.string().refine(
+    (val) => {
+      if (!val) return true; // Optional field
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for invoiceDate' }
+  ).optional(),
 });
 
 export const updateExpenseSchema = z.object({
@@ -172,6 +182,16 @@ export const updateExpenseSchema = z.object({
     { message: 'Invalid datetime format for expenseDate' }
   ).optional(),
   notes: z.string().optional(),
+  // Invoice fields for duplicate detection
+  invoiceId: z.string().optional().nullable(),
+  invoiceDate: z.string().refine(
+    (val) => {
+      if (!val) return true; // Optional field
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for invoiceDate' }
+  ).optional().nullable(),
 });
 
 // Receipt DTOs
@@ -222,6 +242,17 @@ export const expenseFiltersSchema = paginationSchema.extend({
 
 export const exportQuerySchema = z.object({
   format: z.nativeEnum(ExportFormat).default(ExportFormat.XLSX),
+});
+
+// Bulk CSV Export Filters Schema
+export const bulkCsvExportFiltersSchema = z.object({
+  financialYear: z.string().optional(), // e.g., "2024-25" or "FY2024-25"
+  costCentreId: z.string().optional(),
+  projectId: z.string().optional(),
+  status: z.nativeEnum(ExpenseReportStatus).optional(),
+  companyId: z.string().optional(),
+  fromDate: z.string().datetime().optional(),
+  toDate: z.string().datetime().optional(),
 });
 
 // Company DTOs

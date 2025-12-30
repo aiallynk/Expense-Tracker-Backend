@@ -1,9 +1,12 @@
 import { Response } from 'express';
 
+import { Response } from 'express';
+
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { AccountantService } from '../services/accountant.service';
-import { reportFiltersSchema } from '../utils/dtoTypes';
+import { ExportService } from '../services/export.service';
+import { reportFiltersSchema, bulkCsvExportFiltersSchema } from '../utils/dtoTypes';
 
 export class AccountantController {
   /**
@@ -132,6 +135,44 @@ export class AccountantController {
       success: true,
       data: costCentreSpend,
     });
+  });
+
+  /**
+   * Bulk CSV Export with filtering
+   * GET /api/v1/accountant/export/csv
+   * Accountant role only
+   */
+  static bulkCsvExport = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const filters = bulkCsvExportFiltersSchema.parse(req.query);
+    
+    // Get company ID from accountant's user record
+    const { User } = await import('../models/User');
+    const accountant = await User.findById(req.user!.id).select('companyId').exec();
+    
+    if (!accountant || !accountant.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Accountant not found or not associated with a company',
+      });
+      return;
+    }
+
+    const companyId = accountant.companyId.toString();
+
+    const csvBuffer = await ExportService.generateBulkCSV({
+      ...filters,
+      companyId,
+      fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
+      toDate: filters.toDate ? new Date(filters.toDate) : undefined,
+    });
+
+    // Generate filename
+    const timestamp = new Date().toISOString().split('T')[0];
+    const filename = `expense-export-${timestamp}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(csvBuffer);
   });
 }
 

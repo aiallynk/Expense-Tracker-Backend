@@ -10,6 +10,7 @@ import {
   reportFiltersSchema,
   expenseFiltersSchema,
   exportQuerySchema,
+  bulkCsvExportFiltersSchema,
 } from '../utils/dtoTypes';
 import { ExpenseReportStatus, ExpenseStatus, ExportFormat } from '../utils/enums';
 
@@ -68,6 +69,47 @@ export class AdminController {
         format,
       },
     });
+  });
+
+  /**
+   * Bulk CSV Export with filtering
+   * GET /api/v1/admin/export/csv
+   * Only Admin & Accountant roles
+   */
+  static bulkCsvExport = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const filters = bulkCsvExportFiltersSchema.parse(req.query);
+    
+    // Get company ID from user if not provided
+    let companyId = filters.companyId;
+    if (!companyId && req.user!.role === 'COMPANY_ADMIN') {
+      const { CompanyAdmin } = await import('../models/CompanyAdmin');
+      const companyAdmin = await CompanyAdmin.findById(req.user!.id).select('companyId').exec();
+      if (companyAdmin && companyAdmin.companyId) {
+        companyId = companyAdmin.companyId.toString();
+      }
+    } else if (!companyId && req.user!.role !== 'ADMIN' && req.user!.role !== 'SUPER_ADMIN') {
+      // For Accountant, get from user's companyId
+      const { User } = await import('../models/User');
+      const user = await User.findById(req.user!.id).select('companyId').exec();
+      if (user && user.companyId) {
+        companyId = user.companyId.toString();
+      }
+    }
+
+    const csvBuffer = await ExportService.generateBulkCSV({
+      ...filters,
+      companyId,
+      fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
+      toDate: filters.toDate ? new Date(filters.toDate) : undefined,
+    });
+
+    // Generate filename
+    const timestamp = new Date().toISOString().split('T')[0];
+    const filename = `expense-export-${timestamp}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(csvBuffer);
   });
 
   // Expenses

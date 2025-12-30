@@ -10,6 +10,8 @@ import { User } from '../models/User';
 import { Project } from '../models/Project';
 import { CostCentre } from '../models/CostCentre';
 import { ApprovalRule, ApprovalRuleTriggerType, ApprovalRuleApproverRole } from '../models/ApprovalRule';
+import { ApproverMapping } from '../models/ApproverMapping';
+import { CompanySettings } from '../models/CompanySettings';
 import { emitCompanyAdminDashboardUpdate, emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
 import { CreateReportDto, UpdateReportDto, ReportFiltersDto } from '../utils/dtoTypes';
 import { ExpenseReportStatus, UserRole, ExpenseStatus , AuditAction } from '../utils/enums';
@@ -18,6 +20,7 @@ import { getPaginationOptions, createPaginatedResult } from '../utils/pagination
 import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
 import { NotificationService } from './notification.service';
+import { DuplicateInvoiceService } from './duplicateInvoice.service';
 
 import { logger } from '@/config/logger';
 
@@ -430,49 +433,132 @@ export class ReportsService {
       throw new Error('Report owner not found');
     }
 
-    // STEP 1: Build normal hierarchy-based approval chain
-    // Level 1: Manager (if employee has a manager)
-    if (reportUser.managerId) {
-      const manager = await User.findById(reportUser.managerId);
-      if (manager && manager.status === 'ACTIVE') {
-        approvers.push({
-          level: 1,
-          userId: manager._id as mongoose.Types.ObjectId,
-          role: manager.role,
-        });
+    // Get company settings to determine approval levels
+    let companySettings = null;
+    let approvalLevels = 2; // Default to 2 levels
+    if (reportUser.companyId) {
+      companySettings = await CompanySettings.findOne({ companyId: reportUser.companyId }).exec();
+      if (companySettings) {
+        approvalLevels = companySettings.approvalFlow.multiLevelApproval || 2;
       }
     }
 
-    // Level 2: Business Head (if manager exists and has a business head, or if user is manager and has BH)
-    if (approvers.length > 0) {
-      const manager = await User.findById(approvers[0].userId);
-      if (manager && manager.managerId) {
-        const businessHead = await User.findById(manager.managerId);
-        if (businessHead && businessHead.status === 'ACTIVE' && 
-            (businessHead.role === UserRole.BUSINESS_HEAD || businessHead.role === UserRole.ADMIN)) {
-          approvers.push({
-            level: 2,
-            userId: businessHead._id as mongoose.Types.ObjectId,
-            role: businessHead.role,
-          });
+    // STEP 1: Check for custom approver mapping first
+    let customMapping = null;
+    if (reportUser.companyId) {
+      customMapping = await ApproverMapping.findOne({
+        userId: reportUser._id,
+        companyId: reportUser.companyId,
+        isActive: true,
+      }).exec();
+    }
+
+    if (customMapping) {
+      // Use custom mapping
+      const mappingLevels = [
+        { level: 1, approverId: customMapping.level1ApproverId },
+        { level: 2, approverId: customMapping.level2ApproverId },
+        { level: 3, approverId: customMapping.level3ApproverId },
+        { level: 4, approverId: customMapping.level4ApproverId },
+        { level: 5, approverId: customMapping.level5ApproverId },
+      ];
+
+      for (const mapping of mappingLevels) {
+        if (mapping.level <= approvalLevels && mapping.approverId) {
+          const approver = await User.findById(mapping.approverId).exec();
+          if (approver && approver.status === 'ACTIVE') {
+            approvers.push({
+              level: mapping.level,
+              userId: approver._id as mongoose.Types.ObjectId,
+              role: approver.role,
+            });
+          }
         }
       }
     } else {
-      // If no manager, check if user's manager is a business head
-      if (reportUser.managerId) {
-        const potentialBH = await User.findById(reportUser.managerId);
-        if (potentialBH && potentialBH.status === 'ACTIVE' && 
-            (potentialBH.role === UserRole.BUSINESS_HEAD || potentialBH.role === UserRole.ADMIN)) {
+      // STEP 2: Build hierarchy-based approval chain (fallback)
+      // Level 1: Manager (if employee has a manager)
+      if (reportUser.managerId && approvalLevels >= 1) {
+        const manager = await User.findById(reportUser.managerId);
+        if (manager && manager.status === 'ACTIVE') {
           approvers.push({
             level: 1,
-            userId: potentialBH._id as mongoose.Types.ObjectId,
-            role: potentialBH.role,
+            userId: manager._id as mongoose.Types.ObjectId,
+            role: manager.role,
+          });
+        }
+      }
+
+      // Level 2-5: Build chain based on hierarchy
+      let currentUser = reportUser;
+      for (let level = 2; level <= approvalLevels; level++) {
+        if (approvers.length > 0) {
+          const lastApprover = approvers[approvers.length - 1];
+          const lastApproverUser = await User.findById(lastApprover.userId);
+          if (lastApproverUser && lastApproverUser.managerId) {
+            const nextApprover = await User.findById(lastApproverUser.managerId);
+            if (nextApprover && nextApprover.status === 'ACTIVE') {
+              approvers.push({
+                level: level,
+                userId: nextApprover._id as mongoose.Types.ObjectId,
+                role: nextApprover.role,
+              });
+            } else {
+              break; // Stop if no more approvers in chain
+            }
+          } else {
+            break; // Stop if no more approvers in chain
+          }
+        } else {
+          break; // Stop if no base approver found
+        }
+      }
+    }
+
+    // STEP 3: Amount-based validation - if total > INR 5,000, add additional approval level
+    const AMOUNT_THRESHOLD = 5000;
+    if (report.totalAmount > AMOUNT_THRESHOLD) {
+      const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
+      const requiredLevels = approvalLevels + 1; // Add one more level
+
+      // If we don't have enough levels, find an additional approver
+      if (maxLevel < requiredLevels && reportUser.companyId) {
+        // Try to find a Business Head or Admin as additional approver
+        const additionalApprover = await User.findOne({
+          companyId: reportUser.companyId,
+          role: { $in: [UserRole.BUSINESS_HEAD, UserRole.ADMIN, UserRole.COMPANY_ADMIN] },
+          status: 'ACTIVE',
+          _id: { $nin: approvers.map(a => a.userId) }, // Don't duplicate
+        }).exec();
+
+        if (additionalApprover) {
+          approvers.push({
+            level: requiredLevels,
+            userId: additionalApprover._id as mongoose.Types.ObjectId,
+            role: additionalApprover.role,
+            isAdditionalApproval: true,
+            triggerReason: `Report amount (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${AMOUNT_THRESHOLD.toLocaleString('en-IN')})`,
           });
         }
       }
     }
 
-    // If no approvers found, assign to ADMIN or COMPANY_ADMIN as fallback
+    // STEP 4: Evaluate additional approval rules (budget-based)
+    if (reportUser.companyId) {
+      const additionalApprovers = await this.evaluateAdditionalApprovalRules(report, reportUser.companyId);
+      
+      // Insert additional approvers after the last normal approver
+      const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
+      
+      additionalApprovers.forEach((additionalApprover, index) => {
+        approvers.push({
+          ...additionalApprover,
+          level: maxLevel + index + 1, // Ensure additional approvals come after normal approvals
+        });
+      });
+    }
+
+    // STEP 5: Fallback - if no approvers found, assign to ADMIN or COMPANY_ADMIN
     if (approvers.length === 0) {
       const admin = await User.findOne({
         role: { $in: [UserRole.ADMIN, UserRole.COMPANY_ADMIN] },
@@ -488,21 +574,8 @@ export class ReportsService {
       }
     }
 
-    // STEP 2: Evaluate additional approval rules and inject approvers if conditions match
-    if (reportUser.companyId) {
-      const additionalApprovers = await this.evaluateAdditionalApprovalRules(report, reportUser.companyId);
-      
-      // Insert additional approvers after the last normal approver
-      // They should be at a level higher than the highest existing level
-      const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
-      
-      additionalApprovers.forEach((additionalApprover, index) => {
-        approvers.push({
-          ...additionalApprover,
-          level: maxLevel + index + 1, // Ensure additional approvals come after normal approvals
-        });
-      });
-    }
+    // Sort approvers by level
+    approvers.sort((a, b) => a.level - b.level);
 
     return approvers;
   }
@@ -689,13 +762,39 @@ export class ReportsService {
       throw new Error('Report must have at least one expense');
     }
 
+    // Check for duplicate invoices
+    const reportUser = await User.findById(report.userId).select('companyId').exec();
+    if (reportUser && reportUser.companyId) {
+      const duplicates = await DuplicateInvoiceService.checkReportDuplicates(
+        id,
+        reportUser.companyId
+      );
+
+      if (duplicates.length > 0) {
+        const duplicateMessages = duplicates.map(d => d.message).join('; ');
+        throw new Error(`Duplicate invoices detected: ${duplicateMessages}`);
+      }
+    }
+
     // Compute approver chain
     const approvers = await this.computeApproverChain(report);
     if (approvers.length === 0) {
       throw new Error('No approvers found for this report');
     }
 
-    report.status = ExpenseReportStatus.SUBMITTED;
+    // Set initial status based on approval levels
+    // If there are approvers, set to PENDING_APPROVAL_L1, otherwise SUBMITTED
+    let initialStatus = ExpenseReportStatus.SUBMITTED;
+    if (approvers.length > 0) {
+      const firstApprover = approvers[0];
+      if (firstApprover.level === 1) {
+        initialStatus = ExpenseReportStatus.PENDING_APPROVAL_L1;
+      } else {
+        initialStatus = ExpenseReportStatus.SUBMITTED;
+      }
+    }
+
+    report.status = initialStatus;
     report.submittedAt = new Date();
     report.updatedBy = new mongoose.Types.ObjectId(userId);
     report.approvers = approvers;
@@ -779,11 +878,25 @@ export class ReportsService {
         report.status = ExpenseReportStatus.APPROVED;
         report.approvedAt = new Date();
       } else {
-        // Move to next level
-        if (currentLevel === 1) {
-          report.status = ExpenseReportStatus.MANAGER_APPROVED;
-        } else if (currentLevel === 2) {
-          report.status = ExpenseReportStatus.BH_APPROVED;
+        // Move to next level - use PENDING_APPROVAL_LX statuses
+        const nextLevel = currentLevel + 1;
+        if (nextLevel === 1) {
+          report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
+        } else if (nextLevel === 2) {
+          report.status = ExpenseReportStatus.PENDING_APPROVAL_L2;
+        } else if (nextLevel === 3) {
+          report.status = ExpenseReportStatus.PENDING_APPROVAL_L3;
+        } else if (nextLevel === 4) {
+          report.status = ExpenseReportStatus.PENDING_APPROVAL_L4;
+        } else if (nextLevel === 5) {
+          report.status = ExpenseReportStatus.PENDING_APPROVAL_L5;
+        } else {
+          // Fallback to old statuses for backward compatibility
+          if (nextLevel === 1) {
+            report.status = ExpenseReportStatus.MANAGER_APPROVED;
+          } else if (nextLevel === 2) {
+            report.status = ExpenseReportStatus.BH_APPROVED;
+          }
         }
       }
     } else if (action === 'request_changes') {

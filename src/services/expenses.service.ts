@@ -41,6 +41,27 @@ export class ExpensesService {
       receiptIds.push(new mongoose.Types.ObjectId(data.receiptId));
     }
 
+    // Check for duplicate invoice if invoice fields are provided
+    if (data.invoiceId && data.invoiceDate) {
+      const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+      const user = await User.findById(userId).select('companyId').exec();
+      
+      if (user && user.companyId) {
+        const duplicateCheck = await DuplicateInvoiceService.checkDuplicate(
+          data.invoiceId,
+          data.vendor,
+          new Date(data.invoiceDate),
+          data.amount,
+          undefined, // No excludeExpenseId for new expenses
+          user.companyId
+        );
+
+        if (duplicateCheck.isDuplicate) {
+          throw new Error(duplicateCheck.message || 'Duplicate invoice detected');
+        }
+      }
+    }
+
     const expense = new Expense({
       reportId,
       userId: new mongoose.Types.ObjectId(userId),
@@ -56,6 +77,9 @@ export class ExpensesService {
       notes: data.notes,
       receiptIds,
       receiptPrimaryId: data.receiptId ? new mongoose.Types.ObjectId(data.receiptId) : undefined,
+      // Invoice fields
+      invoiceId: data.invoiceId,
+      invoiceDate: data.invoiceDate ? new Date(data.invoiceDate) : undefined,
     });
 
     const saved = await expense.save();
@@ -149,6 +173,36 @@ export class ExpensesService {
 
     if (data.notes !== undefined) {
       expense.notes = data.notes;
+    }
+
+    // Handle invoice fields
+    if (data.invoiceId !== undefined) {
+      expense.invoiceId = data.invoiceId || undefined;
+    }
+    if (data.invoiceDate !== undefined) {
+      expense.invoiceDate = data.invoiceDate ? new Date(data.invoiceDate) : undefined;
+    }
+
+    // Check for duplicate invoice if invoice fields are being updated
+    if ((data.invoiceId !== undefined || data.invoiceDate !== undefined) && 
+        expense.invoiceId && expense.invoiceDate) {
+      const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+      const user = await User.findById(userId).select('companyId').exec();
+      
+      if (user && user.companyId) {
+        const duplicateCheck = await DuplicateInvoiceService.checkDuplicate(
+          expense.invoiceId,
+          expense.vendor,
+          expense.invoiceDate,
+          expense.amount,
+          expense._id.toString(), // Exclude current expense
+          user.companyId
+        );
+
+        if (duplicateCheck.isDuplicate) {
+          throw new Error(duplicateCheck.message || 'Duplicate invoice detected');
+        }
+      }
     }
 
     // If expense status was PENDING or REJECTED, update it back to DRAFT

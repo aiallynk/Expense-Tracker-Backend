@@ -1,6 +1,8 @@
 import { Router } from 'express';
 
 import { ApprovalRulesController } from '../controllers/approvalRules.controller';
+import { ApproverMappingController } from '../controllers/approverMapping.controller';
+import { BrandingController } from '../controllers/branding.controller';
 import { CompanyNotificationsController } from '../controllers/companyNotifications.controller';
 import { CompanySettingsController } from '../controllers/companySettings.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -8,6 +10,7 @@ import { requireRole } from '../middleware/role.middleware';
 import { UserRole } from '../utils/enums';
 // Import models to ensure they're registered with Mongoose
 import '../models/ApprovalRule';
+import '../models/ApproverMapping';
 import '../models/CompanySettings';
 import '../models/Notification';
 
@@ -49,6 +52,32 @@ router.put('/notifications/:id/read', CompanyNotificationsController.markAsRead)
 
 // PUT /api/v1/company-admin/notifications/read-all - Mark all notifications as read
 router.put('/notifications/read-all', CompanyNotificationsController.markAllAsRead);
+
+// Approver Mapping routes
+// GET /api/v1/company-admin/approver-mappings - Get all approver mappings
+router.get('/approver-mappings', ApproverMappingController.getMappings);
+
+// GET /api/v1/company-admin/approver-mappings/:userId - Get approver mapping for user
+router.get('/approver-mappings/:userId', ApproverMappingController.getMappingByUserId);
+
+// POST /api/v1/company-admin/approver-mappings - Create/update approver mapping
+router.post('/approver-mappings', ApproverMappingController.upsertMapping);
+
+// DELETE /api/v1/company-admin/approver-mappings/:userId - Delete approver mapping
+router.delete('/approver-mappings/:userId', ApproverMappingController.deleteMapping);
+
+// Branding routes
+// POST /api/v1/company-admin/branding/logo/upload-intent - Create upload intent for logo
+router.post('/branding/logo/upload-intent', BrandingController.createUploadIntent);
+
+// POST /api/v1/company-admin/branding/logo/confirm-upload - Confirm logo upload
+router.post('/branding/logo/confirm-upload', BrandingController.confirmUpload);
+
+// GET /api/v1/company-admin/branding/logo - Get company logo URL
+router.get('/branding/logo', BrandingController.getLogo);
+
+// DELETE /api/v1/company-admin/branding/logo - Delete company logo
+router.delete('/branding/logo', BrandingController.deleteLogo);
 
 export default router;
 
