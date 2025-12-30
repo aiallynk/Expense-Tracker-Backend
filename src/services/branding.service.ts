@@ -67,10 +67,7 @@ export class BrandingService {
     // Small delay to ensure S3 upload has fully propagated
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Generate presigned URL (valid for 1 year for logos)
-    const logoUrl = await getPresignedDownloadUrl('receipts', storageKey, 365 * 24 * 60 * 60);
-
-    // Update company record
+    // Update company record - store only storageKey, generate URL on-demand
     const company = await Company.findById(companyId);
     if (!company) {
       throw new Error('Company not found');
@@ -85,9 +82,13 @@ export class BrandingService {
       }
     }
 
-    company.logoUrl = logoUrl;
+    // Store only the storage key, generate presigned URL on-demand (max 7 days for S3)
     company.logoStorageKey = storageKey;
+    company.logoUrl = undefined; // Clear old URL if exists, will be generated on-demand
     await company.save();
+
+    // Generate fresh presigned URL (max 7 days for S3 Signature Version 4)
+    const logoUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60); // 7 days
 
     logger.info({
       companyId,
@@ -100,27 +101,22 @@ export class BrandingService {
 
   /**
    * Get company logo URL
+   * Always generates a fresh presigned URL (max 7 days expiration for S3)
    * @param companyId - Company ID
    * @returns Logo URL or null
    */
   static async getLogoUrl(companyId: string): Promise<string | null> {
-    const company = await Company.findById(companyId).select('logoUrl logoStorageKey').exec();
+    const company = await Company.findById(companyId).select('logoStorageKey').exec();
 
     if (!company) {
       return null;
     }
 
-    // If logoUrl exists and is a presigned URL, return it
-    if (company.logoUrl) {
-      return company.logoUrl;
-    }
-
-    // If storageKey exists but no URL, generate new presigned URL
+    // Always generate fresh presigned URL from storage key (max 7 days for S3 Signature Version 4)
     if (company.logoStorageKey) {
       try {
-        const logoUrl = await getPresignedDownloadUrl('receipts', company.logoStorageKey, 365 * 24 * 60 * 60);
-        company.logoUrl = logoUrl;
-        await company.save();
+        // Generate presigned URL with 7 days expiration (max allowed by S3)
+        const logoUrl = await getPresignedDownloadUrl('receipts', company.logoStorageKey, 7 * 24 * 60 * 60);
         return logoUrl;
       } catch (error) {
         logger.error({ error, companyId, storageKey: company.logoStorageKey }, 'Error generating logo URL');
