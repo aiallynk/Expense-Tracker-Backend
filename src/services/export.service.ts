@@ -821,29 +821,39 @@ export class ExportService {
     const manager = user?.managerId as any;
     const costCentre = report.costCentreId;
 
+    // Format date for CSV - use DD/MM/YYYY format and quote it to prevent Excel from misinterpreting
     const formatDate = (date: Date | string) => {
       if (!date) return '';
-      const d = new Date(date);
-      return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+      try {
+        const d = new Date(date);
+        if (isNaN(d.getTime())) return '';
+        const day = String(d.getDate()).padStart(2, '0');
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const year = d.getFullYear();
+        // Quote the date to ensure Excel treats it as text/date, not a formula
+        return `"${day}/${month}/${year}"`;
+      } catch {
+        return '';
+      }
     };
 
-    // Title
-    lines.push('Expense Reimbursement Form');
+    // Title - quote it to prevent Excel from treating it as a formula
+    lines.push('"Expense Reimbursement Form"');
     lines.push('');
 
-    // Header Section
-    lines.push('=== HEADER INFORMATION ===');
-    lines.push(`Employee Name,${user?.name || 'N/A'}`);
-    lines.push(`Employee ID,${user?.employeeId || 'N/A'}`);
-    lines.push(`Reporting Manager,${manager?.name || 'Unassigned'}`);
-    lines.push(`Cost Centre,${costCentre?.name || costCentre?.code || 'N/A'}`);
+    // Header Section - use plain text headers without === to avoid formula interpretation
+    lines.push('HEADER INFORMATION');
+    lines.push(`Employee Name,"${(user?.name || 'N/A').replace(/"/g, '""')}"`);
+    lines.push(`Employee ID,"${(user?.employeeId || 'N/A').replace(/"/g, '""')}"`);
+    lines.push(`Reporting Manager,"${(manager?.name || 'Unassigned').replace(/"/g, '""')}"`);
+    lines.push(`Cost Centre,"${(costCentre?.name || costCentre?.code || 'N/A').replace(/"/g, '""')}"`);
     lines.push(`Start Date,${formatDate(report.fromDate)}`);
     lines.push(`End Date,${formatDate(report.toDate)}`);
     lines.push(`Purpose of Expense,"${(report.notes || report.name || 'N/A').replace(/"/g, '""')}"`);
     lines.push('');
 
     // Expense Details Table
-    lines.push('=== EXPENSE DETAILS ===');
+    lines.push('EXPENSE DETAILS');
     lines.push('S. No,Bill / Invoice No,Bill / Invoice Date,Type of Reimbursement,Payment Method,Currency,Amount,Receipt Attached,Description');
 
     let serialNumber = 1;
@@ -851,16 +861,20 @@ export class ExportService {
       const category = (exp.categoryId as any)?.name || 'Other';
       const hasReceipt = !!(exp.receiptPrimaryId || (exp.receiptIds && exp.receiptIds.length > 0));
       const description = (exp.notes || exp.vendor || '').replace(/"/g, '""');
+      const invoiceNo = (exp.invoiceId || exp.vendor || 'N/A').replace(/"/g, '""');
+      
+      // Format date properly for CSV
+      const billDate = formatDate(exp.invoiceDate || exp.expenseDate);
       
       lines.push([
         serialNumber++,
-        `"${(exp.invoiceId || exp.vendor || 'N/A').replace(/"/g, '""')}"`,
-        formatDate(exp.invoiceDate || exp.expenseDate),
+        `"${invoiceNo}"`,
+        billDate, // Already quoted in formatDate
         `"${category.replace(/"/g, '""')}"`,
-        'N/A', // Payment Method
-        exp.currency || 'INR',
-        exp.amount || 0,
-        hasReceipt ? 'Yes' : 'No',
+        '"N/A"', // Payment Method - quoted
+        `"${exp.currency || 'INR'}"`, // Currency - quoted
+        exp.amount || 0, // Amount - numeric, no quotes
+        `"${hasReceipt ? 'Yes' : 'No'}"`, // Receipt Attached - quoted
         `"${description}"`,
       ].join(','));
     });
@@ -870,17 +884,17 @@ export class ExportService {
     // Totals
     const total = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
     const currency = report.currency || expenses[0]?.currency || 'INR';
-    lines.push('=== TOTALS ===');
-    lines.push(`Subtotal,${currency},${total.toFixed(2)}`);
+    lines.push('TOTALS');
+    lines.push(`Subtotal,"${currency}",${total.toFixed(2)}`);
     lines.push('');
 
     // Footer
-    lines.push('=== FOOTER ===');
-    lines.push("Don't forget to attach the receipts");
+    lines.push('FOOTER');
+    lines.push('"Don\'t forget to attach the receipts"');
     lines.push('');
     lines.push('Employee Signature:');
     lines.push('');
-    lines.push(`Date of Submission:,${formatDate(report.submittedAt || report.updatedAt || new Date())}`);
+    lines.push(`Date of Submission,${formatDate(report.submittedAt || report.updatedAt || new Date())}`);
 
     // Add UTF-8 BOM for Excel compatibility
     const csvContent = lines.join('\r\n');
