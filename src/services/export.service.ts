@@ -536,11 +536,10 @@ export class ExportService {
     const report = await ExpenseReport.findById(reportId)
       .populate({
         path: 'userId',
-        select: 'name email employeeId managerId departmentId costCentreId',
+        select: 'name email employeeId managerId departmentId',
         populate: [
           { path: 'managerId', select: 'name email' },
           { path: 'departmentId', select: 'name' },
-          { path: 'costCentreId', select: 'name code' },
         ],
       })
       .populate('projectId', 'name code')
@@ -592,7 +591,7 @@ export class ExportService {
 
     const user = report.userId as any;
     const manager = user?.managerId as any;
-    const costCentre = report.costCentreId || user?.costCentreId;
+    const costCentre = report.costCentreId;
 
     // Format dates
     const formatDate = (date: Date | string) => {
@@ -820,7 +819,7 @@ export class ExportService {
     
     const user = report.userId as any;
     const manager = user?.managerId as any;
-    const costCentre = report.costCentreId || user?.costCentreId;
+    const costCentre = report.costCentreId;
 
     const formatDate = (date: Date | string) => {
       if (!date) return '';
