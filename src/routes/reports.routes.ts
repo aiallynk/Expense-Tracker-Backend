@@ -26,6 +26,10 @@ router.post(
   ExpensesController.create
 );
 
+// Export routes (must come before /:id to avoid route conflicts)
+router.get('/:id/export/excel', ReportsController.exportExcel);
+router.get('/:id/export/csv', ReportsController.exportCSV);
+
 router.get('/:id', ReportsController.getById);
 router.patch('/:id', validate(updateReportSchema), ReportsController.update);
 router.delete('/:id', ReportsController.delete);

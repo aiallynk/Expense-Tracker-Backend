@@ -3,6 +3,7 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { ReportsService } from '../services/reports.service';
+import { ExportService } from '../services/export.service';
 import {
   createReportSchema,
   updateReportSchema,
@@ -135,6 +136,58 @@ export class ReportsController {
       success: true,
       message: 'Report deleted successfully',
     });
+  });
+
+  /**
+   * Export report as structured Excel (Expense Reimbursement Form)
+   * GET /api/v1/reports/:id/export/excel
+   */
+  static exportExcel = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = req.params.id;
+    const buffer = await ExportService.generateStructuredExport(
+      reportId,
+      'xlsx',
+      req.user!.id,
+      req.user!.role
+    );
+
+    const report = await ReportsService.getReportById(
+      reportId,
+      req.user!.id,
+      req.user!.role
+    );
+
+    const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(buffer);
+  });
+
+  /**
+   * Export report as structured CSV (Expense Reimbursement Form)
+   * GET /api/v1/reports/:id/export/csv
+   */
+  static exportCSV = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = req.params.id;
+    const buffer = await ExportService.generateStructuredExport(
+      reportId,
+      'csv',
+      req.user!.id,
+      req.user!.role
+    );
+
+    const report = await ReportsService.getReportById(
+      reportId,
+      req.user!.id,
+      req.user!.role
+    );
+
+    const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.csv`;
+
+    res.setHeader('Content-Type', 'text/csv;charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(buffer);
   });
 }
 

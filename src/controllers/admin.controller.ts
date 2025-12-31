@@ -188,14 +188,39 @@ export class AdminController {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
 
-    // Build month query for expenses
-    const monthExpenseQuery = {
+    // Only include expenses whose reports are at/after manager or BH approval (final approval)
+    const approvedReportStatuses = [
+      ExpenseReportStatus.MANAGER_APPROVED,
+      ExpenseReportStatus.BH_APPROVED,
+      ExpenseReportStatus.APPROVED,
+    ];
+
+    // Get approved reports first
+    const approvedReportsList = await ExpenseReport.find({
+      ...reportQuery,
+      status: { $in: approvedReportStatuses },
+    })
+      .select('_id')
+      .exec();
+
+    const approvedReportIds = approvedReportsList.map((r) => r._id);
+
+    // Build month query for expenses - only from approved reports
+    const monthExpenseQuery: any = {
       ...expenseQuery,
       expenseDate: {
         $gte: startOfMonth,
         $lte: endOfMonth,
       },
     };
+
+    // Only include expenses from approved reports
+    if (approvedReportIds.length > 0) {
+      monthExpenseQuery.reportId = { $in: approvedReportIds };
+    } else {
+      // No approved reports → no approved spend this month
+      monthExpenseQuery.reportId = { $in: [] }; // Empty array ensures no matches
+    }
 
     const [
       totalReports,
@@ -209,7 +234,7 @@ export class AdminController {
       ExpenseReport.countDocuments(reportQuery),
       ExpenseModel.countDocuments(expenseQuery),
       ExpenseReport.countDocuments({ ...reportQuery, status: ExpenseReportStatus.SUBMITTED }),
-      ExpenseReport.countDocuments({ ...reportQuery, status: ExpenseReportStatus.APPROVED }),
+      ExpenseReport.countDocuments({ ...reportQuery, status: { $in: approvedReportStatuses } }),
       ExpenseReport.aggregate([
         { $match: { ...reportQuery, status: ExpenseReportStatus.APPROVED } },
         { $group: { _id: null, total: { $sum: '$totalAmount' } } },

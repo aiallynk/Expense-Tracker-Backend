@@ -522,5 +522,371 @@ export class ExportService {
       }
     });
   }
+
+  /**
+   * Generate structured Expense Reimbursement Form export (Excel)
+   * Matches finance/audit requirements with proper layout
+   */
+  static async generateStructuredExport(
+    reportId: string,
+    format: 'xlsx' | 'csv',
+    requestingUserId: string,
+    requestingUserRole: string
+  ): Promise<Buffer> {
+    const report = await ExpenseReport.findById(reportId)
+      .populate({
+        path: 'userId',
+        select: 'name email employeeId managerId departmentId costCentreId',
+        populate: [
+          { path: 'managerId', select: 'name email' },
+          { path: 'departmentId', select: 'name' },
+          { path: 'costCentreId', select: 'name code' },
+        ],
+      })
+      .populate('projectId', 'name code')
+      .populate('costCentreId', 'name code')
+      .exec();
+
+    if (!report) {
+      throw new Error('Report not found');
+    }
+
+    // Check authorization
+    const reportUserId = (report.userId as any)?._id?.toString() || (report.userId as any)?.toString();
+    const requestingUserIdStr = String(requestingUserId);
+    
+    const isOwner = reportUserId === requestingUserIdStr;
+    const isManager = requestingUserRole === 'MANAGER';
+    const isAccountant = requestingUserRole === 'ACCOUNTANT';
+    const isAdmin = ['ADMIN', 'SUPER_ADMIN', 'COMPANY_ADMIN'].includes(requestingUserRole);
+    
+    if (!isOwner && !isManager && !isAccountant && !isAdmin) {
+      throw new Error('Unauthorized to export this report');
+    }
+
+    // Only allow export for approved/submitted reports (or draft if owner)
+    const allowedStatuses = ['SUBMITTED', 'APPROVED', 'MANAGER_APPROVED', 'BH_APPROVED'];
+    if (!isOwner && !allowedStatuses.includes(report.status)) {
+      throw new Error('Report must be submitted or approved to export');
+    }
+
+    const expenses = await Expense.find({ reportId })
+      .populate('categoryId', 'name')
+      .populate('receiptPrimaryId', 'storageUrl storageKey')
+      .sort({ expenseDate: 1 })
+      .exec();
+
+    if (format === 'xlsx') {
+      return await this.generateStructuredXLSX(report as any, expenses);
+    } else {
+      return await this.generateStructuredCSV(report as any, expenses);
+    }
+  }
+
+  /**
+   * Generate structured Excel with Expense Reimbursement Form layout
+   */
+  private static async generateStructuredXLSX(report: any, expenses: any[]): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Expense Reimbursement Form');
+
+    const user = report.userId as any;
+    const manager = user?.managerId as any;
+    const costCentre = report.costCentreId || user?.costCentreId;
+
+    // Format dates
+    const formatDate = (date: Date | string) => {
+      if (!date) return '';
+      const d = new Date(date);
+      return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+    };
+
+    let currentRow = 1;
+
+    // Row 1: Title (merged cells)
+    worksheet.mergeCells(`A${currentRow}:H${currentRow}`);
+    const titleCell = worksheet.getCell(`A${currentRow}`);
+    titleCell.value = 'Expense Reimbursement Form';
+    titleCell.font = { size: 18, bold: true };
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    currentRow += 2;
+
+    // Header Section (Rows 3-9)
+    const headerData = [
+      ['Employee Name', user?.name || 'N/A'],
+      ['Employee ID', user?.employeeId || 'N/A'],
+      ['Reporting Manager', manager?.name || 'Unassigned'],
+      ['Cost Centre', costCentre?.name || costCentre?.code || 'N/A'],
+      ['Start Date', formatDate(report.fromDate)],
+      ['End Date', formatDate(report.toDate)],
+      ['Purpose of Expense', report.notes || report.name || 'N/A'],
+    ];
+
+    headerData.forEach(([label, value]) => {
+      const labelCell = worksheet.getCell(`A${currentRow}`);
+      labelCell.value = label;
+      labelCell.font = { bold: true };
+      labelCell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+
+      const valueCell = worksheet.getCell(`B${currentRow}`);
+      valueCell.value = value;
+      valueCell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+
+      // Merge B to H for value
+      worksheet.mergeCells(`B${currentRow}:H${currentRow}`);
+      currentRow++;
+    });
+
+    currentRow += 1; // Empty row
+
+    // Table Header (Row 11)
+    const headers = [
+      'S. No',
+      'Bill / Invoice No',
+      'Bill / Invoice Date',
+      'Type of Reimbursement',
+      'Payment Method',
+      'Currency',
+      'Amount',
+      'Receipt Attached',
+      'Description',
+    ];
+
+    headers.forEach((header, index) => {
+      const cell = worksheet.getCell(currentRow, index + 1);
+      cell.value = header;
+      cell.font = { bold: true };
+      cell.alignment = { horizontal: 'center', vertical: 'middle' };
+      cell.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' },
+      };
+      cell.border = {
+        top: { style: 'thin' },
+        left: { style: 'thin' },
+        bottom: { style: 'thin' },
+        right: { style: 'thin' },
+      };
+    });
+    currentRow++;
+
+    // Expense rows
+    let serialNumber = 1;
+    expenses.forEach((exp) => {
+      const category = (exp.categoryId as any)?.name || 'Other';
+      const hasReceipt = !!(exp.receiptPrimaryId || (exp.receiptIds && exp.receiptIds.length > 0));
+      
+      const rowData = [
+        serialNumber++,
+        exp.invoiceId || exp.vendor || 'N/A', // Bill/Invoice No
+        formatDate(exp.invoiceDate || exp.expenseDate), // Bill/Invoice Date
+        category, // Type of Reimbursement
+        'N/A', // Payment Method (not stored in current schema)
+        exp.currency || 'INR', // Currency
+        exp.amount || 0, // Amount
+        hasReceipt ? 'Yes' : 'No', // Receipt Attached
+        exp.notes || exp.vendor || '', // Description
+      ];
+
+      rowData.forEach((value, index) => {
+        const cell = worksheet.getCell(currentRow, index + 1);
+        cell.value = value;
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+        if (index === 6) { // Amount column
+          cell.numFmt = '#,##0.00';
+          cell.alignment = { horizontal: 'right' };
+        } else if (index === 0) { // S. No
+          cell.alignment = { horizontal: 'center' };
+        }
+      });
+      currentRow++;
+    });
+
+    // Empty row
+    currentRow++;
+
+    // Subtotal row
+    const total = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
+    const currency = report.currency || expenses[0]?.currency || 'INR';
+    
+    worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
+    const subtotalLabelCell = worksheet.getCell(`A${currentRow}`);
+    subtotalLabelCell.value = 'Subtotal';
+    subtotalLabelCell.font = { bold: true };
+    subtotalLabelCell.alignment = { horizontal: 'right' };
+    subtotalLabelCell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
+
+    const currencyCell = worksheet.getCell(`G${currentRow}`);
+    currencyCell.value = currency;
+    currencyCell.font = { bold: true };
+    currencyCell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
+
+    const amountCell = worksheet.getCell(`H${currentRow}`);
+    amountCell.value = total;
+    amountCell.numFmt = '#,##0.00';
+    amountCell.font = { bold: true };
+    amountCell.border = {
+      top: { style: 'thin' },
+      left: { style: 'thin' },
+      bottom: { style: 'thin' },
+      right: { style: 'thin' },
+    };
+    currentRow += 2;
+
+    // Footer note
+    worksheet.mergeCells(`A${currentRow}:H${currentRow}`);
+    const noteCell = worksheet.getCell(`A${currentRow}`);
+    noteCell.value = "Don't forget to attach the receipts";
+    noteCell.font = { italic: true };
+    noteCell.alignment = { horizontal: 'center' };
+    currentRow += 2;
+
+    // Employee Signature
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const signatureLabelCell = worksheet.getCell(`A${currentRow}`);
+    signatureLabelCell.value = 'Employee Signature:';
+    signatureLabelCell.font = { bold: true };
+    currentRow++;
+
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const signatureCell = worksheet.getCell(`A${currentRow}`);
+    signatureCell.border = {
+      bottom: { style: 'thin' },
+    };
+    currentRow += 2;
+
+    // Date of Submission
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const dateLabelCell = worksheet.getCell(`A${currentRow}`);
+    dateLabelCell.value = 'Date of Submission:';
+    dateLabelCell.font = { bold: true };
+    currentRow++;
+
+    worksheet.mergeCells(`A${currentRow}:D${currentRow}`);
+    const dateCell = worksheet.getCell(`A${currentRow}`);
+    dateCell.value = formatDate(report.submittedAt || report.updatedAt || new Date());
+    dateCell.border = {
+      bottom: { style: 'thin' },
+    };
+
+    // Set column widths
+    worksheet.getColumn(1).width = 8; // S. No
+    worksheet.getColumn(2).width = 20; // Bill/Invoice No
+    worksheet.getColumn(3).width = 18; // Bill/Invoice Date
+    worksheet.getColumn(4).width = 25; // Type of Reimbursement
+    worksheet.getColumn(5).width = 18; // Payment Method
+    worksheet.getColumn(6).width = 12; // Currency
+    worksheet.getColumn(7).width = 15; // Amount
+    worksheet.getColumn(8).width = 18; // Receipt Attached
+    worksheet.getColumn(9).width = 30; // Description
+
+    // Generate buffer
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  /**
+   * Generate structured CSV with Expense Reimbursement Form layout
+   * Flattened format with clear section headers
+   */
+  private static async generateStructuredCSV(report: any, expenses: any[]): Promise<Buffer> {
+    const lines: string[] = [];
+    
+    const user = report.userId as any;
+    const manager = user?.managerId as any;
+    const costCentre = report.costCentreId || user?.costCentreId;
+
+    const formatDate = (date: Date | string) => {
+      if (!date) return '';
+      const d = new Date(date);
+      return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+    };
+
+    // Title
+    lines.push('Expense Reimbursement Form');
+    lines.push('');
+
+    // Header Section
+    lines.push('=== HEADER INFORMATION ===');
+    lines.push(`Employee Name,${user?.name || 'N/A'}`);
+    lines.push(`Employee ID,${user?.employeeId || 'N/A'}`);
+    lines.push(`Reporting Manager,${manager?.name || 'Unassigned'}`);
+    lines.push(`Cost Centre,${costCentre?.name || costCentre?.code || 'N/A'}`);
+    lines.push(`Start Date,${formatDate(report.fromDate)}`);
+    lines.push(`End Date,${formatDate(report.toDate)}`);
+    lines.push(`Purpose of Expense,"${(report.notes || report.name || 'N/A').replace(/"/g, '""')}"`);
+    lines.push('');
+
+    // Expense Details Table
+    lines.push('=== EXPENSE DETAILS ===');
+    lines.push('S. No,Bill / Invoice No,Bill / Invoice Date,Type of Reimbursement,Payment Method,Currency,Amount,Receipt Attached,Description');
+
+    let serialNumber = 1;
+    expenses.forEach((exp) => {
+      const category = (exp.categoryId as any)?.name || 'Other';
+      const hasReceipt = !!(exp.receiptPrimaryId || (exp.receiptIds && exp.receiptIds.length > 0));
+      const description = (exp.notes || exp.vendor || '').replace(/"/g, '""');
+      
+      lines.push([
+        serialNumber++,
+        `"${(exp.invoiceId || exp.vendor || 'N/A').replace(/"/g, '""')}"`,
+        formatDate(exp.invoiceDate || exp.expenseDate),
+        `"${category.replace(/"/g, '""')}"`,
+        'N/A', // Payment Method
+        exp.currency || 'INR',
+        exp.amount || 0,
+        hasReceipt ? 'Yes' : 'No',
+        `"${description}"`,
+      ].join(','));
+    });
+
+    lines.push('');
+
+    // Totals
+    const total = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
+    const currency = report.currency || expenses[0]?.currency || 'INR';
+    lines.push('=== TOTALS ===');
+    lines.push(`Subtotal,${currency},${total.toFixed(2)}`);
+    lines.push('');
+
+    // Footer
+    lines.push('=== FOOTER ===');
+    lines.push("Don't forget to attach the receipts");
+    lines.push('');
+    lines.push('Employee Signature:');
+    lines.push('');
+    lines.push(`Date of Submission:,${formatDate(report.submittedAt || report.updatedAt || new Date())}`);
+
+    // Add UTF-8 BOM for Excel compatibility
+    const csvContent = lines.join('\r\n');
+    const utf8Bom = '\uFEFF';
+    return Buffer.from(utf8Bom + csvContent, 'utf-8');
+  }
 }
 
