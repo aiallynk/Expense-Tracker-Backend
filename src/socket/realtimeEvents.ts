@@ -264,3 +264,28 @@ export const emitExpenseChangesRequestedToEmployee = (userId: string, expense: a
   logger.debug(`Emitted expense changes requested to employee ${userId}, expense: ${expense._id || expense.id}`);
 };
 
+// Notification events
+export const NOTIFICATION_EVENT = 'notification:new';
+
+// Emit notification to a specific user
+export const emitNotificationToUser = (userId: string, notification: any) => {
+  emitToUser(userId, NOTIFICATION_EVENT, notification);
+  logger.debug(`Emitted notification to user ${userId}, notification: ${notification._id || notification.id}`);
+};
+
+// Emit notification to all connected clients (for test notifications)
+export const emitNotificationToAll = (notification: any) => {
+  const io = getIO();
+  if (!io) {
+    logger.warn('Socket.IO not initialized');
+    return;
+  }
+
+  try {
+    io.emit(NOTIFICATION_EVENT, notification);
+    logger.debug(`Emitted notification to all clients, notification: ${notification._id || notification.id}`);
+  } catch (error) {
+    logger.error({ error }, 'Error emitting notification to all');
+  }
+};
+

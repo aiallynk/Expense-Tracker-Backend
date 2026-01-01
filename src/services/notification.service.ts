@@ -4,6 +4,7 @@ import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused
 import { NotificationPlatform , ExpenseReportStatus } from '../utils/enums';
+import { getAllUsersTopic, getCompanyTopic } from '../utils/topicUtils';
 
 import { logger } from '@/config/logger';
 
@@ -33,6 +34,210 @@ export class NotificationService {
       },
       { upsert: true, new: true }
     );
+
+    // Subscribe token to FCM topics (async, don't block registration)
+    this.subscribeTokenToTopics(userId, token).catch((error) => {
+      // Log but don't fail registration if topic subscription fails
+      logger.warn({ error: error.message || error, userId }, 'Failed to subscribe token to topics, but token registration succeeded');
+    });
+  }
+
+  /**
+   * Subscribe FCM token to relevant topics
+   * - all_users (all users)
+   * - company_<companyId> (if user has company)
+   */
+  static async subscribeTokenToTopics(userId: string, token: string): Promise<void> {
+    const messaging = getMessaging();
+    if (!messaging) {
+      logger.debug('Firebase not configured - skipping topic subscription');
+      return;
+    }
+
+    try {
+      // Get user to check companyId
+      const user = await User.findById(userId).select('companyId').exec();
+      if (!user) {
+        logger.warn(`User ${userId} not found for topic subscription`);
+        return;
+      }
+
+      const topics: string[] = [];
+
+      // Always subscribe to all_users topic
+      topics.push(getAllUsersTopic());
+
+      // Subscribe to company topic if user has companyId
+      if (user.companyId) {
+        try {
+          const companyTopic = getCompanyTopic(user.companyId.toString());
+          topics.push(companyTopic);
+        } catch (error: any) {
+          logger.warn({ error: error.message || error, userId, companyId: user.companyId }, 'Failed to generate company topic name');
+        }
+      }
+
+      // Subscribe to all topics
+      for (const topic of topics) {
+        try {
+          await messaging.subscribeToTopic([token], topic);
+          logger.debug(`Subscribed token to topic: ${topic} for user ${userId}`);
+        } catch (error: any) {
+          // Log but continue with other topics
+          logger.warn({ error: error.message || error, topic, userId }, `Failed to subscribe to topic ${topic}`);
+        }
+      }
+
+      logger.info(`Topic subscription completed for user ${userId}, subscribed to ${topics.length} topic(s)`);
+    } catch (error: any) {
+      logger.error({ error: error.message || error, userId }, 'Error in subscribeTokenToTopics');
+      throw error;
+    }
+  }
+
+  static async sendPushToAllUsers(
+    payload: {
+      title: string;
+      body: string;
+      data?: Record<string, any>;
+    }
+  ): Promise<{ successCount: number; failureCount: number; totalUsers: number }> {
+    try {
+      // Fetch all users with FCM tokens
+      const tokens = await NotificationToken.find({ fcmToken: { $exists: true, $ne: null } })
+        .select('userId fcmToken')
+        .exec();
+
+      if (tokens.length === 0) {
+        logger.debug('No FCM tokens found for any users');
+        return { successCount: 0, failureCount: 0, totalUsers: 0 };
+      }
+
+      // Group tokens by userId to avoid duplicates
+      const userTokensMap = new Map<string, string[]>();
+      for (const tokenDoc of tokens) {
+        const userId = tokenDoc.userId.toString();
+        if (!userTokensMap.has(userId)) {
+          userTokensMap.set(userId, []);
+        }
+        if (tokenDoc.fcmToken) {
+          userTokensMap.get(userId)!.push(tokenDoc.fcmToken);
+        }
+      }
+
+      const messaging = getMessaging();
+      if (!messaging) {
+        logger.debug('Firebase not configured - push notification skipped');
+        return { successCount: 0, failureCount: 0, totalUsers: userTokensMap.size };
+      }
+
+      // Ensure all data values are strings (FCM requirement)
+      const dataPayload: Record<string, string> = {};
+      if (payload.data) {
+        for (const [key, value] of Object.entries(payload.data)) {
+          dataPayload[key] = String(value);
+        }
+      }
+
+      let totalSuccess = 0;
+      let totalFailure = 0;
+
+      // Send to each user's devices
+      for (const [userId, fcmTokens] of userTokensMap.entries()) {
+        if (fcmTokens.length === 0) continue;
+
+        try {
+          const message = {
+            notification: {
+              title: payload.title,
+              body: payload.body,
+            },
+            data: dataPayload,
+            tokens: fcmTokens,
+          };
+
+          const response = await messaging.sendEachForMulticast(message);
+          totalSuccess += response.successCount;
+          totalFailure += response.failureCount;
+
+          // Handle invalid tokens
+          if (response.failureCount > 0) {
+            const invalidTokens: string[] = [];
+            response.responses.forEach((resp, idx) => {
+              if (!resp.success) {
+                const errorCode = resp.error?.code;
+                if (errorCode === 'messaging/registration-token-not-registered' ||
+                    errorCode === 'messaging/invalid-registration-token') {
+                  invalidTokens.push(fcmTokens[idx]);
+                }
+              }
+            });
+
+            if (invalidTokens.length > 0) {
+              await NotificationToken.deleteMany({ fcmToken: { $in: invalidTokens } });
+              logger.info(`Removed ${invalidTokens.length} invalid FCM tokens for user ${userId}`);
+            }
+          }
+        } catch (error: any) {
+          logger.error({ error: error.message || error, userId }, 'Error sending push notification to user');
+          totalFailure += fcmTokens.length;
+        }
+      }
+
+      logger.info(`Push notification sent to ${totalSuccess} devices across ${userTokensMap.size} users`);
+      return { successCount: totalSuccess, failureCount: totalFailure, totalUsers: userTokensMap.size };
+    } catch (error: any) {
+      logger.error({ error: error.message || error }, 'Error in sendPushToAllUsers');
+      return { successCount: 0, failureCount: 0, totalUsers: 0 };
+    }
+  }
+
+  /**
+   * Send broadcast notification to a Firebase FCM topic
+   * This is scalable and doesn't require looping through users
+   * @param payload - Notification payload
+   * @param topic - FCM topic name (e.g., "all_users", "company_123")
+   * @returns Message ID from Firebase
+   */
+  static async sendBroadcastToTopic(
+    payload: {
+      title: string;
+      body: string;
+      data?: Record<string, any>;
+    },
+    topic: string
+  ): Promise<string> {
+    const messaging = getMessaging();
+    if (!messaging) {
+      logger.debug('Firebase not configured - broadcast notification skipped');
+      throw new Error('Firebase not configured');
+    }
+
+    // Ensure all data values are strings (FCM requirement)
+    const dataPayload: Record<string, string> = {};
+    if (payload.data) {
+      for (const [key, value] of Object.entries(payload.data)) {
+        dataPayload[key] = String(value);
+      }
+    }
+
+    try {
+      const message = {
+        topic,
+        notification: {
+          title: payload.title,
+          body: payload.body,
+        },
+        data: dataPayload,
+      };
+
+      const messageId = await messaging.send(message);
+      logger.info(`Broadcast notification sent to topic "${topic}", messageId: ${messageId}`);
+      return messageId;
+    } catch (error: any) {
+      logger.error({ error: error.message || error, topic }, 'Failed to send broadcast notification to topic');
+      throw error;
+    }
   }
 
   static async sendPushToUser(

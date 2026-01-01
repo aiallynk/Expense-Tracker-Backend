@@ -1,5 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+import { BroadcastTargetType } from '../utils/enums';
+
 export enum NotificationType {
   REPORT_SUBMITTED = 'report_submitted',
   REPORT_APPROVED = 'report_approved',
@@ -15,6 +17,8 @@ export enum NotificationType {
   DEPARTMENT_UPDATED = 'department_updated',
   ROLE_CHANGED = 'role_changed',
   SETTINGS_UPDATED = 'settings_updated',
+  TEST_NOTIFICATION = 'test_notification',
+  BROADCAST = 'broadcast',
 }
 
 export interface INotification extends Document {
@@ -27,6 +31,10 @@ export interface INotification extends Document {
   read: boolean;
   readAt?: Date;
   metadata?: Record<string, any>; // Additional data (e.g., reportId, userId, etc.)
+  // Broadcast notification fields
+  targetType?: BroadcastTargetType; // Target type for broadcast notifications
+  createdBy?: mongoose.Types.ObjectId; // Admin who sent the broadcast
+  isBroadcast?: boolean; // Flag to identify broadcast notifications
   createdAt: Date;
   updatedAt: Date;
 }
@@ -71,6 +79,19 @@ const notificationSchema = new Schema<INotification>(
     },
     metadata: {
       type: Schema.Types.Mixed,
+    },
+    // Broadcast notification fields
+    targetType: {
+      type: String,
+      enum: Object.values(BroadcastTargetType),
+    },
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    },
+    isBroadcast: {
+      type: Boolean,
+      default: false,
     },
   },
   {

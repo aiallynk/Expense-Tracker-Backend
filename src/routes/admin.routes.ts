@@ -1,13 +1,18 @@
 import { Router } from 'express';
+import { z } from 'zod';
 
 import { ActivityController } from '../controllers/activity.controller';
 import { AdminController } from '../controllers/admin.controller';
+import { TestNotificationController } from '../controllers/testNotification.controller';
+import { BroadcastNotificationController } from '../controllers/broadcastNotification.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { requireAdmin } from '../middleware/role.middleware';
+import { requireAdmin, requireRole } from '../middleware/role.middleware';
 import {
   requireServiceAccountReadOnly,
   validateServiceAccountEndpoint,
 } from '../middleware/serviceAccount.middleware';
+import { validate } from '../middleware/validate.middleware';
+import { UserRole, BroadcastTargetType } from '../utils/enums';
 
 const router = Router();
 
@@ -45,6 +50,47 @@ router.get('/summary/storage-growth', AdminController.getStorageGrowth);
 // Activity Logs
 router.get('/activity', ActivityController.getActivityLogs);
 router.get('/activity/recent', ActivityController.getRecentActivity);
+
+// Test Notification (SUPER_ADMIN only) - FOR TESTING ONLY, uses loop-based approach
+const testNotificationSchema = z.object({
+  title: z.string().min(1, 'Title is required'),
+  body: z.string().min(1, 'Body is required'),
+});
+
+router.post(
+  '/test/send-notification',
+  requireRole(UserRole.SUPER_ADMIN),
+  validate(testNotificationSchema),
+  TestNotificationController.sendTestNotification
+);
+
+// Broadcast Notification (SUPER_ADMIN only) - PRODUCTION-GRADE, uses FCM Topics
+const broadcastNotificationSchema = z.object({
+  title: z.string().min(1, 'Title is required'),
+  body: z.string().min(1, 'Body is required'),
+  targetType: z.nativeEnum(BroadcastTargetType),
+  companyId: z.string().optional(),
+  role: z.string().optional(),
+}).refine((data) => {
+  // Validate companyId is provided when targetType is COMPANY
+  if (data.targetType === BroadcastTargetType.COMPANY && !data.companyId) {
+    return false;
+  }
+  // Validate role is provided when targetType is ROLE
+  if (data.targetType === BroadcastTargetType.ROLE && !data.role) {
+    return false;
+  }
+  return true;
+}, {
+  message: 'companyId is required when targetType is COMPANY, role is required when targetType is ROLE',
+});
+
+router.post(
+  '/broadcast-notification',
+  requireRole(UserRole.SUPER_ADMIN),
+  validate(broadcastNotificationSchema),
+  BroadcastNotificationController.sendBroadcastNotification
+);
 
 export default router;
 

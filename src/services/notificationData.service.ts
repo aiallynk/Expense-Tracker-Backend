@@ -2,7 +2,9 @@ import mongoose from 'mongoose';
 
 import { CompanyAdmin } from '../models/CompanyAdmin';
 import { Notification, INotification, NotificationType } from '../models/Notification';
-import { emitToCompanyAdmin , CompanyAdminEvent } from '../socket/realtimeEvents';
+import { BroadcastTargetType } from '../utils/enums';
+import { emitToCompanyAdmin , CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
+import { User } from '../models/User';
 
 import { logger } from '@/config/logger';
 
@@ -55,14 +57,16 @@ export class NotificationDataService {
         )
       );
 
-      // Emit real-time update to all company admins
+      // Emit real-time update to all company admins and individual users
       if (notifications.length > 0) {
         notifications.forEach(notification => {
+          const userId = notification.userId.toString();
           emitToCompanyAdmin(
             companyId!,
             CompanyAdminEvent.NOTIFICATION_CREATED,
             notification.toObject()
           );
+          emitNotificationToUser(userId, notification.toObject());
         });
       }
 
@@ -84,7 +88,10 @@ export class NotificationDataService {
       read: false,
     });
 
-    // Emit real-time update if companyId is provided
+    // Emit real-time update to user's socket room
+    emitNotificationToUser(userId, notification.toObject());
+
+    // Also emit to company admin room if companyId is provided
     if (companyId) {
       emitToCompanyAdmin(
         companyId,
@@ -221,6 +228,109 @@ export class NotificationDataService {
     );
 
     return result.modifiedCount;
+  }
+
+  /**
+   * Create broadcast notifications for all affected users
+   * Uses bulk insert for performance
+   */
+  static async createBroadcastNotification(data: {
+    title: string;
+    description: string;
+    targetType: BroadcastTargetType;
+    companyId?: string;
+    role?: string;
+    createdBy: string;
+    link?: string;
+    metadata?: Record<string, any>;
+  }): Promise<{ notificationsCreated: number; userIds: string[] }> {
+    let users: any[] = [];
+
+    // Fetch users based on targetType
+    switch (data.targetType) {
+      case BroadcastTargetType.ALL_USERS:
+        users = await User.find({ status: 'ACTIVE' })
+          .select('_id companyId')
+          .lean()
+          .exec();
+        break;
+
+      case BroadcastTargetType.COMPANY:
+        if (!data.companyId) {
+          throw new Error('companyId is required for COMPANY target type');
+        }
+        users = await User.find({
+          companyId: new mongoose.Types.ObjectId(data.companyId),
+          status: 'ACTIVE',
+        })
+          .select('_id companyId')
+          .lean()
+          .exec();
+        break;
+
+      case BroadcastTargetType.ROLE:
+        if (!data.role) {
+          throw new Error('role is required for ROLE target type');
+        }
+        users = await User.find({
+          role: data.role,
+          status: 'ACTIVE',
+        })
+          .select('_id companyId')
+          .lean()
+          .exec();
+        break;
+
+      default:
+        throw new Error(`Invalid targetType: ${data.targetType}`);
+    }
+
+    if (users.length === 0) {
+      logger.info(`No users found for broadcast notification with targetType: ${data.targetType}`);
+      return { notificationsCreated: 0, userIds: [] };
+    }
+
+    // Prepare notification documents for bulk insert
+    const notificationDocs = users.map((user) => ({
+      userId: user._id,
+      companyId: user.companyId ? new mongoose.Types.ObjectId(user.companyId) : undefined,
+      type: NotificationType.BROADCAST,
+      title: data.title,
+      description: data.description,
+      link: data.link,
+      read: false,
+      targetType: data.targetType,
+      createdBy: new mongoose.Types.ObjectId(data.createdBy),
+      isBroadcast: true,
+      metadata: data.metadata || {},
+    }));
+
+    // Bulk insert in batches (Firebase/MongoDB limit is typically 1000 per batch)
+    const BATCH_SIZE = 1000;
+    let notificationsCreated = 0;
+    const userIds: string[] = [];
+
+    for (let i = 0; i < notificationDocs.length; i += BATCH_SIZE) {
+      const batch = notificationDocs.slice(i, i + BATCH_SIZE);
+      try {
+        const result = await Notification.insertMany(batch, { ordered: false });
+        notificationsCreated += result.length;
+        userIds.push(...batch.map((doc) => doc.userId.toString()));
+        logger.debug(`Inserted batch of ${result.length} broadcast notifications (${i + 1}-${Math.min(i + BATCH_SIZE, notificationDocs.length)} of ${notificationDocs.length})`);
+      } catch (error: any) {
+        // Log errors but continue with other batches
+        // ordered: false means it continues even if some fail
+        logger.error({ error: error.message || error, batchIndex: i }, 'Error inserting batch of broadcast notifications');
+        // Count successful inserts from error result if available
+        if (error.insertedDocs) {
+          notificationsCreated += error.insertedDocs.length;
+        }
+      }
+    }
+
+    logger.info(`Created ${notificationsCreated} broadcast notifications for ${data.targetType}`);
+
+    return { notificationsCreated, userIds };
   }
 }
 

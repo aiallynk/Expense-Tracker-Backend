@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { authMiddleware , AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { NotificationService } from '../services/notification.service';
+import { NotificationController } from '../controllers/notification.controller';
 import { NotificationPlatform } from '../utils/enums';
 
 const router = Router();
@@ -32,6 +33,18 @@ router.post(
     });
   })
 );
+
+// Get user's notifications
+router.get('/', NotificationController.getNotifications);
+
+// Get unread count
+router.get('/unread-count', NotificationController.getUnreadCount);
+
+// Mark notification as read
+router.put('/:id/read', NotificationController.markAsRead);
+
+// Mark all notifications as read
+router.put('/read-all', NotificationController.markAllAsRead);
 
 export default router;
 

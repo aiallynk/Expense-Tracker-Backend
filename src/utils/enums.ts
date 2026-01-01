@@ -66,3 +66,9 @@ export enum ExportFormat {
   CSV = 'csv',
   PDF = 'pdf',
 }
+
+export enum BroadcastTargetType {
+  ALL_USERS = 'ALL_USERS',
+  COMPANY = 'COMPANY',
+  ROLE = 'ROLE', // Future use
+}
