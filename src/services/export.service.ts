@@ -327,49 +327,95 @@ export class ExportService {
       .sort({ fromDate: 1 })
       .exec();
 
-    // Get company settings for first report (assuming same company)
-    let companySettings = null;
-    if (reports.length > 0 && reports[0].userId) {
-      const user = reports[0].userId as any;
-      if (user.companyId) {
-        companySettings = await CompanySettings.findOne({ companyId: user.companyId }).exec();
-      }
-    }
-
     const lines: string[] = [];
 
-    // CSV Header
-    const header = [
-      'Financial Year',
-      'Report ID',
-      'Report Name',
-      'Employee Name',
-      'Employee Email',
-      'Cost Centre Code',
-      'Cost Centre Name',
-      'Project Code',
-      'Project Name',
-      'Expense Date',
-      'Invoice ID',
-      'Invoice Date',
-      'Vendor',
-      'Category',
-      'Amount',
-      'Currency',
-      'Notes',
-      'Report Status',
-      'Submitted Date',
-      'Approved Date',
-    ];
-    lines.push(header.join(','));
-
-    // Process each report
+    // Process each report with structured format
     for (const report of reports) {
       const expenses = await Expense.find({ reportId: report._id })
         .populate('categoryId', 'name')
+        .populate('receiptPrimaryId', 'storageUrl storageKey')
         .sort({ expenseDate: 1 })
         .exec();
 
+      // Generate structured CSV for this report
+      const reportBuffer = await this.generateStructuredCSV(report as any, expenses);
+      const reportCsv = reportBuffer.toString('utf-8');
+      
+      // Add report separator
+      lines.push('');
+      lines.push(`=== REPORT: ${report.name || 'Untitled Report'} (ID: ${(report._id as mongoose.Types.ObjectId).toString()}) ===`);
+      lines.push('');
+      
+      // Add the structured CSV content
+      lines.push(reportCsv);
+      
+      // Add separator between reports
+      lines.push('');
+      lines.push('='.repeat(80));
+      lines.push('');
+    }
+
+    // Add UTF-8 BOM for Excel compatibility
+    const csvContent = lines.join('\r\n');
+    const utf8Bom = '\uFEFF';
+    return Buffer.from(utf8Bom + csvContent, 'utf-8');
+  }
+
+  /**
+   * Generate bulk Excel export with structured Expense Reimbursement Forms
+   * Each report gets its own worksheet in the Excel file
+   */
+  static async generateBulkExcel(
+    filters: {
+      financialYear?: string;
+      costCentreId?: string;
+      projectId?: string;
+      status?: string;
+      companyId?: string;
+      fromDate?: Date;
+      toDate?: Date;
+    }
+  ): Promise<Buffer> {
+    // Build query (same as generateBulkCSV)
+    const query: any = {};
+
+    if (filters.status) {
+      query.status = filters.status;
+    }
+
+    if (filters.costCentreId) {
+      query.costCentreId = new mongoose.Types.ObjectId(filters.costCentreId);
+    }
+
+    if (filters.projectId) {
+      query.projectId = new mongoose.Types.ObjectId(filters.projectId);
+    }
+
+    if (filters.companyId) {
+      const { User } = await import('../models/User');
+      const companyUsers = await User.find({ companyId: filters.companyId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+      query.userId = { $in: userIds };
+    }
+
+    if (filters.fromDate || filters.toDate) {
+      query.fromDate = {};
+      if (filters.fromDate) {
+        query.fromDate.$gte = filters.fromDate;
+      }
+      if (filters.toDate) {
+        query.toDate = { $lte: filters.toDate };
+      }
+    }
+
+    if (filters.financialYear) {
+      const [startYearStr] = filters.financialYear.split('-');
+      const startYear = parseInt(startYearStr.replace('FY', ''));
+      
+      const companySettings = filters.companyId
+        ? await CompanySettings.findOne({ companyId: filters.companyId }).exec()
+        : null;
+      
       const fyConfig = companySettings?.financialYear || {
         startMonth: 4,
         startDay: 1,
@@ -377,44 +423,196 @@ export class ExportService {
         endDay: 31,
       };
 
-      const reportDate = new Date(report.fromDate);
-      const fy = getFinancialYear(reportDate, fyConfig);
+      const fyStart = new Date(startYear, fyConfig.startMonth - 1, fyConfig.startDay);
+      const fyEnd = new Date(startYear + 1, fyConfig.endMonth - 1, fyConfig.endDay);
 
-      const costCentre = report.costCentreId as any;
-      const project = report.projectId as any;
-      const user = report.userId as any;
-
-      expenses.forEach((exp) => {
-        const expenseDate = new Date(exp.expenseDate);
-        const invoiceDate = exp.invoiceDate ? new Date(exp.invoiceDate).toISOString().split('T')[0] : '';
-        
-        const row = [
-          fy.year,
-          (report._id as mongoose.Types.ObjectId).toString(),
-          `"${(report.name || '').replace(/"/g, '""')}"`,
-          `"${((user?.name || '') || '').replace(/"/g, '""')}"`,
-          user?.email || '',
-          costCentre?.code || '',
-          `"${(costCentre?.name || '').replace(/"/g, '""')}"`,
-          project?.code || '',
-          `"${(project?.name || '').replace(/"/g, '""')}"`,
-          expenseDate.toISOString().split('T')[0],
-          exp.invoiceId || '',
-          invoiceDate,
-          `"${(exp.vendor || '').replace(/"/g, '""')}"`,
-          `"${((exp.categoryId as any)?.name || 'N/A').replace(/"/g, '""')}"`,
-          exp.amount.toString(),
-          exp.currency || 'INR',
-          `"${((exp.notes || '').replace(/"/g, '""')).replace(/,/g, ';')}"`,
-          report.status,
-          report.submittedAt ? new Date(report.submittedAt).toISOString().split('T')[0] : '',
-          report.approvedAt ? new Date(report.approvedAt).toISOString().split('T')[0] : '',
-        ];
-        lines.push(row.join(','));
-      });
+      query.fromDate = { ...query.fromDate, $gte: fyStart };
+      query.toDate = { ...query.toDate, $lte: fyEnd };
     }
 
-    return Buffer.from(lines.join('\n'), 'utf-8');
+    // Get all matching reports
+    const reports = await ExpenseReport.find(query)
+      .populate({
+        path: 'userId',
+        select: 'name email employeeId managerId departmentId',
+        populate: [
+          { path: 'managerId', select: 'name email' },
+          { path: 'departmentId', select: 'name' },
+        ],
+      })
+      .populate('projectId', 'name code')
+      .populate('costCentreId', 'name code')
+      .sort({ fromDate: 1 })
+      .exec();
+
+    if (reports.length === 0) {
+      // Return empty workbook
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('No Reports');
+      worksheet.addRow(['No reports found matching the selected filters.']);
+      return Buffer.from(await workbook.xlsx.writeBuffer());
+    }
+
+    // Create workbook
+    const workbook = new ExcelJS.Workbook();
+
+    // Process each report and create a worksheet
+    for (const report of reports) {
+      const expenses = await Expense.find({ reportId: report._id })
+        .populate('categoryId', 'name')
+        .populate('receiptPrimaryId', 'storageUrl storageKey')
+        .sort({ expenseDate: 1 })
+        .exec();
+
+      // Generate structured XLSX for this report using the same method
+      // We'll create the worksheet directly in the main workbook
+      const user = report.userId as any;
+      const manager = user?.managerId as any;
+      const costCentre = report.costCentreId as any;
+      
+      // Sanitize worksheet name
+      const sanitizedName = (report.name || `Report_${(report._id as mongoose.Types.ObjectId).toString().substring(0, 8)}`)
+        .replace(/[\\\/\?\*\[\]:]/g, '_')
+        .substring(0, 31); // Excel sheet name limit
+      
+      const worksheet = workbook.addWorksheet(sanitizedName);
+
+      // Format dates
+      const formatDate = (date: Date | string) => {
+        if (!date) return '';
+        const d = new Date(date);
+        if (isNaN(d.getTime())) return '';
+        const day = String(d.getDate()).padStart(2, '0');
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const year = d.getFullYear();
+        return `${day}/${month}/${year}`;
+      };
+
+      // Title Row
+      worksheet.addRow([]);
+      worksheet.mergeCells(1, 1, 1, 9);
+      const titleCell = worksheet.getCell(1, 1);
+      titleCell.value = 'Expense Reimbursement Form';
+      titleCell.font = { bold: true, size: 16 };
+      titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+      worksheet.addRow([]);
+
+      // Header Section
+      worksheet.addRow(['Employee Name', user?.name || 'N/A']);
+      worksheet.addRow(['Employee ID', user?.employeeId || 'N/A']);
+      worksheet.addRow(['Reporting Manager', manager?.name || 'Unassigned']);
+      worksheet.addRow(['Cost Centre', costCentre?.name || costCentre?.code || 'N/A']);
+      worksheet.addRow(['Start Date', formatDate(report.fromDate)]);
+      worksheet.addRow(['End Date', formatDate(report.toDate)]);
+      worksheet.addRow(['Purpose of Expense', report.notes || report.name || 'N/A']);
+      worksheet.addRow([]);
+
+      // Expense Details Table Header
+      const headerRow = worksheet.addRow([
+        'S. No',
+        'Bill / Invoice No',
+        'Bill / Invoice Date',
+        'Type of Reimbursement',
+        'Payment Method',
+        'Currency',
+        'Amount',
+        'Receipt Attached',
+        'Description',
+      ]);
+      headerRow.font = { bold: true };
+      headerRow.fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' },
+      };
+      headerRow.alignment = { horizontal: 'center', vertical: 'middle' };
+      headerRow.eachCell((cell) => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      });
+
+      // Expense rows
+      let serialNumber = 1;
+      expenses.forEach((exp) => {
+        const category = (exp.categoryId as any)?.name || 'Other';
+        const hasReceipt = !!(exp.receiptPrimaryId || (exp.receiptIds && exp.receiptIds.length > 0));
+        
+        const row = worksheet.addRow([
+          serialNumber++,
+          exp.invoiceId || exp.vendor || 'N/A',
+          formatDate(exp.invoiceDate || exp.expenseDate),
+          category,
+          'N/A', // Payment Method
+          exp.currency || 'INR',
+          exp.amount || 0,
+          hasReceipt ? 'Yes' : 'No',
+          exp.notes || exp.vendor || '',
+        ]);
+        
+        row.eachCell((cell, colNumber) => {
+          cell.border = {
+            top: { style: 'thin' },
+            left: { style: 'thin' },
+            bottom: { style: 'thin' },
+            right: { style: 'thin' },
+          };
+          if (colNumber === 7) { // Amount column
+            cell.numFmt = '#,##0.00';
+            cell.alignment = { horizontal: 'right' };
+          }
+        });
+      });
+
+      // Totals Row
+      const total = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
+      const currency = report.currency || expenses[0]?.currency || 'INR';
+      const totalRow = worksheet.addRow([
+        'Subtotal',
+        '',
+        '',
+        '',
+        '',
+        currency,
+        total,
+        '',
+        '',
+      ]);
+      totalRow.font = { bold: true };
+      totalRow.getCell(7).numFmt = '#,##0.00';
+      totalRow.getCell(7).alignment = { horizontal: 'right' };
+      totalRow.eachCell((cell) => {
+        cell.border = {
+          top: { style: 'thin' },
+          left: { style: 'thin' },
+          bottom: { style: 'thin' },
+          right: { style: 'thin' },
+        };
+      });
+      worksheet.addRow([]);
+
+      // Footer
+      worksheet.addRow(['Don\'t forget to attach the receipts']);
+      worksheet.addRow([]);
+      worksheet.addRow(['Employee Signature:', '']);
+      worksheet.addRow(['Date of Submission:', formatDate(report.submittedAt || report.updatedAt || new Date())]);
+
+      // Set column widths
+      worksheet.getColumn(1).width = 10; // S. No
+      worksheet.getColumn(2).width = 20; // Bill/Invoice No
+      worksheet.getColumn(3).width = 18; // Bill/Invoice Date
+      worksheet.getColumn(4).width = 25; // Type of Reimbursement
+      worksheet.getColumn(5).width = 18; // Payment Method
+      worksheet.getColumn(6).width = 12; // Currency
+      worksheet.getColumn(7).width = 15; // Amount
+      worksheet.getColumn(8).width = 18; // Receipt Attached
+      worksheet.getColumn(9).width = 30; // Description
+    }
+
+    return Buffer.from(await workbook.xlsx.writeBuffer());
   }
 
   private static async generatePDF(report: any, expenses: any[]): Promise<Buffer> {
@@ -591,7 +789,7 @@ export class ExportService {
 
     const user = report.userId as any;
     const manager = user?.managerId as any;
-    const costCentre = report.costCentreId;
+    const costCentre = report.costCentreId as any;
 
     // Format dates
     const formatDate = (date: Date | string) => {
@@ -819,7 +1017,7 @@ export class ExportService {
     
     const user = report.userId as any;
     const manager = user?.managerId as any;
-    const costCentre = report.costCentreId;
+    const costCentre = report.costCentreId as any;
 
     // Format date for CSV - use DD/MM/YYYY format and quote it to prevent Excel from misinterpreting
     const formatDate = (date: Date | string) => {

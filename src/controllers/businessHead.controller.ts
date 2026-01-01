@@ -162,13 +162,18 @@ export class BusinessHeadController {
   /**
    * Request report changes
    * POST /api/v1/business-head/reports/:id/request-changes
+   * 
+   * When Business Head requests changes:
+   * - Comment is mandatory
+   * - Report status moves to CHANGES_REQUESTED
+   * - Employee edits and resubmits
+   * - Approval chain resets: Manager → Business Head → higher levels
    */
   static requestReportChanges = asyncHandler(async (req: AuthRequest, res: Response) => {
-    // For now, this can be similar to reject but with a different status
-    // You might want to implement a specific status for "changes requested"
     const businessHeadId = req.user!.id;
     const { comment } = req.body;
     
+    // Comment is mandatory when requesting changes
     if (!comment || !comment.trim()) {
       res.status(400).json({
         success: false,
@@ -178,8 +183,8 @@ export class BusinessHeadController {
       return;
     }
 
-    // For now, we'll reject with a comment indicating changes are needed
-    const report = await BusinessHeadService.rejectReport(
+    // Use the proper requestReportChanges method which handles approval chain reset
+    const report = await BusinessHeadService.requestReportChanges(
       req.params.id,
       businessHeadId,
       comment
@@ -188,7 +193,7 @@ export class BusinessHeadController {
     res.status(200).json({
       success: true,
       data: report,
-      message: 'Changes requested successfully',
+      message: 'Changes requested successfully. The approval chain will be reset when the employee resubmits.',
     });
   });
 

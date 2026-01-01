@@ -99,10 +99,12 @@ export class BrandingController {
     }
 
     if (!companyId) {
-      res.status(404).json({
-        success: false,
-        message: 'Company not found or user not associated with a company',
-        code: 'COMPANY_NOT_FOUND',
+      // Return 200 with null logoUrl instead of 404 - not having a company/logo is a valid state
+      res.status(200).json({
+        success: true,
+        data: {
+          logoUrl: null,
+        },
       });
       return;
     }

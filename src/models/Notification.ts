@@ -4,6 +4,7 @@ export enum NotificationType {
   REPORT_SUBMITTED = 'report_submitted',
   REPORT_APPROVED = 'report_approved',
   REPORT_REJECTED = 'report_rejected',
+  REPORT_CHANGES_REQUESTED = 'report_changes_requested',
   EXPENSE_CREATED = 'expense_created',
   EXPENSE_APPROVED = 'expense_approved',
   EXPENSE_REJECTED = 'expense_rejected',

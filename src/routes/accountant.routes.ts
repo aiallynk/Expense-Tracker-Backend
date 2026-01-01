@@ -20,6 +20,7 @@ router.get('/expenses/department-wise', requireServiceAccountReadOnly, validateS
 router.get('/expenses/project-wise', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AccountantController.getProjectWiseExpenses);
 router.get('/expenses/cost-centre-wise', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AccountantController.getCostCentreWiseExpenses);
 router.get('/export/csv', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AccountantController.bulkCsvExport);
+router.get('/export/excel', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AccountantController.bulkExcelExport);
 
 // Other routes require ACCOUNTANT role (no service accounts)
 router.use(requireRole(UserRole.ACCOUNTANT));
@@ -36,8 +37,9 @@ router.get('/expenses/department-wise', AccountantController.getDepartmentWiseEx
 router.get('/expenses/project-wise', AccountantController.getProjectWiseExpenses);
 router.get('/expenses/cost-centre-wise', AccountantController.getCostCentreWiseExpenses);
 
-// Bulk CSV Export
+// Bulk Exports
 router.get('/export/csv', AccountantController.bulkCsvExport);
+router.get('/export/excel', AccountantController.bulkExcelExport);
 
 export default router;
 

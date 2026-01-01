@@ -18,6 +18,7 @@ router.use(authMiddleware);
 router.get('/summary/dashboard', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getDashboard);
 router.get('/summary/storage-growth', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getStorageGrowth);
 router.get('/export/csv', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkCsvExport);
+router.get('/export/excel', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkExcelExport);
 
 // Other routes require admin role (no service accounts)
 router.use(requireAdmin);
@@ -28,8 +29,9 @@ router.post('/reports/:id/approve', AdminController.approveReport);
 router.post('/reports/:id/reject', AdminController.rejectReport);
 router.get('/reports/:id/export', AdminController.exportReport);
 
-// Bulk CSV Export (Admin & Accountant only)
+// Bulk Exports (Admin & Accountant only)
 router.get('/export/csv', AdminController.bulkCsvExport);
+router.get('/export/excel', AdminController.bulkExcelExport);
 
 // Expenses
 router.get('/expenses', AdminController.getAllExpenses);

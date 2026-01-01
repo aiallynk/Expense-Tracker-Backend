@@ -13,6 +13,7 @@ import {
 export const loginSchema = z.object({
   email: z.string().email(),
   password: z.string().min(6),
+  role: z.string().optional(), // Optional role selection for users with multiple roles
 });
 
 export const refreshTokenSchema = z.object({
@@ -27,24 +28,66 @@ export const updateProfileSchema = z.object({
   departmentId: z.string().optional(),
 });
 
+// Helper to transform empty strings to undefined
+const emptyStringToUndefined = z.preprocess((val) => {
+  if (val === '' || val === null) return undefined;
+  return val;
+}, z.string().optional());
+
 export const createUserSchema = z.object({
-  email: z.string().email('Valid email is required').trim().toLowerCase(),
-  name: z.string().min(1, 'Name is required').trim(),
-  password: z.string().min(6, 'Password must be at least 6 characters'),
-  phone: z.string().optional(),
+  email: z.preprocess(
+    (val) => {
+      if (val === '' || val === null || val === undefined) return undefined;
+      const trimmed = String(val).trim().toLowerCase();
+      return trimmed === '' ? undefined : trimmed;
+    },
+    z.string().email('Valid email format is required (if provided)').optional()
+  ),
+  name: z.preprocess(
+    (val) => {
+      if (val === '' || val === null || val === undefined) return undefined;
+      return String(val).trim();
+    },
+    z.string().optional()
+  ),
+  password: z.preprocess(
+    (val) => {
+      if (val === '' || val === null || val === undefined) return undefined;
+      return String(val);
+    },
+    z.string().min(6, 'Password must be at least 6 characters').optional()
+  ),
+  phone: emptyStringToUndefined,
   role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'], {
     errorMap: () => ({ message: 'Role must be EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT' })
-  }),
-  companyId: z.string().optional(),
-  managerId: z.string().optional(),
-  departmentId: z.string().optional(),
+  }).optional().default('EMPLOYEE'),
+  roles: z.array(z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'])).optional(), // Additional roles array
+  companyId: emptyStringToUndefined,
+  managerId: emptyStringToUndefined,
+  departmentId: emptyStringToUndefined,
   status: z.enum(['ACTIVE', 'INACTIVE']).optional().default('ACTIVE'),
+  employeeId: z.preprocess(
+    (val) => {
+      if (val === '' || val === null || val === undefined) return undefined;
+      return String(val).trim().toUpperCase();
+    },
+    z.string().optional()
+  ),
+}).refine((data) => {
+  // At least email or name must be provided
+  const hasEmail = data.email && data.email.trim() !== '';
+  const hasName = data.name && data.name.trim() !== '';
+  return hasEmail || hasName;
+}, {
+  message: 'Either email or name must be provided',
+  path: ['email'],
 });
 
 export const updateUserSchema = z.object({
   name: z.string().min(1, 'Name is required').trim().optional(),
   email: z.string().email('Valid email is required').trim().toLowerCase().optional(),
   role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT']).optional(),
+  roles: z.array(z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'])).optional(), // Additional roles array
   managerId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),

@@ -279,39 +279,68 @@ export class UsersService {
   }
 
   static async createUser(data: {
-    email: string;
-    password: string;
-    name: string;
+    email?: string;
+    password?: string;
+    name?: string;
     phone?: string;
-    role: UserRole;
+    role?: UserRole;
+    roles?: string[]; // Additional roles array
     companyId?: string;
     managerId?: string;
     departmentId?: string;
     status?: UserStatus;
+    employeeId?: string;
   }): Promise<IUser> {
-    // Check if user already exists
-    const existingUser = await User.findOne({ email: data.email.toLowerCase() });
-    if (existingUser) {
-      const error: any = new Error('User with this email already exists');
-      error.statusCode = 409;
-      error.code = 'USER_ALREADY_EXISTS';
-      throw error;
+    // Generate email if not provided (use placeholder format)
+    let email = data.email?.trim() || '';
+    if (!email || email === '') {
+      // Generate a temporary email based on name or timestamp
+      const namePart = data.name?.trim().toLowerCase().replace(/\s+/g, '.') || 'user';
+      const timestamp = Date.now();
+      email = `${namePart}.${timestamp}@temp.imported`;
+    } else {
+      email = email.toLowerCase();
+    }
+
+    // Check if user already exists (only if email is provided and not a temp email)
+    if (!email.includes('@temp.imported')) {
+      const existingUser = await User.findOne({ email });
+      if (existingUser) {
+        const error: any = new Error(`User with email ${email} already exists`);
+        error.statusCode = 409;
+        error.code = 'USER_ALREADY_EXISTS';
+        throw error;
+      }
+    }
+
+    // Generate password if not provided
+    let password = data.password?.trim() || '';
+    if (!password || password === '') {
+      // Generate a secure random password
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
+      password = Array.from({ length: 12 }, () => chars[Math.floor(Math.random() * chars.length)]).join('');
+      logger.info({ email }, 'Generated temporary password for imported user');
     }
 
     // Hash password
-    const passwordHash = await bcrypt.hash(data.password, 10);
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    // Use provided name or default
+    const name = data.name?.trim() || email.split('@')[0] || 'Imported User';
 
     // Create user
     const user = new User({
-      email: data.email.toLowerCase(),
+      email,
       passwordHash,
-      name: data.name,
-      phone: data.phone || undefined,
-      role: data.role,
+      name,
+      phone: data.phone?.trim() || undefined,
+      role: data.role || UserRole.EMPLOYEE,
+      roles: data.roles ? data.roles.filter(r => r && r !== data.role) : [], // Additional roles (excluding primary role)
       status: data.status || UserStatus.ACTIVE,
       companyId: data.companyId ? new mongoose.Types.ObjectId(data.companyId) : undefined,
       managerId: data.managerId ? new mongoose.Types.ObjectId(data.managerId) : undefined,
       departmentId: data.departmentId ? new mongoose.Types.ObjectId(data.departmentId) : undefined,
+      employeeId: data.employeeId?.trim() || undefined,
     });
 
     await user.save();
@@ -437,6 +466,13 @@ export class UsersService {
     
     if (data.role !== undefined) {
       user.role = data.role as UserRole;
+    }
+    
+    if (data.roles !== undefined) {
+      // Filter out duplicates and the primary role
+      const primaryRole = data.role !== undefined ? data.role : user.role;
+      const additionalRoles = data.roles.filter(r => r && r !== primaryRole);
+      user.roles = additionalRoles;
     }
     
     if (data.departmentId !== undefined) {

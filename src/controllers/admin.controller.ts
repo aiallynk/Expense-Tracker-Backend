@@ -20,7 +20,7 @@ export class AdminController {
   // Reports
   static getAllReports = asyncHandler(async (req: AuthRequest, res: Response) => {
     const filters = reportFiltersSchema.parse(req.query);
-    const result = await ReportsService.adminGetReports(filters);
+    const result = await ReportsService.adminGetReports(filters, req);
 
     res.status(200).json({
       success: true,
@@ -112,10 +112,51 @@ export class AdminController {
     res.status(200).send(csvBuffer);
   });
 
+  /**
+   * Bulk Excel Export with filtering (Structured Reimbursement Forms)
+   * GET /api/v1/admin/export/excel
+   * Only Admin & Accountant roles
+   */
+  static bulkExcelExport = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const filters = bulkCsvExportFiltersSchema.parse(req.query);
+    
+    // Get company ID from user if not provided
+    let companyId = filters.companyId;
+    if (!companyId && req.user!.role === 'COMPANY_ADMIN') {
+      const { CompanyAdmin } = await import('../models/CompanyAdmin');
+      const companyAdmin = await CompanyAdmin.findById(req.user!.id).select('companyId').exec();
+      if (companyAdmin && companyAdmin.companyId) {
+        companyId = companyAdmin.companyId.toString();
+      }
+    } else if (!companyId && req.user!.role !== 'ADMIN' && req.user!.role !== 'SUPER_ADMIN') {
+      // For Accountant, get from user's companyId
+      const { User } = await import('../models/User');
+      const user = await User.findById(req.user!.id).select('companyId').exec();
+      if (user && user.companyId) {
+        companyId = user.companyId.toString();
+      }
+    }
+
+    const excelBuffer = await ExportService.generateBulkExcel({
+      ...filters,
+      companyId,
+      fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
+      toDate: filters.toDate ? new Date(filters.toDate) : undefined,
+    });
+
+    // Generate filename
+    const timestamp = new Date().toISOString().split('T')[0];
+    const filename = `expense-reimbursement-forms-${timestamp}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(excelBuffer);
+  });
+
   // Expenses
   static getAllExpenses = asyncHandler(async (req: AuthRequest, res: Response) => {
     const filters = expenseFiltersSchema.parse(req.query);
-    const result = await ExpensesService.adminListExpenses(filters);
+    const result = await ExpensesService.adminListExpenses(filters, req);
 
     res.status(200).json({
       success: true,

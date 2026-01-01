@@ -11,6 +11,8 @@ import { getPaginationOptions, createPaginatedResult } from '../utils/pagination
 import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
 import { ReportsService } from './reports.service';
+import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
+import { AuthRequest } from '../middleware/auth.middleware';
 
 import { logger } from '@/config/logger';
 
@@ -366,35 +368,84 @@ export class ExpensesService {
     return createPaginatedResult(expenses, total, page, pageSize);
   }
 
-  static async adminListExpenses(filters: ExpenseFiltersDto): Promise<any> {
+  static async adminListExpenses(filters: ExpenseFiltersDto, req: AuthRequest): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
-    const query: any = {};
+    const baseQuery: any = {};
 
     if (filters.status) {
-      query.status = filters.status;
+      baseQuery.status = filters.status;
     }
 
     if (filters.categoryId) {
-      query.categoryId = filters.categoryId;
+      baseQuery.categoryId = filters.categoryId;
     }
 
     if (filters.reportId) {
-      query.reportId = filters.reportId;
+      baseQuery.reportId = filters.reportId;
     }
 
     if (filters.from) {
-      query.expenseDate = { ...query.expenseDate, $gte: new Date(filters.from) };
+      baseQuery.expenseDate = { ...baseQuery.expenseDate, $gte: new Date(filters.from) };
     }
 
     if (filters.to) {
-      query.expenseDate = { ...query.expenseDate, $lte: new Date(filters.to) };
+      baseQuery.expenseDate = { ...baseQuery.expenseDate, $lte: new Date(filters.to) };
     }
 
     if (filters.q) {
-      query.$or = [
+      baseQuery.$or = [
         { vendor: { $regex: filters.q, $options: 'i' } },
         { notes: { $regex: filters.q, $options: 'i' } },
       ];
+    }
+
+    // For non-SUPER_ADMIN users, filter expenses by company
+    // Expenses are linked to reports, and reports are linked to users
+    // So we need to filter by reportId where report.userId is in company users
+    let query = baseQuery;
+    if (req.user && req.user.role !== 'SUPER_ADMIN') {
+      const companyId = await getUserCompanyId(req);
+      if (companyId) {
+        const userIds = await getCompanyUserIds(companyId);
+        if (userIds.length > 0) {
+          // Get all report IDs for this company's users
+          const { ExpenseReport } = await import('../models/ExpenseReport');
+          const companyReports = await ExpenseReport.find({
+            userId: { $in: userIds },
+          })
+            .select('_id')
+            .exec();
+          const reportIds = companyReports.map(r => r._id);
+          
+          if (reportIds.length > 0) {
+            // If there's already a reportId filter, ensure it's in company reports
+            if (baseQuery.reportId) {
+              const requestedReportId = typeof baseQuery.reportId === 'string' 
+                ? new mongoose.Types.ObjectId(baseQuery.reportId)
+                : baseQuery.reportId;
+              if (!reportIds.some((id: unknown) => (id as mongoose.Types.ObjectId).toString() === requestedReportId.toString())) {
+                // Requested report doesn't belong to company, return empty result
+                query = { ...baseQuery, _id: { $in: [] } };
+              }
+            } else {
+              // Filter expenses by company report IDs
+              query = {
+                ...baseQuery,
+                reportId: { $in: reportIds },
+              };
+            }
+          } else {
+            // No reports for this company, return empty result
+            query = { ...baseQuery, _id: { $in: [] } };
+          }
+        } else {
+          // No users in company, return empty result
+          query = { ...baseQuery, _id: { $in: [] } };
+        }
+      } else {
+        // User has no company, return empty result
+        query = { ...baseQuery, _id: { $in: [] } };
+      }
     }
 
     const skip = (page - 1) * pageSize;

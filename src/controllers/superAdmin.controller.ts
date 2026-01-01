@@ -19,6 +19,7 @@ import { ExpenseReportStatus, ExpenseStatus, OcrJobStatus, UserRole, UserStatus 
 
 
 import { logger } from '@/config/logger';
+import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
 
 export class SuperAdminController {
   // Dashboard Stats
@@ -684,8 +685,13 @@ export class SuperAdminController {
       value: item.value,
     }));
 
-    // Reports by status
+    // Reports by status - filter by company users only
     const reportsByStatus = await ExpenseReport.aggregate([
+      {
+        $match: {
+          userId: { $in: userIds }, // Only include reports from this company's users
+        },
+      },
       {
         $group: {
           _id: '$status',
@@ -697,8 +703,14 @@ export class SuperAdminController {
     const statusMap: Record<string, string> = {
       DRAFT: 'Draft',
       SUBMITTED: 'Submitted',
+      PENDING_APPROVAL_L1: 'Pending L1',
+      PENDING_APPROVAL_L2: 'Pending L2',
+      PENDING_APPROVAL_L3: 'Pending L3',
+      PENDING_APPROVAL_L4: 'Pending L4',
+      PENDING_APPROVAL_L5: 'Pending L5',
+      CHANGES_REQUESTED: 'Changes Requested',
       MANAGER_APPROVED: 'Manager Approved',
-      BUSINESS_HEAD_APPROVED: 'BH Approved',
+      BH_APPROVED: 'BH Approved',
       APPROVED: 'Approved',
       REJECTED: 'Rejected',
     };
@@ -1359,6 +1371,7 @@ export class SuperAdminController {
 
     if (logType === 'activity') {
       // Activity logs from AuditLog
+      // For non-SUPER_ADMIN users, filter by company
       const query: any = {};
 
       if (searchQuery) {
@@ -1366,6 +1379,32 @@ export class SuperAdminController {
           { entityType: { $regex: searchQuery, $options: 'i' } },
           { action: { $regex: searchQuery, $options: 'i' } },
         ];
+      }
+
+      // Filter by company if user is not SUPER_ADMIN
+      if (req.user && req.user.role !== 'SUPER_ADMIN') {
+        const companyId = await getUserCompanyId(req);
+        if (companyId) {
+          const userIds = await getCompanyUserIds(companyId);
+          // Also include CompanyAdmin IDs for this company
+          const { CompanyAdmin } = await import('../models/CompanyAdmin');
+          const companyAdmins = await CompanyAdmin.find({ companyId: new mongoose.Types.ObjectId(companyId) })
+            .select('_id')
+            .exec();
+          const adminIds = companyAdmins.map(a => a._id);
+          
+          // Filter logs where actorId is in company users or company admins
+          const allActorIds = [...userIds, ...adminIds];
+          if (allActorIds.length > 0) {
+            query.actorId = { $in: allActorIds };
+          } else {
+            // No users/admins in company, return empty result
+            query.actorId = { $in: [] };
+          }
+        } else {
+          // User has no company, return empty result
+          query.actorId = { $in: [] };
+        }
       }
 
       const logs = await AuditLog.find(query)
@@ -1397,6 +1436,32 @@ export class SuperAdminController {
           { path: { $regex: searchQuery, $options: 'i' } },
           { method: { $regex: searchQuery, $options: 'i' } },
         ];
+      }
+
+      // Filter by company if user is not SUPER_ADMIN
+      if (req.user && req.user.role !== 'SUPER_ADMIN') {
+        const companyId = await getUserCompanyId(req);
+        if (companyId) {
+          const userIds = await getCompanyUserIds(companyId);
+          // Also include CompanyAdmin IDs for this company
+          const { CompanyAdmin } = await import('../models/CompanyAdmin');
+          const companyAdmins = await CompanyAdmin.find({ companyId: new mongoose.Types.ObjectId(companyId) })
+            .select('_id')
+            .exec();
+          const adminIds = companyAdmins.map(a => a._id);
+          
+          // Filter logs where userId is in company users or company admins
+          const allUserIds = [...userIds, ...adminIds];
+          if (allUserIds.length > 0) {
+            query.userId = { $in: allUserIds };
+          } else {
+            // No users/admins in company, return empty result
+            query.userId = { $in: [] };
+          }
+        } else {
+          // User has no company, return empty result
+          query.userId = { $in: [] };
+        }
       }
 
       const errorLogs = await ApiRequestLog.find(query)
@@ -1435,6 +1500,32 @@ export class SuperAdminController {
           { statusCode: 429 }, // Rate limit
         ],
       };
+
+      // Filter by company if user is not SUPER_ADMIN
+      if (req.user && req.user.role !== 'SUPER_ADMIN') {
+        const companyId = await getUserCompanyId(req);
+        if (companyId) {
+          const userIds = await getCompanyUserIds(companyId);
+          // Also include CompanyAdmin IDs for this company
+          const { CompanyAdmin } = await import('../models/CompanyAdmin');
+          const companyAdmins = await CompanyAdmin.find({ companyId: new mongoose.Types.ObjectId(companyId) })
+            .select('_id')
+            .exec();
+          const adminIds = companyAdmins.map(a => a._id);
+          
+          // Filter logs where userId is in company users or company admins
+          const allUserIds = [...userIds, ...adminIds];
+          if (allUserIds.length > 0) {
+            query.userId = { $in: allUserIds };
+          } else {
+            // No users/admins in company, return empty result
+            query.userId = { $in: [] };
+          }
+        } else {
+          // User has no company, return empty result
+          query.userId = { $in: [] };
+        }
+      }
 
       if (searchQuery) {
         query.$and = [

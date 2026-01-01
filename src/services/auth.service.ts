@@ -22,8 +22,10 @@ export interface AuthResult {
     email: string;
     name?: string;
     role: string;
+    roles?: string[];
   };
   tokens: TokenPair;
+  requiresRoleSelection?: boolean;
 }
 
 export class AuthService {
@@ -79,7 +81,42 @@ export class AuthService {
     };
   }
 
-  static async login(email: string, password: string): Promise<AuthResult> {
+  /**
+   * Check if a user has multiple roles (for pre-login role selection)
+   * This is a lightweight check that doesn't require password
+   */
+  static async checkUserRoles(email: string): Promise<{ requiresRoleSelection: boolean; roles?: string[] }> {
+    const normalizedEmail = email.toLowerCase().trim();
+    
+    // Try to find user
+    const user = await User.findOne({ email: normalizedEmail }).select('role roles').exec();
+    
+    if (!user) {
+      return { requiresRoleSelection: false };
+    }
+
+    // Get all roles: primary role + additional roles from roles array
+    const allRoles: string[] = [user.role];
+    if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+      user.roles.forEach((role) => {
+        if (role && !allRoles.includes(role)) {
+          allRoles.push(role);
+        }
+      });
+    }
+
+    // If user has multiple roles, return them
+    if (allRoles.length > 1) {
+      return {
+        requiresRoleSelection: true,
+        roles: allRoles,
+      };
+    }
+
+    return { requiresRoleSelection: false };
+  }
+
+  static async login(email: string, password: string, selectedRole?: string): Promise<AuthResult> {
     const normalizedEmail = email.toLowerCase().trim();
     
     // Try to find user first
@@ -134,11 +171,50 @@ export class AuthService {
 
     // Update last login and generate tokens
     if (user) {
-      logger.info({ email: normalizedEmail, role: user.role }, 'Login successful');
+      // Get all roles: primary role + additional roles from roles array
+      const allRoles: string[] = [user.role];
+      if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+        user.roles.forEach((role) => {
+          if (role && !allRoles.includes(role)) {
+            allRoles.push(role);
+          }
+        });
+      }
+
+      // If user has multiple roles and no role selected, return roles for selection
+      if (allRoles.length > 1 && !selectedRole) {
+        return {
+          user: {
+            id: (user._id as mongoose.Types.ObjectId).toString(),
+            email: user.email,
+            name: user.name,
+            role: user.role, // Primary role
+            roles: allRoles, // All available roles
+            ...(user.companyId && { companyId: (user.companyId as mongoose.Types.ObjectId).toString() }),
+          },
+          requiresRoleSelection: true,
+          tokens: null as any,
+        } as any;
+      }
+
+      // Validate selected role if provided
+      let roleToUse: string = user.role; // Default to primary role
+      if (selectedRole) {
+        if (!allRoles.includes(selectedRole)) {
+          const error: any = new Error('Invalid role selected');
+          error.statusCode = 400;
+          error.code = 'INVALID_ROLE';
+          throw error;
+        }
+        roleToUse = selectedRole;
+      }
+
+      logger.info({ email: normalizedEmail, role: roleToUse }, 'Login successful');
       user.lastLoginAt = new Date();
       await user.save();
 
-      const tokens = this.generateTokensForUser(user);
+      // Generate tokens with selected role
+      const tokens = this.generateTokensForUserWithRole(user, roleToUse);
       const userId = (user._id as mongoose.Types.ObjectId).toString();
 
       await AuditService.log(
@@ -154,7 +230,8 @@ export class AuthService {
           id: userId,
           email: user.email,
           name: user.name,
-          role: user.role,
+          role: roleToUse,
+          roles: allRoles.length > 1 ? allRoles : undefined, // Include if multiple roles
           ...(user.companyId && { companyId: (user.companyId as mongoose.Types.ObjectId).toString() }),
         },
         tokens,
@@ -211,12 +288,25 @@ export class AuthService {
         const accessToken = this.generateAccessTokenForCompanyAdmin(companyAdmin);
         return { accessToken };
       } else {
-        // Regular user
+        // Regular user - preserve the role from the refresh token (selected role)
         const user = await User.findById(decoded.id);
         if (!user || user.status !== 'ACTIVE') {
           throw new Error('User not found or inactive');
         }
-        const accessToken = this.generateAccessTokenForUser(user);
+        
+        // Validate that the role from token is valid for this user
+        const allRoles: string[] = [user.role];
+        if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+          user.roles.forEach((role) => {
+            if (role && !allRoles.includes(role)) {
+              allRoles.push(role);
+            }
+          });
+        }
+        
+        // Use the role from the token (selected role), not the primary role
+        const roleToUse: string = allRoles.includes(decoded.role as string) ? (decoded.role as string) : user.role;
+        const accessToken = this.generateAccessTokenForUserWithRole(user, roleToUse);
         return { accessToken };
       }
     } catch (error) {
@@ -238,6 +328,13 @@ export class AuthService {
     return {
       accessToken: this.generateAccessTokenForUser(user),
       refreshToken: this.generateRefreshTokenForUser(user),
+    };
+  }
+
+  static generateTokensForUserWithRole(user: IUser, role: string): TokenPair {
+    return {
+      accessToken: this.generateAccessTokenForUserWithRole(user, role),
+      refreshToken: this.generateRefreshTokenForUserWithRole(user, role),
     };
   }
 
@@ -304,6 +401,50 @@ export class AuthService {
       id: userId,
       email: user.email,
       role: user.role,
+    };
+    if (user.companyId) {
+      payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();
+    }
+    const secret = String(config.jwt.refreshSecret);
+    const options = {
+      expiresIn: config.jwt.refreshExpiresIn,
+    } as jwt.SignOptions;
+    return jwt.sign(payload, secret, options);
+  }
+
+  static generateAccessTokenForUserWithRole(user: IUser, role: string): string {
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
+    const payload: {
+      id: string;
+      email: string;
+      role: string;
+      companyId?: string;
+    } = {
+      id: userId,
+      email: user.email,
+      role: role,
+    };
+    if (user.companyId) {
+      payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();
+    }
+    const secret = String(config.jwt.accessSecret);
+    const options = {
+      expiresIn: config.jwt.accessExpiresIn,
+    } as jwt.SignOptions;
+    return jwt.sign(payload, secret, options);
+  }
+
+  static generateRefreshTokenForUserWithRole(user: IUser, role: string): string {
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
+    const payload: {
+      id: string;
+      email: string;
+      role: string;
+      companyId?: string;
+    } = {
+      id: userId,
+      email: user.email,
+      role: role,
     };
     if (user.companyId) {
       payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();

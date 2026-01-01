@@ -21,6 +21,9 @@ import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
 import { NotificationService } from './notification.service';
 import { DuplicateInvoiceService } from './duplicateInvoice.service';
+import { BusinessHeadSelectionService } from './businessHeadSelection.service';
+import { buildCompanyQuery } from '../utils/companyAccess';
+import { AuthRequest } from '../middleware/auth.middleware';
 
 import { logger } from '@/config/logger';
 
@@ -271,31 +274,38 @@ export class ReportsService {
     if (reportUserId === requestingUserIdStr) {
       // Owner has access
       hasAccess = true;
-    } else if (requestingUserRole === 'ADMIN' || requestingUserRole === 'BUSINESS_HEAD' || requestingUserRole === 'SUPER_ADMIN') {
-      // Admins and business heads have access
+    } else if (requestingUserRole === 'SUPER_ADMIN') {
+      // SUPER_ADMIN has unrestricted access
       hasAccess = true;
-    } else if (requestingUserRole === 'COMPANY_ADMIN') {
-      // Company admin: check if report user belongs to their company
+    } else {
+      // For all other roles (ADMIN, BUSINESS_HEAD, COMPANY_ADMIN, etc.), check company access
       try {
-        const { CompanyAdmin } = await import('../models/CompanyAdmin');
         const { User } = await import('../models/User');
         
-        // Get company admin's company ID
-        const companyAdmin = await CompanyAdmin.findById(requestingUserIdStr).select('companyId').exec();
-        if (companyAdmin && companyAdmin.companyId) {
-          // Get report user's company ID
-          const reportUser = await User.findById(reportUserId).select('companyId').exec();
-          if (reportUser && reportUser.companyId) {
-            // Check if both belong to the same company
-            const companyAdminCompanyId = companyAdmin.companyId.toString();
-            const reportUserCompanyId = reportUser.companyId.toString();
-            if (companyAdminCompanyId === reportUserCompanyId) {
-              hasAccess = true;
+        // Get report user's company ID
+        const reportUser = await User.findById(reportUserId).select('companyId').exec();
+        if (!reportUser || !reportUser.companyId) {
+          hasAccess = false;
+        } else {
+          const reportCompanyId = reportUser.companyId.toString();
+          
+          // For COMPANY_ADMIN, check their company
+          if (requestingUserRole === 'COMPANY_ADMIN') {
+            const { CompanyAdmin } = await import('../models/CompanyAdmin');
+            const companyAdmin = await CompanyAdmin.findById(requestingUserIdStr).select('companyId').exec();
+            if (companyAdmin && companyAdmin.companyId) {
+              hasAccess = companyAdmin.companyId.toString() === reportCompanyId;
+            }
+          } else {
+            // For ADMIN, BUSINESS_HEAD, MANAGER, etc., check their company matches report company
+            const requestingUser = await User.findById(requestingUserIdStr).select('companyId').exec();
+            if (requestingUser && requestingUser.companyId) {
+              hasAccess = requestingUser.companyId.toString() === reportCompanyId;
             }
           }
         }
       } catch (error) {
-        logger.error({ error }, 'Error checking company admin access');
+        logger.error({ error }, 'Error checking company access for report');
         // If there's an error, deny access
         hasAccess = false;
       }
@@ -502,33 +512,36 @@ export class ReportsService {
         }
       }
 
-      // Level 2: Business Approval (always required)
+      // Level 2: Business Head Approval (always required)
+      // Business Head is ALWAYS determined by department ownership.
+      // After Manager (L1) approval, system automatically assigns the Business Head.
+      // Manager does not choose the BH manually.
+      // 
+      // Selection Priority:
+      // 1. Custom Approver Mapping (L2 if defined)
+      // 2. Active BUSINESS_HEAD in same department as employee
+      // 3. Manager's manager (if role = BUSINESS_HEAD)
+      // 4. Fallback to any active BUSINESS_HEAD or ADMIN in company
       if (approvers.length > 0 && approvalLevels >= 2) {
-        const lastApprover = approvers[approvers.length - 1];
-        const lastApproverUser = await User.findById(lastApprover.userId);
-        if (lastApproverUser && lastApproverUser.managerId) {
-          const level2Approver = await User.findById(lastApproverUser.managerId);
-          if (level2Approver && level2Approver.status === 'ACTIVE') {
-            approvers.push({
-              level: 2,
-              userId: level2Approver._id as mongoose.Types.ObjectId,
-              role: level2Approver.role,
-            });
-          } else {
-            // Fallback: Find Business Head or Admin
-            const fallbackApprover = await User.findOne({
-              companyId: reportUser.companyId,
-              role: { $in: [UserRole.BUSINESS_HEAD, UserRole.ADMIN] },
-              status: 'ACTIVE',
-            }).exec();
-            if (fallbackApprover) {
-              approvers.push({
-                level: 2,
-                userId: fallbackApprover._id as mongoose.Types.ObjectId,
-                role: fallbackApprover.role,
-              });
-            }
-          }
+        const businessHead = await BusinessHeadSelectionService.selectBusinessHead(
+          (reportUser._id as mongoose.Types.ObjectId).toString(),
+          reportUser.companyId?.toString(),
+          customMapping,
+          reportUser.managerId?.toString()
+        );
+
+        if (businessHead) {
+          approvers.push({
+            level: 2,
+            userId: businessHead._id as mongoose.Types.ObjectId,
+            role: businessHead.role,
+          });
+        } else {
+          // Log warning if no BH found, but don't fail - let higher levels handle it
+          logger.warn(
+            { userId: reportUser._id, companyId: reportUser.companyId },
+            'No Business Head found for Level 2 approval - report may require manual assignment'
+          );
         }
       }
 
@@ -968,10 +981,36 @@ export class ReportsService {
     action: 'approve' | 'reject' | 'request_changes',
     comment?: string
   ): Promise<IExpenseReport> {
-    const report = await ExpenseReport.findById(id);
+    const report = await ExpenseReport.findById(id)
+      .populate('userId', 'companyId')
+      .exec();
 
     if (!report) {
       throw new Error('Report not found');
+    }
+
+    // SECURITY: Verify approver is from same company as report
+    const reportUser = await User.findById(report.userId).select('companyId').exec();
+    const approverUser = await User.findById(userId).select('companyId').exec();
+    
+    if (!reportUser || !approverUser) {
+      throw new Error('Invalid user or approver');
+    }
+
+    // SUPER_ADMIN can approve any report, but all other roles must be from same company
+    if (approverUser.role !== 'SUPER_ADMIN') {
+      const reportCompanyId = reportUser.companyId?.toString();
+      const approverCompanyId = approverUser.companyId?.toString();
+      
+      if (reportCompanyId !== approverCompanyId) {
+        logger.warn({
+          reportId: id,
+          approverId: userId,
+          reportCompanyId,
+          approverCompanyId,
+        }, 'Attempt to approve report from different company - denied');
+        throw new Error('You can only approve reports from your company');
+      }
     }
 
     // Check if user is an approver
@@ -1025,8 +1064,26 @@ export class ReportsService {
         }
       }
     } else if (action === 'request_changes') {
-      // Revert to DRAFT for changes
-      report.status = ExpenseReportStatus.DRAFT;
+      // Comment is mandatory when requesting changes
+      if (!comment || !comment.trim()) {
+        const error: any = new Error('Comment is required when requesting changes');
+        error.statusCode = 400;
+        error.code = 'COMMENT_REQUIRED';
+        throw error;
+      }
+
+      // Reset approval chain - will be recomputed on resubmission
+      // This ensures that if employee structure changes, new approvers are assigned
+      report.approvers = [];
+      
+      // Set status to CHANGES_REQUESTED (not DRAFT) to indicate changes are needed
+      report.status = ExpenseReportStatus.CHANGES_REQUESTED;
+      
+      // Log the approval chain reset for audit purposes
+      logger.info(
+        { reportId: id, approverId: userId, level: currentLevel },
+        'Approval chain reset due to changes requested - will be recomputed on resubmission'
+      );
     }
 
     report.updatedBy = new mongoose.Types.ObjectId(userId);
@@ -1040,37 +1097,52 @@ export class ReportsService {
       { action, comment, level: currentLevel, newStatus: saved.status }
     );
 
-    // Notify report owner
+    // Notify report owner for final actions
     if (saved.status === ExpenseReportStatus.APPROVED || saved.status === ExpenseReportStatus.REJECTED) {
       await NotificationService.notifyReportStatusChanged(saved, saved.status);
+    } else if (action === 'request_changes') {
+      // Notify employee when changes are requested
+      await NotificationService.notifyReportChangesRequested(saved);
+    } else if (action === 'approve') {
+      // Notify next approver if report moved to next level
+      const nextLevelApprovers = saved.approvers.filter(
+        (a: any) => a.level === currentLevel + 1 && !a.decidedAt
+      );
+      
+      if (nextLevelApprovers.length > 0) {
+        await NotificationService.notifyNextApprover(saved, nextLevelApprovers);
+      }
     }
 
     return saved;
   }
 
-  static async adminGetReports(filters: ReportFiltersDto): Promise<any> {
+  static async adminGetReports(filters: ReportFiltersDto, req: AuthRequest): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
-    const query: any = {};
+    const baseQuery: any = {};
 
     if (filters.status) {
-      query.status = filters.status;
+      baseQuery.status = filters.status;
     }
 
     if (filters.userId) {
-      query.userId = filters.userId;
+      baseQuery.userId = filters.userId;
     }
 
     if (filters.projectId) {
-      query.projectId = filters.projectId;
+      baseQuery.projectId = filters.projectId;
     }
 
     if (filters.from) {
-      query.fromDate = { $gte: new Date(filters.from) };
+      baseQuery.fromDate = { $gte: new Date(filters.from) };
     }
 
     if (filters.to) {
-      query.toDate = { $lte: new Date(filters.to) };
+      baseQuery.toDate = { $lte: new Date(filters.to) };
     }
+
+    // Add company filter for non-SUPER_ADMIN users
+    const query = await buildCompanyQuery(req, baseQuery, 'users');
 
     const skip = (page - 1) * pageSize;
 

@@ -31,7 +31,7 @@ export class AuthController {
 
   static login = asyncHandler(async (req: Request, res: Response) => {
     const data = loginSchema.parse(req.body);
-    const result = await AuthService.login(data.email, data.password);
+    const result = await AuthService.login(data.email, data.password, data.role);
 
     res.status(200).json({
       success: true,
@@ -42,6 +42,19 @@ export class AuthController {
   static refresh = asyncHandler(async (req: Request, res: Response) => {
     const data = refreshTokenSchema.parse(req.body);
     const result = await AuthService.refresh(data.refreshToken);
+
+    res.status(200).json({
+      success: true,
+      data: result,
+    });
+  });
+
+  static checkRoles = asyncHandler(async (req: Request, res: Response) => {
+    const emailSchema = z.object({
+      email: z.string().email('Invalid email address'),
+    });
+    const data = emailSchema.parse(req.body);
+    const result = await AuthService.checkUserRoles(data.email);
 
     res.status(200).json({
       success: true,

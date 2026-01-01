@@ -172,5 +172,43 @@ export class AccountantController {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.status(200).send(csvBuffer);
   });
+
+  /**
+   * Bulk Excel Export with filtering (Structured Reimbursement Forms)
+   * GET /api/v1/accountant/export/excel
+   * Accountant role only
+   */
+  static bulkExcelExport = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const filters = bulkCsvExportFiltersSchema.parse(req.query);
+    
+    // Get company ID from accountant's user record
+    const { User } = await import('../models/User');
+    const accountant = await User.findById(req.user!.id).select('companyId').exec();
+    
+    if (!accountant || !accountant.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Accountant not found or not associated with a company',
+      });
+      return;
+    }
+
+    const companyId = accountant.companyId.toString();
+
+    const excelBuffer = await ExportService.generateBulkExcel({
+      ...filters,
+      companyId,
+      fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
+      toDate: filters.toDate ? new Date(filters.toDate) : undefined,
+    });
+
+    // Generate filename
+    const timestamp = new Date().toISOString().split('T')[0];
+    const filename = `expense-reimbursement-forms-${timestamp}.xlsx`;
+
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.status(200).send(excelBuffer);
+  });
 }
 

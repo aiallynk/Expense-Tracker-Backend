@@ -460,8 +460,92 @@ export class BusinessHeadService {
   }
 
   /**
+   * Check if Business Head should see a report
+   * 
+   * A Business Head should see a report ONLY IF:
+   * - Report status = PENDING_APPROVAL_L2 or MANAGER_APPROVED
+   * - BH is the assigned Level 2 approver in report.approvers array
+   * - Employee belongs to BH's department (or BH is company-wide)
+   * - All Level 1 approvals are completed
+   * 
+   * @param report - Expense report
+   * @param businessHeadId - Business Head user ID
+   * @returns boolean indicating if BH should see the report
+   */
+  static async shouldBusinessHeadSeeReport(
+    report: IExpenseReport,
+    businessHeadId: string
+  ): Promise<boolean> {
+    try {
+      // Rule 1: Report status must be PENDING_APPROVAL_L2 or MANAGER_APPROVED
+      if (
+        report.status !== ExpenseReportStatus.PENDING_APPROVAL_L2 &&
+        report.status !== ExpenseReportStatus.MANAGER_APPROVED
+      ) {
+        return false;
+      }
+
+      // Rule 2: BH must be assigned as Level 2 approver
+      const level2Approver = report.approvers.find(
+        (a: any) => a.level === 2 && a.userId.toString() === businessHeadId
+      );
+      if (!level2Approver) {
+        return false;
+      }
+
+      // Rule 3: All Level 1 approvals must be completed
+      const level1Approvers = report.approvers.filter((a: any) => a.level === 1);
+      const incompleteL1 = level1Approvers.some(
+        (a: any) => !a.decidedAt || a.action !== 'approve'
+      );
+      if (incompleteL1) {
+        return false;
+      }
+
+      // Rule 4: Employee should belong to BH's department (or BH is company-wide)
+      const businessHead = await User.findById(businessHeadId)
+        .select('departmentId companyId')
+        .exec();
+      const reportUser = await User.findById(report.userId)
+        .select('departmentId companyId')
+        .exec();
+
+      if (!businessHead || !reportUser) {
+        return false;
+      }
+
+      // If BH has no department, they are company-wide and can see all reports
+      if (!businessHead.departmentId) {
+        return true;
+      }
+
+      // If employee has no department, BH can still see if they're assigned
+      if (!reportUser.departmentId) {
+        return true;
+      }
+
+      // Department match check
+      if (
+        businessHead.departmentId.toString() === reportUser.departmentId.toString()
+      ) {
+        return true;
+      }
+
+      // If departments don't match, BH shouldn't see the report
+      return false;
+    } catch (error) {
+      logger.error({ error, reportId: report._id, businessHeadId }, 'Error checking BH visibility');
+      return false;
+    }
+  }
+
+  /**
    * Get pending reports (manager approved, waiting for BH approval)
-   * Only shows reports from managers in the same department as the BH
+   * Only shows reports that meet all visibility criteria:
+   * - Status is PENDING_APPROVAL_L2 or MANAGER_APPROVED
+   * - BH is assigned as Level 2 approver
+   * - Employee belongs to BH's department (or BH is company-wide)
+   * - All Level 1 approvals are completed
    */
   static async getPendingReports(businessHeadId: string): Promise<any[]> {
     try {
@@ -629,6 +713,77 @@ export class BusinessHeadService {
         type: NotificationType.REPORT_APPROVED,
         title: 'Report Approved',
         description: `Your report "${updatedReport.name}" has been approved by the business head.`,
+        link: `/reports/${reportId}`,
+        companyId: reportUser.companyId?.toString()
+      });
+    } catch (error) {
+      logger.error({ error: error }, 'Error sending notification:');
+    }
+
+    return updatedReport;
+  }
+
+  /**
+   * Business head requests changes for a report
+   * 
+   * When BH requests changes:
+   * - Comment is mandatory
+   * - Report status moves to CHANGES_REQUESTED
+   * - Employee edits and resubmits
+   * - Approval chain resets: Manager → Business Head → higher levels
+   */
+  static async requestReportChanges(
+    reportId: string,
+    businessHeadId: string,
+    comment: string
+  ): Promise<IExpenseReport> {
+    const report = await ExpenseReport.findById(reportId)
+      .populate('userId', 'name email managerId')
+      .exec();
+
+    if (!report) {
+      const error: any = new Error('Report not found');
+      error.statusCode = 404;
+      error.code = 'REPORT_NOT_FOUND';
+      throw error;
+    }
+
+    // Verify report is in PENDING_APPROVAL_L2 status (or legacy MANAGER_APPROVED for backward compatibility)
+    if (report.status !== ExpenseReportStatus.PENDING_APPROVAL_L2 && 
+        report.status !== ExpenseReportStatus.MANAGER_APPROVED) {
+      const error: any = new Error(`Cannot request changes for report with status: ${report.status}`);
+      error.statusCode = 400;
+      error.code = 'INVALID_STATUS';
+      throw error;
+    }
+
+    // Verify BH is assigned as Level 2 approver
+    const isAssignedApprover = report.approvers.some(
+      (a: any) => a.level === 2 && a.userId.toString() === businessHeadId && !a.decidedAt
+    );
+
+    if (!isAssignedApprover) {
+      const error: any = new Error('You are not authorized to request changes for this report');
+      error.statusCode = 403;
+      error.code = 'NOT_ASSIGNED_APPROVER';
+      throw error;
+    }
+
+    // Use ReportsService.handleReportAction for proper multi-level approval handling
+    // This will reset the approval chain and set status to CHANGES_REQUESTED
+    const { ReportsService } = await import('./reports.service');
+    const updatedReport = await ReportsService.handleReportAction(reportId, businessHeadId, 'request_changes', comment);
+    
+    // Send notification
+    try {
+      const { NotificationDataService } = await import('./notificationData.service');
+      const { NotificationType } = await import('../models/Notification');
+      const reportUser = updatedReport.userId as any;
+      await NotificationDataService.createNotification({
+        userId: reportUser._id?.toString() || reportUser.toString(),
+        type: NotificationType.REPORT_CHANGES_REQUESTED,
+        title: 'Changes Requested',
+        description: `Your report "${updatedReport.name}" requires changes. Please review the comments and resubmit.`,
         link: `/reports/${reportId}`,
         companyId: reportUser.companyId?.toString()
       });

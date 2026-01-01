@@ -26,6 +26,7 @@ yarn-error.log*
 *.swp
 *.swo
 *~
+firebase-service-account.json
 
 # OS
 .DS_Store

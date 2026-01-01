@@ -19,9 +19,18 @@ export class UsersController {
       return;
     }
 
+    // Return user data with the role from the token (selected role), not the primary role
+    const userData = user.toObject ? user.toObject() : user;
+    const responseData = {
+      ...userData,
+      role: req.user!.role, // Use role from token (selected role)
+      id: req.user!.id,
+      email: req.user!.email,
+    };
+
     res.status(200).json({
       success: true,
-      data: user,
+      data: responseData,
     });
   });
 
@@ -131,10 +140,12 @@ export class UsersController {
       name: data.name,
       phone: data.phone,
       role,
+      roles: data.roles, // Additional roles array
       companyId,
       managerId: data.managerId,
       departmentId: data.departmentId,
       status,
+      employeeId: data.employeeId,
     });
 
     res.status(201).json({

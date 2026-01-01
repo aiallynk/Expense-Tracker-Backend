@@ -36,6 +36,12 @@ router.post(
   AuthController.refresh
 );
 
+router.post(
+  '/check-roles',
+  loginRateLimiter,
+  AuthController.checkRoles
+);
+
 router.post('/logout', AuthController.logout);
 
 export default router;
