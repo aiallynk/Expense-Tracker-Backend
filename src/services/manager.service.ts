@@ -245,7 +245,14 @@ export class ManagerService {
     };
 
     if (filters.status && filters.status !== 'all') {
-      query.status = filters.status;
+      // Handle pending approvals - show reports where manager is assigned as approver
+      if (filters.status === 'pending' || filters.status === 'PENDING_APPROVAL_L1' || filters.status === 'SUBMITTED') {
+        // For pending, we need to check both status and approver assignment
+        query.status = { $in: [ExpenseReportStatus.PENDING_APPROVAL_L1, ExpenseReportStatus.SUBMITTED] };
+        // Note: We'll filter by approver assignment in the results
+      } else {
+        query.status = filters.status;
+      }
     }
 
     if (filters.search) {
@@ -270,13 +277,34 @@ export class ManagerService {
       ExpenseReport.countDocuments(query).exec()
     ]);
 
+    // If filtering for pending approvals, also check that manager is assigned as approver
+    let filteredReports = reports;
+    if (filters.status === 'pending' || filters.status === 'PENDING_APPROVAL_L1' || filters.status === 'SUBMITTED') {
+      filteredReports = reports.filter((report: any) => {
+        // Check if manager is assigned as Level 1 approver and hasn't decided yet
+        if (!report.approvers || report.approvers.length === 0) {
+          return false;
+        }
+        
+        const level1Approver = report.approvers.find(
+          (a: any) => 
+            a.level === 1 && 
+            a.userId.toString() === managerId &&
+            !a.decidedAt // Not yet decided
+        );
+        
+        return !!level1Approver;
+      });
+    }
+
     logger.debug({ 
       managerId, 
-      reportsFound: reports.length, 
-      total 
+      reportsFound: filteredReports.length, 
+      total,
+      originalCount: reports.length
     }, 'Team reports query result');
 
-    return { reports, total };
+    return { reports: filteredReports, total: filteredReports.length };
   }
 
   /**
@@ -1058,10 +1086,32 @@ export class ManagerService {
       reportId: { $in: allReports.map(r => r._id) }
     }).exec();
 
-    // Calculate pending approvals (reports with SUBMITTED status)
-    const pendingReports = allReports.filter(
-      r => r.status === ExpenseReportStatus.SUBMITTED
-    );
+    // Calculate pending approvals (reports with PENDING_APPROVAL_L1 status)
+    // Also check that this manager is assigned as Level 1 approver and hasn't decided yet
+    const pendingReports = allReports.filter((r) => {
+      // Check status
+      const isPendingStatus = 
+        r.status === ExpenseReportStatus.PENDING_APPROVAL_L1 || 
+        r.status === ExpenseReportStatus.SUBMITTED; // Legacy support
+      
+      if (!isPendingStatus) {
+        return false;
+      }
+      
+      // Check if manager is assigned as Level 1 approver
+      if (!r.approvers || r.approvers.length === 0) {
+        return false;
+      }
+      
+      const level1Approver = r.approvers.find(
+        (a: any) => 
+          a.level === 1 && 
+          a.userId.toString() === managerId &&
+          !a.decidedAt // Not yet decided
+      );
+      
+      return !!level1Approver;
+    });
 
     // Calculate approved this month
     const now = new Date();

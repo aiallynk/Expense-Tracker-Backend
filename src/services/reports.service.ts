@@ -509,7 +509,24 @@ export class ReportsService {
             userId: manager._id as mongoose.Types.ObjectId,
             role: manager.role,
           });
+          logger.info({ 
+            employeeId: reportUser._id, 
+            managerId: manager._id,
+            managerRole: manager.role 
+          }, 'Assigned manager as Level 1 approver');
+        } else {
+          logger.warn({ 
+            employeeId: reportUser._id, 
+            managerId: reportUser.managerId,
+            managerStatus: manager?.status 
+          }, 'Manager not found or inactive, skipping Level 1 approver assignment');
         }
+      } else {
+        logger.warn({ 
+          employeeId: reportUser._id,
+          hasManagerId: !!reportUser.managerId,
+          approvalLevels 
+        }, 'Employee has no managerId or approvalLevels < 1, cannot assign Level 1 approver');
       }
 
       // Level 2: Business Head Approval (always required)
@@ -917,8 +934,16 @@ export class ReportsService {
     // Compute approver chain
     const approvers = await this.computeApproverChain(report);
     if (approvers.length === 0) {
+      logger.error({ reportId: id, userId }, 'No approvers found for report');
       throw new Error('No approvers found for this report');
     }
+
+    logger.info({ 
+      reportId: id, 
+      userId, 
+      approversCount: approvers.length,
+      approvers: approvers.map(a => ({ level: a.level, userId: a.userId.toString(), role: a.role }))
+    }, 'Computed approver chain for report submission');
 
     // Set initial status based on approval levels
     // If there are approvers, set to PENDING_APPROVAL_L1, otherwise SUBMITTED
@@ -936,6 +961,12 @@ export class ReportsService {
     report.submittedAt = new Date();
     report.updatedBy = new mongoose.Types.ObjectId(userId);
     report.approvers = approvers;
+    
+    logger.info({ 
+      reportId: id, 
+      status: initialStatus,
+      approversCount: approvers.length 
+    }, 'Report status set and approvers assigned');
 
     const saved = await report.save();
 
@@ -947,8 +978,33 @@ export class ReportsService {
       { status: ExpenseReportStatus.SUBMITTED, approvers: approvers.map(a => ({ level: a.level, userId: a.userId.toString() })) }
     );
 
-    // Notify approvers
-    await NotificationService.notifyReportSubmitted(saved);
+    // Notify approvers - reload report to ensure approvers are properly serialized
+    try {
+      logger.info({ reportId: saved._id, approversCount: saved.approvers.length }, 'Sending notifications to approvers');
+      
+      // Reload report to ensure all fields are properly populated
+      const reportForNotification = await ExpenseReport.findById(saved._id).exec();
+      if (!reportForNotification) {
+        logger.error({ reportId: saved._id }, 'Report not found after save, cannot send notifications');
+      } else {
+        logger.info({ 
+          reportId: reportForNotification._id, 
+          approversCount: reportForNotification.approvers.length,
+          approvers: reportForNotification.approvers.map((a: any) => ({
+            level: a.level,
+            userId: a.userId?.toString ? a.userId.toString() : String(a.userId),
+            role: a.role,
+            decidedAt: a.decidedAt
+          }))
+        }, 'Report loaded for notification, approvers verified');
+        
+        await NotificationService.notifyReportSubmitted(reportForNotification);
+        logger.info({ reportId: saved._id }, 'Notifications sent successfully');
+      }
+    } catch (error) {
+      logger.error({ error, reportId: saved._id, stack: (error as any)?.stack }, 'Error sending notifications to approvers');
+      // Don't fail report submission if notifications fail
+    }
 
     // Emit real-time events to managers
     try {
