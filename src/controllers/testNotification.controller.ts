@@ -7,7 +7,7 @@ import { NotificationDataService } from '../services/notificationData.service';
 import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
 import { NotificationType } from '../models/Notification';
-import { emitNotificationToAll, emitNotificationToUser } from '../socket/realtimeEvents';
+import { emitNotificationToUser } from '../socket/realtimeEvents';
 
 import { logger } from '@/config/logger';
 
@@ -93,10 +93,8 @@ export class TestNotificationController {
         }
       }
 
-      // Also emit to all connected clients for real-time updates
-      if (notifications.length > 0) {
-        emitNotificationToAll(notifications[0].toObject());
-      }
+      // Note: Socket.IO is only for UI refresh, not for delivery
+      // Firebase FCM is the primary delivery mechanism (already sent above)
 
       logger.info(`Test notification sent: ${notificationsCreated} notifications created, ${pushResult.successCount} push notifications sent`);
 

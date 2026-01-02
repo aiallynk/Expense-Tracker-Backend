@@ -6,7 +6,7 @@ import { NotificationService } from '../services/notification.service';
 import { NotificationDataService } from '../services/notificationData.service';
 import { BroadcastTargetType } from '../utils/enums';
 import { getAllUsersTopic, getCompanyTopic, getRoleTopic } from '../utils/topicUtils';
-import { emitNotificationToAll, emitToCompanyAdmin, CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
+import { emitNotificationToRole, emitToCompanyAdmin, CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
 
 import { logger } from '@/config/logger';
 
@@ -133,49 +133,44 @@ export class BroadcastNotificationController {
       logger.error({ error: error.message || error }, 'Failed to create broadcast notification records in DB');
     }
 
-    // Emit real-time Socket.IO events
+    // Emit real-time Socket.IO events (for UI refresh only, NOT for delivery)
     try {
+      const notificationData = {
+        type: 'BROADCAST',
+        title,
+        description: body,
+        targetType,
+        isBroadcast: true,
+        createdAt: new Date(),
+      };
+
       if (targetType === BroadcastTargetType.ALL_USERS) {
-        // Emit to all connected clients
-        emitNotificationToAll({
-          type: 'BROADCAST',
-          title,
-          description: body,
-          targetType,
-          isBroadcast: true,
-          createdAt: new Date(),
-        });
+        // Emit to all users via role-based rooms (Socket.IO for UI refresh only)
+        // Note: Firebase FCM is the primary delivery mechanism
+        const roles = ['MANAGER', 'BUSINESS_HEAD', 'EMPLOYEE', 'COMPANY_ADMIN'];
+        for (const role of roles) {
+          emitNotificationToRole(role, notificationData);
+        }
       } else if (targetType === BroadcastTargetType.COMPANY && companyId) {
-        // Emit to company room
+        // Emit to company admin room
         emitToCompanyAdmin(
           companyId,
           CompanyAdminEvent.NOTIFICATION_CREATED,
-          {
-            type: 'BROADCAST',
-            title,
-            description: body,
-            targetType,
-            isBroadcast: true,
-            createdAt: new Date(),
-          }
+          notificationData
         );
+      } else if (targetType === BroadcastTargetType.ROLE && role) {
+        // Emit to specific role room
+        emitNotificationToRole(role, notificationData);
       }
 
       // Also emit to individual users who received the notification
       // (for real-time updates in their notification bell)
       for (const userId of userIds.slice(0, 100)) { // Limit to first 100 to avoid overwhelming Socket.IO
-        emitNotificationToUser(userId, {
-          type: 'BROADCAST',
-          title,
-          description: body,
-          targetType,
-          isBroadcast: true,
-          createdAt: new Date(),
-        });
+        emitNotificationToUser(userId, notificationData);
       }
     } catch (error: any) {
       logger.warn({ error: error.message || error }, 'Failed to emit Socket.IO events for broadcast');
-      // Don't fail the request - notification was already sent
+      // Don't fail the request - notification was already sent via Firebase
     }
 
     res.status(200).json({

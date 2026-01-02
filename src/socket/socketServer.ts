@@ -107,6 +107,11 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
       logger.debug(`Manager ${user.email} joined manager room: ${user.id}`);
     }
 
+    // Join role-based room for role-based notifications (for Socket.IO UI refresh only)
+    // Note: Firebase FCM topics are the primary delivery mechanism
+    socket.join(`role:${user.role}`);
+    logger.debug(`User ${user.email} joined role room: role:${user.role}`);
+
     // Join user room for employees (and all users) to receive real-time updates
     socket.join(`user:${user.id}`);
     logger.debug(`User ${user.email} joined user room: ${user.id}`);

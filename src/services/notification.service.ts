@@ -5,7 +5,7 @@ import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused
 import { NotificationPlatform , ExpenseReportStatus } from '../utils/enums';
-import { getAllUsersTopic, getCompanyTopic } from '../utils/topicUtils';
+import { getAllUsersTopic, getCompanyTopic, getRoleTopic } from '../utils/topicUtils';
 
 import { logger } from '@/config/logger';
 
@@ -47,6 +47,7 @@ export class NotificationService {
    * Subscribe FCM token to relevant topics
    * - all_users (all users)
    * - company_<companyId> (if user has company)
+   * - role_<USER_ROLE> (based on user's role)
    */
   static async subscribeTokenToTopics(userId: string, token: string): Promise<void> {
     const messaging = getMessaging();
@@ -56,8 +57,8 @@ export class NotificationService {
     }
 
     try {
-      // Get user to check companyId
-      const user = await User.findById(userId).select('companyId').exec();
+      // Get user to check companyId and role
+      const user = await User.findById(userId).select('companyId role').exec();
       if (!user) {
         logger.warn(`User ${userId} not found for topic subscription`);
         return;
@@ -78,18 +79,29 @@ export class NotificationService {
         }
       }
 
+      // Subscribe to role-based topic
+      if (user.role) {
+        try {
+          const roleTopic = getRoleTopic(user.role);
+          topics.push(roleTopic);
+          logger.debug(`Subscribing token to role topic: ${roleTopic} for user ${userId} with role ${user.role}`);
+        } catch (error: any) {
+          logger.warn({ error: error.message || error, userId, role: user.role }, 'Failed to generate role topic name');
+        }
+      }
+
       // Subscribe to all topics
       for (const topic of topics) {
         try {
           await messaging.subscribeToTopic([token], topic);
-          logger.debug(`Subscribed token to topic: ${topic} for user ${userId}`);
+          logger.info(`✅ Subscribed token to topic: ${topic} for user ${userId}`);
         } catch (error: any) {
           // Log but continue with other topics
           logger.warn({ error: error.message || error, topic, userId }, `Failed to subscribe to topic ${topic}`);
         }
       }
 
-      logger.info(`Topic subscription completed for user ${userId}, subscribed to ${topics.length} topic(s)`);
+      logger.info(`Topic subscription completed for user ${userId}, subscribed to ${topics.length} topic(s): ${topics.join(', ')}`);
     } catch (error: any) {
       logger.error({ error: error.message || error, userId }, 'Error in subscribeTokenToTopics');
       throw error;
@@ -380,7 +392,7 @@ export class NotificationService {
   }
 
   static async notifyReportSubmitted(report: any): Promise<void> {
-    // Notify Level 1 approvers (managers) from the approver chain
+    // Notify Level 1 approvers (managers) using role-based topic
     if (!report.approvers || report.approvers.length === 0) {
       logger.warn({ reportId: report._id }, 'No approvers found for report, skipping notification');
       return;
@@ -397,7 +409,7 @@ export class NotificationService {
       }))
     }, 'Processing notifications for report submission');
 
-    // Get Level 1 approvers (managers)
+    // Get Level 1 approvers (managers) for DB records and emails
     const level1Approvers = report.approvers.filter(
       (approver: any) => approver.level === 1 && !approver.decidedAt
     );
@@ -407,24 +419,40 @@ export class NotificationService {
       return;
     }
 
-    logger.info({ 
-      reportId: report._id, 
-      level1ApproversCount: level1Approvers.length,
-      level1ApproverIds: level1Approvers.map((a: any) => {
-        // Handle both ObjectId and string formats
-        const userId = a.userId;
-        if (typeof userId === 'string') return userId;
-        if (userId && typeof userId.toString === 'function') return userId.toString();
-        return String(userId);
-      })
-    }, 'Found Level 1 approvers to notify');
-
-    // Get report owner for email context
+    // Get report owner for context
     const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
+    if (!reportOwner) {
+      logger.warn({ reportId: report._id }, 'Report owner not found, skipping notification');
+      return;
+    }
 
-    // Notify each Level 1 approver
+    // Send broadcast notification to role_MANAGER topic (Firebase FCM)
+    try {
+      const managerTopic = getRoleTopic('MANAGER');
+      const messageId = await this.sendBroadcastToTopic(
+        {
+          title: 'New Expense Report Submitted',
+          body: `Report "${report.name}" has been submitted for your approval`,
+          data: {
+            type: 'REPORT_SUBMITTED',
+            reportId: report._id.toString(),
+            action: 'REPORT_SUBMITTED',
+            companyId: reportOwner.companyId?.toString() || '',
+          },
+        },
+        managerTopic
+      );
+      logger.info({ reportId: report._id, topic: managerTopic, messageId }, '✅ Broadcast notification sent to role_MANAGER topic');
+    } catch (error: any) {
+      logger.error({ error: error.message || error, reportId: report._id }, '❌ Failed to send broadcast notification to role_MANAGER topic');
+      // Continue to create DB records even if FCM fails
+    }
+
+    // Create DB notification records for all Level 1 approvers (for UI display)
+    const { NotificationDataService } = await import('./notificationData.service');
+    const { NotificationType } = await import('../models/Notification');
+
     for (const approver of level1Approvers) {
-      // Handle both ObjectId and string formats
       const approverUserId = approver.userId;
       let approverId: string;
       
@@ -442,7 +470,7 @@ export class NotificationService {
       }
       
       // Verify approver is from same company as report owner
-      if (reportOwner?.companyId) {
+      if (reportOwner.companyId) {
         const approverUser = await User.findById(approverId).select('companyId').exec();
         if (approverUser?.companyId?.toString() !== reportOwner.companyId.toString()) {
           logger.warn(`Skipping notification to approver ${approverId} - different company`);
@@ -451,47 +479,27 @@ export class NotificationService {
       }
 
       try {
-        // Create notification record in database first (so it appears in UI even if push fails)
-        const { NotificationDataService } = await import('./notificationData.service');
-        const { NotificationType } = await import('../models/Notification');
-        
+        // Create notification record in database (for UI display)
         await NotificationDataService.createNotification({
           userId: approverId,
-          companyId: reportOwner?.companyId?.toString(),
+          companyId: reportOwner.companyId?.toString(),
           type: NotificationType.REPORT_SUBMITTED,
           title: 'New Expense Report Submitted',
-          description: `Report "${report.name}" has been submitted by ${reportOwner?.name || reportOwner?.email || 'an employee'} for your approval`,
+          description: `Report "${report.name}" has been submitted by ${reportOwner.name || reportOwner.email || 'an employee'} for your approval`,
           link: `/manager/approvals/${report._id.toString()}`,
           metadata: {
             reportId: report._id.toString(),
             reportName: report.name,
             employeeId: report.userId?.toString(),
-            employeeName: reportOwner?.name,
-            employeeEmail: reportOwner?.email,
+            employeeName: reportOwner.name,
+            employeeEmail: reportOwner.email,
           },
         });
-        logger.info({ approverId, reportId: report._id }, 'Notification record created in database');
+        logger.info({ approverId, reportId: report._id }, '✅ Notification record created in database');
 
-        // Send push notification
-        logger.info({ approverId, reportId: report._id }, 'Sending push notification to approver');
-        await this.sendPushToUser(approverId, {
-          title: 'New Expense Report Submitted',
-          body: `Report "${report.name}" has been submitted for your approval`,
-          data: {
-            type: 'REPORT_SUBMITTED',
-            reportId: report._id.toString(),
-            action: 'REPORT_SUBMITTED',
-          },
-        });
-        logger.info({ approverId, reportId: report._id }, 'Push notification sent successfully');
-      } catch (error) {
-        logger.error({ error, approverId, reportId: report._id }, 'Error sending notification to approver');
-      }
-
-      // Send email to approver
-      try {
+        // Send email to specific approver
         const approverUser = await User.findById(approverId).select('email').exec();
-        if (approverUser?.email && reportOwner) {
+        if (approverUser?.email) {
           await this.sendEmail({
             to: approverUser.email,
             subject: `New Expense Report: ${report.name}`,
@@ -503,11 +511,10 @@ export class NotificationService {
               reportId: report._id.toString(),
             },
           });
-          logger.info({ approverId, email: approverUser.email }, 'Email notification sent');
+          logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
         }
       } catch (error) {
-        logger.error({ error, approverId }, 'Error sending email notification');
-        // Don't fail if email fails
+        logger.error({ error, approverId, reportId: report._id }, 'Error creating notification record or sending email');
       }
     }
   }
@@ -580,13 +587,56 @@ export class NotificationService {
   }
 
   static async notifyNextApprover(report: any, approvers: any[]): Promise<void> {
+    if (!approvers || approvers.length === 0) {
+      logger.warn({ reportId: report._id }, 'No approvers provided for next approver notification');
+      return;
+    }
+
     const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
+    if (!reportOwner) {
+      logger.warn({ reportId: report._id }, 'Report owner not found, skipping notification');
+      return;
+    }
+
+    // Determine approver level and role
+    const approverLevel = approvers[0]?.level || 2;
+    const levelName = approverLevel === 2 ? 'Business Head' : `Level ${approverLevel} Approver`;
+    
+    // Level 2 approvers are typically BUSINESS_HEAD role
+    const targetRole = approverLevel === 2 ? 'BUSINESS_HEAD' : approvers[0]?.role || 'BUSINESS_HEAD';
+
+    // Send broadcast notification to role-based topic (Firebase FCM)
+    try {
+      const roleTopic = getRoleTopic(targetRole);
+      const messageId = await this.sendBroadcastToTopic(
+        {
+          title: 'Report Pending Approval',
+          body: `Report "${report.name}" is pending your approval (${levelName})`,
+          data: {
+            type: 'REPORT_PENDING_APPROVAL',
+            reportId: report._id.toString(),
+            action: 'REPORT_PENDING_APPROVAL',
+            level: approverLevel.toString(),
+            companyId: reportOwner.companyId?.toString() || '',
+          },
+        },
+        roleTopic
+      );
+      logger.info({ reportId: report._id, topic: roleTopic, messageId, level: approverLevel }, '✅ Broadcast notification sent to role topic');
+    } catch (error: any) {
+      logger.error({ error: error.message || error, reportId: report._id, role: targetRole }, '❌ Failed to send broadcast notification to role topic');
+      // Continue to create DB records even if FCM fails
+    }
+
+    // Create DB notification records and send emails to specific approvers
+    const { NotificationDataService } = await import('./notificationData.service');
+    const { NotificationType } = await import('../models/Notification');
 
     for (const approver of approvers) {
       const approverId = approver.userId.toString();
       
       // Verify approver is from same company as report owner
-      if (reportOwner?.companyId) {
+      if (reportOwner.companyId) {
         const approverUser = await User.findById(approverId).select('companyId').exec();
         if (approverUser?.companyId?.toString() !== reportOwner.companyId.toString()) {
           logger.warn(`Skipping notification to approver ${approverId} - different company`);
@@ -594,35 +644,45 @@ export class NotificationService {
         }
       }
 
-      const approverLevel = approver.level;
-      const levelName = approverLevel === 2 ? 'Business Head' : `Level ${approverLevel} Approver`;
-
-      await this.sendPushToUser(approverId, {
-        title: 'Report Pending Approval',
-        body: `Report "${report.name}" is pending your approval (${levelName})`,
-        data: {
-          type: 'REPORT_PENDING_APPROVAL',
-          reportId: report._id.toString(),
-          action: 'REPORT_PENDING_APPROVAL',
-          level: approverLevel.toString(),
-        },
-      });
-
-      // Send email
-      const approverUser = await User.findById(approverId).select('email').exec();
-      if (approverUser?.email && reportOwner) {
-        await this.sendEmail({
-          to: approverUser.email,
-          subject: `Report Pending Approval: ${report.name}`,
-          template: 'report_pending_approval',
-          data: {
-            reportName: report.name,
-            ownerName: reportOwner.name || reportOwner.email,
-            ownerEmail: reportOwner.email,
+      try {
+        // Create notification record in database (for UI display)
+        await NotificationDataService.createNotification({
+          userId: approverId,
+          companyId: reportOwner.companyId?.toString(),
+          type: NotificationType.REPORT_PENDING_APPROVAL,
+          title: 'Report Pending Approval',
+          description: `Report "${report.name}" is pending your approval (${levelName})`,
+          link: `/approvals/${report._id.toString()}`,
+          metadata: {
             reportId: report._id.toString(),
+            reportName: report.name,
+            employeeId: report.userId?.toString(),
+            employeeName: reportOwner.name,
+            employeeEmail: reportOwner.email,
             level: approverLevel,
           },
         });
+        logger.info({ approverId, reportId: report._id }, '✅ Notification record created in database');
+
+        // Send email to specific approver
+        const approverUser = await User.findById(approverId).select('email').exec();
+        if (approverUser?.email) {
+          await this.sendEmail({
+            to: approverUser.email,
+            subject: `Report Pending Approval: ${report.name}`,
+            template: 'report_pending_approval',
+            data: {
+              reportName: report.name,
+              ownerName: reportOwner.name || reportOwner.email,
+              ownerEmail: reportOwner.email,
+              reportId: report._id.toString(),
+              level: approverLevel,
+            },
+          });
+          logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
+        }
+      } catch (error) {
+        logger.error({ error, approverId, reportId: report._id }, 'Error creating notification record or sending email');
       }
     }
   }

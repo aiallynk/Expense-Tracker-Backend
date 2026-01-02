@@ -273,8 +273,28 @@ export const emitNotificationToUser = (userId: string, notification: any) => {
   logger.debug(`Emitted notification to user ${userId}, notification: ${notification._id || notification.id}`);
 };
 
-// Emit notification to all connected clients (for test notifications)
+// Emit notification to a specific role via Socket.IO (for real-time UI refresh only)
+export const emitNotificationToRole = (role: string, notification: any) => {
+  const io = getIO();
+  if (!io) {
+    logger.warn('Socket.IO not initialized');
+    return;
+  }
+
+  try {
+    // Emit to role-specific room
+    io.to(`role:${role}`).emit(NOTIFICATION_EVENT, notification);
+    logger.debug(`Emitted notification to role:${role}, notification: ${notification._id || notification.id}`);
+  } catch (error) {
+    logger.error({ error, role }, `Error emitting notification to role:${role}`);
+  }
+};
+
+// DEPRECATED: Use emitNotificationToRole() instead
+// This function is kept for backward compatibility but should not be used for delivery
+// Socket.IO is ONLY for real-time UI refresh, NOT for notification delivery
 export const emitNotificationToAll = (notification: any) => {
+  logger.warn('emitNotificationToAll() is deprecated. Use emitNotificationToRole() for role-based notifications.');
   const io = getIO();
   if (!io) {
     logger.warn('Socket.IO not initialized');
