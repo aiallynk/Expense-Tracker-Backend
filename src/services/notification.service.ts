@@ -223,17 +223,39 @@ export class NotificationService {
     }
 
     try {
-      const message = {
+      const message: any = {
         topic,
         notification: {
           title: payload.title,
           body: payload.body,
         },
         data: dataPayload,
+        // Android-specific configuration
+        android: {
+          priority: 'high' as const,
+          notification: {
+            channelId: 'nexpense_notifications', // Must match AndroidManifest.xml
+            sound: 'default',
+            priority: 'high' as const,
+            defaultSound: true,
+            defaultVibrateTimings: true,
+            defaultLightSettings: true,
+          },
+        },
+        // APNS (iOS) configuration (optional, but good practice)
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+            },
+          },
+        },
       };
 
       const messageId = await messaging.send(message);
       logger.info(`Broadcast notification sent to topic "${topic}", messageId: ${messageId}`);
+      logger.debug(`Notification payload: ${JSON.stringify({ title: payload.title, body: payload.body, topic, hasData: !!payload.data })}`);
       return messageId;
     } catch (error: any) {
       logger.error({ error: error.message || error, topic }, 'Failed to send broadcast notification to topic');
@@ -298,13 +320,34 @@ export class NotificationService {
         }
       }
 
-      const message = {
+      const message: any = {
         notification: {
           title: payload.title,
           body: payload.body,
         },
         data: dataPayload,
         tokens: fcmTokens,
+        // Android-specific configuration
+        android: {
+          priority: 'high' as const,
+          notification: {
+            channelId: 'nexpense_notifications', // Must match AndroidManifest.xml
+            sound: 'default',
+            priority: 'high' as const,
+            defaultSound: true,
+            defaultVibrateTimings: true,
+            defaultLightSettings: true,
+          },
+        },
+        // APNS (iOS) configuration (optional, but good practice)
+        apns: {
+          payload: {
+            aps: {
+              sound: 'default',
+              badge: 1,
+            },
+          },
+        },
       };
 
       const response = await messaging.sendEachForMulticast(message);
