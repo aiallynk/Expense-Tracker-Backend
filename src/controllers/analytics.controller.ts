@@ -328,5 +328,214 @@ export class AnalyticsController {
       pagination: result.pagination,
     });
   });
+
+  /**
+   * Get spend by category
+   * GET /api/v1/analytics/spend-by-category
+   * Query params: companyId (required), fromDate?, toDate?
+   */
+  static getSpendByCategory = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
+    const companyId = req.companyId!;
+
+    const isValid = await AnalyticsService.validateCompanyId(companyId);
+    if (!isValid) {
+      res.status(404).json({
+        success: false,
+        message: 'Company not found',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const fromDate = req.query.fromDate ? new Date(req.query.fromDate as string) : undefined;
+    const toDate = req.query.toDate ? new Date(req.query.toDate as string) : undefined;
+
+    const data = await AnalyticsService.getSpendByCategory(companyId, fromDate, toDate);
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  /**
+   * Get spend trend
+   * GET /api/v1/analytics/spend-trend
+   * Query params: companyId (required), months? (default: 12), fromDate?, toDate?
+   */
+  static getSpendTrend = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
+    const companyId = req.companyId!;
+
+    const isValid = await AnalyticsService.validateCompanyId(companyId);
+    if (!isValid) {
+      res.status(404).json({
+        success: false,
+        message: 'Company not found',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const months = req.query.months ? parseInt(req.query.months as string, 10) : 12;
+    const fromDate = req.query.fromDate ? new Date(req.query.fromDate as string) : undefined;
+    const toDate = req.query.toDate ? new Date(req.query.toDate as string) : undefined;
+
+    if (isNaN(months) || months < 1 || months > 24) {
+      res.status(400).json({
+        success: false,
+        message: 'months must be a number between 1 and 24',
+        code: 'INVALID_MONTHS',
+      });
+      return;
+    }
+
+    const data = await AnalyticsService.getSpendTrend(companyId, months, fromDate, toDate);
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  /**
+   * Get approval funnel
+   * GET /api/v1/analytics/approval-funnel
+   * Query params: companyId (required), fromDate?, toDate?
+   */
+  static getApprovalFunnel = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
+    const companyId = req.companyId!;
+
+    const isValid = await AnalyticsService.validateCompanyId(companyId);
+    if (!isValid) {
+      res.status(404).json({
+        success: false,
+        message: 'Company not found',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const fromDate = req.query.fromDate ? new Date(req.query.fromDate as string) : undefined;
+    const toDate = req.query.toDate ? new Date(req.query.toDate as string) : undefined;
+
+    const data = await AnalyticsService.getApprovalFunnel(companyId, fromDate, toDate);
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  /**
+   * Get spend by user
+   * GET /api/v1/analytics/spend-by-user
+   * Query params: companyId (required), fromDate?, toDate?
+   */
+  static getSpendByUser = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
+    const companyId = req.companyId!;
+
+    const isValid = await AnalyticsService.validateCompanyId(companyId);
+    if (!isValid) {
+      res.status(404).json({
+        success: false,
+        message: 'Company not found',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const fromDate = req.query.fromDate ? new Date(req.query.fromDate as string) : undefined;
+    const toDate = req.query.toDate ? new Date(req.query.toDate as string) : undefined;
+
+    const data = await AnalyticsService.getSpendByUser(companyId, fromDate, toDate);
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  /**
+   * Get spend by department
+   * GET /api/v1/analytics/spend-by-department
+   * Query params: companyId (required), fromDate?, toDate?
+   */
+  static getSpendByDepartment = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
+    const companyId = req.companyId!;
+
+    const isValid = await AnalyticsService.validateCompanyId(companyId);
+    if (!isValid) {
+      res.status(404).json({
+        success: false,
+        message: 'Company not found',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const fromDate = req.query.fromDate ? new Date(req.query.fromDate as string) : undefined;
+    const toDate = req.query.toDate ? new Date(req.query.toDate as string) : undefined;
+
+    const data = await AnalyticsService.getSpendByDepartment(companyId, fromDate, toDate);
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  /**
+   * Get high-value expenses
+   * GET /api/v1/analytics/high-value-expenses
+   * Query params: companyId (required), threshold? (default: 10000), limit? (default: 50), fromDate?, toDate?
+   */
+  static getHighValueExpenses = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
+    const companyId = req.companyId!;
+
+    const isValid = await AnalyticsService.validateCompanyId(companyId);
+    if (!isValid) {
+      res.status(404).json({
+        success: false,
+        message: 'Company not found',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+
+    const threshold = req.query.threshold ? parseFloat(req.query.threshold as string) : 10000;
+    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 50;
+    const fromDate = req.query.fromDate ? new Date(req.query.fromDate as string) : undefined;
+    const toDate = req.query.toDate ? new Date(req.query.toDate as string) : undefined;
+
+    if (isNaN(threshold) || threshold < 0) {
+      res.status(400).json({
+        success: false,
+        message: 'threshold must be a positive number',
+        code: 'INVALID_THRESHOLD',
+      });
+      return;
+    }
+
+    if (isNaN(limit) || limit < 1 || limit > 100) {
+      res.status(400).json({
+        success: false,
+        message: 'limit must be between 1 and 100',
+        code: 'INVALID_LIMIT',
+      });
+      return;
+    }
+
+    const data = await AnalyticsService.getHighValueExpenses(companyId, {
+      threshold,
+      limit,
+      fromDate,
+      toDate,
+    });
+
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
 }
 

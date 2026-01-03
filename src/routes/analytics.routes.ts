@@ -18,21 +18,23 @@ const router = Router();
 // Apply analytics auth middleware to all routes
 router.use(analyticsAuthMiddleware);
 
-// Dashboard summary
+// Core endpoints (required by spec)
 router.get('/dashboard', AnalyticsController.getDashboard);
+router.get('/expenses', AnalyticsController.getExpenses);
+router.get('/reports', AnalyticsController.getReports);
+router.get('/spend-by-category', AnalyticsController.getSpendByCategory);
+router.get('/spend-trend', AnalyticsController.getSpendTrend);
+router.get('/approval-funnel', AnalyticsController.getApprovalFunnel);
+router.get('/spend-by-user', AnalyticsController.getSpendByUser);
+router.get('/spend-by-department', AnalyticsController.getSpendByDepartment);
+router.get('/high-value-expenses', AnalyticsController.getHighValueExpenses);
 
-// Expense breakdowns
-router.get('/expenses/department-wise', AnalyticsController.getDepartmentWiseExpenses);
+// Additional endpoints (backward compatibility)
+router.get('/expenses/department-wise', AnalyticsController.getSpendByDepartment);
 router.get('/expenses/project-wise', AnalyticsController.getProjectWiseExpenses);
 router.get('/expenses/cost-centre-wise', AnalyticsController.getCostCentreWiseExpenses);
-router.get('/expenses/category-wise', AnalyticsController.getCategoryWiseExpenses);
-
-// Trends
-router.get('/trends/monthly', AnalyticsController.getMonthlyTrends);
-
-// Lists (read-only)
-router.get('/reports', AnalyticsController.getReports);
-router.get('/expenses', AnalyticsController.getExpenses);
+router.get('/expenses/category-wise', AnalyticsController.getSpendByCategory);
+router.get('/trends/monthly', AnalyticsController.getSpendTrend);
 
 export default router;
 

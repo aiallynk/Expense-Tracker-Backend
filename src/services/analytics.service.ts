@@ -617,5 +617,485 @@ export class AnalyticsService {
       throw error;
     }
   }
+
+  /**
+   * Get spend by category (optimized aggregation)
+   * GET /api/v1/analytics/spend-by-category
+   */
+  static async getSpendByCategory(companyId: string, fromDate?: Date, toDate?: Date): Promise<any[]> {
+    try {
+      const companyObjectId = new mongoose.Types.ObjectId(companyId);
+      const companyUsers = await User.find({ companyId: companyObjectId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+
+      if (userIds.length === 0) return [];
+
+      const matchFilter: any = {
+        userId: { $in: userIds },
+        categoryId: { $exists: true, $ne: null },
+        status: { $in: [ExpenseStatus.APPROVED, ExpenseStatus.PENDING] },
+      };
+
+      if (fromDate || toDate) {
+        matchFilter.expenseDate = {};
+        if (fromDate) matchFilter.expenseDate.$gte = fromDate;
+        if (toDate) matchFilter.expenseDate.$lte = toDate;
+      }
+
+      // Optimized aggregation pipeline
+      const result = await Expense.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: '$categoryId',
+            totalSpend: { $sum: '$amount' },
+            expenseCount: { $sum: 1 },
+            currency: { $first: '$currency' },
+          },
+        },
+        {
+          $lookup: {
+            from: 'categories',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'category',
+          },
+        },
+        {
+          $unwind: {
+            path: '$category',
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            categoryId: { $toString: '$_id' },
+            categoryName: { $ifNull: ['$category.name', 'Unknown'] },
+            totalSpend: 1,
+            expenseCount: 1,
+            currency: 1,
+          },
+        },
+        { $sort: { totalSpend: -1 } },
+      ]);
+
+      // Convert amounts to INR
+      const converted = await Promise.all(
+        result.map(async (item) => ({
+          categoryId: item.categoryId,
+          categoryName: item.categoryName,
+          totalSpend: await currencyService.convertToINR(item.totalSpend, item.currency || 'INR'),
+          expenseCount: item.expenseCount,
+        }))
+      );
+
+      return converted;
+    } catch (error) {
+      logger.error({ error, companyId }, 'Error getting spend by category');
+      return [];
+    }
+  }
+
+  /**
+   * Get spend trend (optimized aggregation)
+   * GET /api/v1/analytics/spend-trend
+   */
+  static async getSpendTrend(companyId: string, months: number = 12, fromDate?: Date, toDate?: Date): Promise<any[]> {
+    try {
+      const companyObjectId = new mongoose.Types.ObjectId(companyId);
+      const companyUsers = await User.find({ companyId: companyObjectId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+
+      if (userIds.length === 0) return [];
+
+      const matchFilter: any = {
+        userId: { $in: userIds },
+        status: ExpenseReportStatus.APPROVED,
+      };
+
+      if (fromDate || toDate) {
+        matchFilter.approvedAt = {};
+        if (fromDate) matchFilter.approvedAt.$gte = fromDate;
+        if (toDate) matchFilter.approvedAt.$lte = toDate;
+      } else {
+        // Default to last N months if no date range provided
+        const now = new Date();
+        const startDate = new Date(now.getFullYear(), now.getMonth() - months, 1);
+        matchFilter.approvedAt = { $gte: startDate };
+      }
+
+      // Optimized aggregation pipeline
+      const result = await ExpenseReport.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: {
+              year: { $year: '$approvedAt' },
+              month: { $month: '$approvedAt' },
+            },
+            totalSpend: { $sum: '$totalAmount' },
+            reportCount: { $sum: 1 },
+            currency: { $first: '$currency' },
+          },
+        },
+        { $sort: { '_id.year': 1, '_id.month': 1 } },
+      ]);
+
+      // Format and convert to INR
+      const trends = await Promise.all(
+        result.map(async (item) => {
+          const monthDate = new Date(item._id.year, item._id.month - 1, 1);
+          const convertedAmount = await currencyService.convertToINR(
+            item.totalSpend,
+            item.currency || 'INR'
+          );
+
+          return {
+            month: monthDate.toISOString().substring(0, 7), // YYYY-MM
+            monthName: monthDate.toLocaleString('en-US', { month: 'short', year: 'numeric' }),
+            totalSpend: convertedAmount,
+            reportCount: item.reportCount,
+          };
+        })
+      );
+
+      return trends;
+    } catch (error) {
+      logger.error({ error, companyId }, 'Error getting spend trend');
+      return [];
+    }
+  }
+
+  /**
+   * Get approval funnel (reports by status)
+   * GET /api/v1/analytics/approval-funnel
+   */
+  static async getApprovalFunnel(companyId: string, fromDate?: Date, toDate?: Date): Promise<any> {
+    try {
+      const companyObjectId = new mongoose.Types.ObjectId(companyId);
+      const companyUsers = await User.find({ companyId: companyObjectId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+
+      if (userIds.length === 0) {
+        return {
+          draft: 0,
+          submitted: 0,
+          pendingApproval: 0,
+          approved: 0,
+          rejected: 0,
+          total: 0,
+        };
+      }
+
+      const matchFilter: any = {
+        userId: { $in: userIds },
+      };
+
+      if (fromDate || toDate) {
+        matchFilter.createdAt = {};
+        if (fromDate) matchFilter.createdAt.$gte = fromDate;
+        if (toDate) matchFilter.createdAt.$lte = toDate;
+      }
+
+      // Optimized aggregation pipeline
+      const result = await ExpenseReport.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: '$status',
+            count: { $sum: 1 },
+            totalAmount: { $sum: '$totalAmount' },
+          },
+        },
+      ]);
+
+      // Initialize funnel
+      const funnel: any = {
+        draft: 0,
+        submitted: 0,
+        pendingApproval: 0,
+        approved: 0,
+        rejected: 0,
+        total: 0,
+      };
+
+      // Map statuses to funnel stages
+      result.forEach((item) => {
+        const status = item._id;
+        const count = item.count;
+
+        funnel.total += count;
+
+        if (status === ExpenseReportStatus.DRAFT) {
+          funnel.draft = count;
+        } else if (status === ExpenseReportStatus.SUBMITTED) {
+          funnel.submitted = count;
+        } else if (status.startsWith('PENDING_APPROVAL') || status === ExpenseReportStatus.MANAGER_APPROVED) {
+          funnel.pendingApproval += count;
+        } else if (status === ExpenseReportStatus.APPROVED) {
+          funnel.approved = count;
+        } else if (status === ExpenseReportStatus.REJECTED) {
+          funnel.rejected = count;
+        }
+      });
+
+      return funnel;
+    } catch (error) {
+      logger.error({ error, companyId }, 'Error getting approval funnel');
+      return {
+        draft: 0,
+        submitted: 0,
+        pendingApproval: 0,
+        approved: 0,
+        rejected: 0,
+        total: 0,
+      };
+    }
+  }
+
+  /**
+   * Get spend by user (optimized aggregation)
+   * GET /api/v1/analytics/spend-by-user
+   */
+  static async getSpendByUser(companyId: string, fromDate?: Date, toDate?: Date): Promise<any[]> {
+    try {
+      const companyObjectId = new mongoose.Types.ObjectId(companyId);
+      const companyUsers = await User.find({ companyId: companyObjectId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+
+      if (userIds.length === 0) return [];
+
+      const matchFilter: any = {
+        userId: { $in: userIds },
+        status: ExpenseReportStatus.APPROVED,
+      };
+
+      if (fromDate || toDate) {
+        matchFilter.approvedAt = {};
+        if (fromDate) matchFilter.approvedAt.$gte = fromDate;
+        if (toDate) matchFilter.approvedAt.$lte = toDate;
+      }
+
+      // Optimized aggregation pipeline
+      const result = await ExpenseReport.aggregate([
+        { $match: matchFilter },
+        {
+          $group: {
+            _id: '$userId',
+            totalSpend: { $sum: '$totalAmount' },
+            reportCount: { $sum: 1 },
+            currency: { $first: '$currency' },
+          },
+        },
+        {
+          $lookup: {
+            from: 'users',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'user',
+          },
+        },
+        {
+          $unwind: {
+            path: '$user',
+            preserveNullAndEmptyArrays: true,
+          },
+        },
+        {
+          $project: {
+            userId: { $toString: '$_id' },
+            userName: { $ifNull: ['$user.name', 'Unknown'] },
+            userEmail: { $ifNull: ['$user.email', ''] },
+            totalSpend: 1,
+            reportCount: 1,
+            currency: 1,
+          },
+        },
+        { $sort: { totalSpend: -1 } },
+      ]);
+
+      // Convert amounts to INR
+      const converted = await Promise.all(
+        result.map(async (item) => ({
+          userId: item.userId,
+          userName: item.userName,
+          userEmail: item.userEmail,
+          totalSpend: await currencyService.convertToINR(item.totalSpend, item.currency || 'INR'),
+          reportCount: item.reportCount,
+        }))
+      );
+
+      return converted;
+    } catch (error) {
+      logger.error({ error, companyId }, 'Error getting spend by user');
+      return [];
+    }
+  }
+
+  /**
+   * Get spend by department (optimized aggregation)
+   * GET /api/v1/analytics/spend-by-department
+   */
+  static async getSpendByDepartment(companyId: string, fromDate?: Date, toDate?: Date): Promise<any[]> {
+    try {
+      const companyObjectId = new mongoose.Types.ObjectId(companyId);
+      const departments = await Department.find({ companyId: companyObjectId }).exec();
+
+      if (departments.length === 0) return [];
+
+      const matchFilter: any = {
+        status: ExpenseReportStatus.APPROVED,
+      };
+
+      if (fromDate || toDate) {
+        matchFilter.approvedAt = {};
+        if (fromDate) matchFilter.approvedAt.$gte = fromDate;
+        if (toDate) matchFilter.approvedAt.$lte = toDate;
+      }
+
+      const departmentSpend: any[] = [];
+
+      for (const dept of departments) {
+        const usersInDept = await User.find({
+          companyId: companyObjectId,
+          departmentId: dept._id,
+          status: 'ACTIVE',
+        }).select('_id').exec();
+
+        const userIds = usersInDept.map(u => u._id);
+
+        if (userIds.length === 0) continue;
+
+        // Optimized aggregation
+        const result = await ExpenseReport.aggregate([
+          {
+            $match: {
+              ...matchFilter,
+              userId: { $in: userIds },
+            },
+          },
+          {
+            $group: {
+              _id: null,
+              totalSpend: { $sum: '$totalAmount' },
+              reportCount: { $sum: 1 },
+              currency: { $first: '$currency' },
+            },
+          },
+        ]);
+
+        if (result.length > 0) {
+          const item = result[0];
+          const convertedAmount = await currencyService.convertToINR(
+            item.totalSpend,
+            item.currency || 'INR'
+          );
+
+          departmentSpend.push({
+            departmentId: (dept._id as mongoose.Types.ObjectId).toString(),
+            departmentName: dept.name,
+            totalSpend: convertedAmount,
+            reportCount: item.reportCount,
+          });
+        } else {
+          departmentSpend.push({
+            departmentId: (dept._id as mongoose.Types.ObjectId).toString(),
+            departmentName: dept.name,
+            totalSpend: 0,
+            reportCount: 0,
+          });
+        }
+      }
+
+      return departmentSpend.sort((a, b) => b.totalSpend - a.totalSpend);
+    } catch (error) {
+      logger.error({ error, companyId }, 'Error getting spend by department');
+      return [];
+    }
+  }
+
+  /**
+   * Get high-value expenses (above threshold)
+   * GET /api/v1/analytics/high-value-expenses
+   */
+  static async getHighValueExpenses(
+    companyId: string,
+    options: {
+      threshold?: number;
+      limit?: number;
+      fromDate?: Date;
+      toDate?: Date;
+    } = {}
+  ): Promise<any[]> {
+    try {
+      const companyObjectId = new mongoose.Types.ObjectId(companyId);
+      const companyUsers = await User.find({ companyId: companyObjectId }).select('_id').exec();
+      const userIds = companyUsers.map(u => u._id);
+
+      if (userIds.length === 0) return [];
+
+      const threshold = options.threshold || 10000; // Default 10,000
+      const limit = options.limit || 50;
+
+      const matchFilter: any = {
+        userId: { $in: userIds },
+        status: { $in: [ExpenseStatus.APPROVED, ExpenseStatus.PENDING] },
+        amount: { $gte: threshold },
+      };
+
+      if (options.fromDate || options.toDate) {
+        matchFilter.expenseDate = {};
+        if (options.fromDate) matchFilter.expenseDate.$gte = options.fromDate;
+        if (options.toDate) matchFilter.expenseDate.$lte = options.toDate;
+      }
+
+      // Get high-value expenses
+      const expenses = await Expense.find(matchFilter)
+        .populate('userId', 'name email')
+        .populate('categoryId', 'name')
+        .populate('projectId', 'name code')
+        .populate('reportId', 'name status')
+        .select('vendor amount currency expenseDate status notes createdAt')
+        .sort({ amount: -1 })
+        .limit(limit)
+        .exec();
+
+      // Format expenses
+      const formattedExpenses = expenses.map((expense) => ({
+        id: (expense._id as mongoose.Types.ObjectId).toString(),
+        vendor: expense.vendor,
+        amount: expense.amount,
+        currency: expense.currency,
+        expenseDate: expense.expenseDate,
+        status: expense.status,
+        notes: expense.notes,
+        createdAt: expense.createdAt,
+        user: expense.userId ? {
+          id: (expense.userId as any)._id?.toString(),
+          name: (expense.userId as any).name,
+          email: (expense.userId as any).email,
+        } : null,
+        category: expense.categoryId ? {
+          id: (expense.categoryId as any)._id?.toString(),
+          name: (expense.categoryId as any).name,
+        } : null,
+        project: expense.projectId ? {
+          id: (expense.projectId as any)._id?.toString(),
+          name: (expense.projectId as any).name,
+          code: (expense.projectId as any).code,
+        } : null,
+        report: expense.reportId ? {
+          id: (expense.reportId as any)._id?.toString(),
+          name: (expense.reportId as any).name,
+          status: (expense.reportId as any).status,
+        } : null,
+      }));
+
+      return formattedExpenses;
+    } catch (error) {
+      logger.error({ error, companyId }, 'Error getting high-value expenses');
+      return [];
+    }
+  }
 }
 
