@@ -29,6 +29,7 @@ import reportsRoutes from './routes/reports.routes';
 import serviceAccountRoutes from './routes/serviceAccount.routes';
 import superAdminRoutes from './routes/superAdmin.routes';
 import usersRoutes from './routes/users.routes';
+import analyticsRoutes from './routes/analytics.routes';
 
 import { logger } from '@/config/logger';
 
@@ -66,7 +67,7 @@ export const createApp = (): Express => {
         origin: true, // Allow all origins in development
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'x-api-key'],
       })
     );
   } else {
@@ -96,7 +97,7 @@ export const createApp = (): Express => {
         },
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'x-api-key'],
       })
     );
   }
@@ -110,6 +111,10 @@ export const createApp = (): Express => {
 
   // API request logging (for analytics) - after rate limiting but before routes
   app.use('/api/v1', apiLoggerMiddleware);
+
+  // Analytics routes (read-only, API key only, no JWT required)
+  // Must be registered BEFORE auth middleware to bypass JWT requirement
+  app.use('/api/v1/analytics', analyticsRoutes);
 
   // Health check endpoint (legacy)
   app.get('/health', (_req, res) => {

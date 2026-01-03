@@ -57,4 +57,7 @@ export const config = {
     queueName: 'ocr-jobs',
     concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '3', 10),
   },
+  analytics: {
+    apiKey: process.env.ANALYTICS_API_KEY || '',
+  },
 };

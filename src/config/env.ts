@@ -58,6 +58,9 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'fatal']).default('info'),
   LOG_PRETTY: z.string().optional(),
   REQUEST_ID_HEADER: z.string().default('X-Request-ID'),
+
+  // Analytics API (for Microsoft Fabric / Power BI)
+  ANALYTICS_API_KEY: z.string().min(32, 'ANALYTICS_API_KEY must be at least 32 characters').optional(),
 });
 
 /**
