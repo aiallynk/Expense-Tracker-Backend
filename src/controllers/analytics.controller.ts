@@ -11,18 +11,10 @@ export class AnalyticsController {
    * Query params: companyId (required), fromDate?, toDate?
    */
   static getDashboard = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
-
-    // Validate companyId exists
+    // Validate companyId exists in database
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
       res.status(404).json({
@@ -70,16 +62,8 @@ export class AnalyticsController {
    * Query params: companyId (required), fromDate?, toDate?
    */
   static getDepartmentWiseExpenses = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
@@ -108,16 +92,8 @@ export class AnalyticsController {
    * Query params: companyId (required), fromDate?, toDate?
    */
   static getProjectWiseExpenses = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
@@ -146,16 +122,8 @@ export class AnalyticsController {
    * Query params: companyId (required), fromDate?, toDate?
    */
   static getCostCentreWiseExpenses = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
@@ -184,16 +152,8 @@ export class AnalyticsController {
    * Query params: companyId (required), fromDate?, toDate?
    */
   static getCategoryWiseExpenses = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
@@ -222,16 +182,8 @@ export class AnalyticsController {
    * Query params: companyId (required), months? (default: 12)
    */
   static getMonthlyTrends = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
@@ -267,16 +219,8 @@ export class AnalyticsController {
    * Query params: companyId (required), page?, pageSize?, fromDate?, toDate?, status?
    */
   static getReports = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {
@@ -333,16 +277,8 @@ export class AnalyticsController {
    * Query params: companyId (required), page?, pageSize?, fromDate?, toDate?, status?
    */
   static getExpenses = asyncHandler(async (req: AnalyticsRequest, res: Response) => {
-    const companyId = req.query.companyId as string;
-
-    if (!companyId) {
-      res.status(400).json({
-        success: false,
-        message: 'companyId query parameter is required',
-        code: 'MISSING_COMPANY_ID',
-      });
-      return;
-    }
+    // companyId is already validated and sanitized by middleware
+    const companyId = req.companyId!;
 
     const isValid = await AnalyticsService.validateCompanyId(companyId);
     if (!isValid) {

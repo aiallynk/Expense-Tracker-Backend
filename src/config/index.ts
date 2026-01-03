@@ -58,6 +58,8 @@ export const config = {
     concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '3', 10),
   },
   analytics: {
-    apiKey: process.env.ANALYTICS_API_KEY || '',
+    // Trim whitespace and newlines from API key
+    // This prevents issues with .env files that may have trailing newlines
+    apiKey: (process.env.ANALYTICS_API_KEY || '').trim().replace(/\r?\n/g, ''),
   },
 };
