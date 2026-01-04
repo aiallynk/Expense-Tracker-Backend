@@ -98,7 +98,7 @@ export class CurrencyController {
    * GET /api/v1/currency/supported
    * Get list of supported currencies
    */
-  static async getSupportedCurrencies(req: Request, res: Response): Promise<void> {
+  static async getSupportedCurrencies(_req: Request, res: Response): Promise<void> {
     try {
       const currencies = currencyService.getSupportedCurrencies();
 

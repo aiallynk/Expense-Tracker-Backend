@@ -1,6 +1,6 @@
 import { logger } from '@/config/logger';
 import { redisConnection, isRedisAvailable } from '@/config/queue';
-import { ExchangeRate, IExchangeRate } from '@/models/ExchangeRate';
+import { ExchangeRate } from '@/models/ExchangeRate';
 
 interface ExchangeRates {
   [currency: string]: number;
@@ -10,7 +10,6 @@ interface ExchangeRates {
 const SUPPORTED_CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', 'CHF'];
 
 class CurrencyService {
-  private readonly CACHE_DURATION = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
   private readonly API_URL = 'https://api.exchangerate-api.com/v4/latest/USD';
   private readonly REDIS_KEY_PREFIX = 'exchange_rates:';
   private readonly REDIS_CACHE_TTL = 24 * 60 * 60; // 24 hours in seconds
@@ -53,10 +52,15 @@ class CurrencyService {
       const dbRates = await ExchangeRate.findOne({ date: dateString }).exec();
       if (dbRates && dbRates.rates) {
         const rates: ExchangeRates = {};
-        // Convert Map to object
-        dbRates.rates.forEach((value: number, key: string) => {
-          rates[key] = value;
-        });
+        // Convert Map to object - handle both Map instance and plain object
+        if (dbRates.rates instanceof Map) {
+          dbRates.rates.forEach((value: number, key: string) => {
+            rates[key] = value;
+          });
+        } else {
+          // If it's already a plain object, use it directly
+          Object.assign(rates, dbRates.rates);
+        }
 
         // Cache in Redis for future use
         if (isRedisAvailable() && redisConnection) {
@@ -168,9 +172,15 @@ class CurrencyService {
       const dbRates = await ExchangeRate.findOne({ date: dateString }).exec();
       if (dbRates && dbRates.rates) {
         const rates: ExchangeRates = {};
-        dbRates.rates.forEach((value: number, key: string) => {
-          rates[key] = value;
-        });
+        // Convert Map to object - handle both Map instance and plain object
+        if (dbRates.rates instanceof Map) {
+          dbRates.rates.forEach((value: number, key: string) => {
+            rates[key] = value;
+          });
+        } else {
+          // If it's already a plain object, use it directly
+          Object.assign(rates, dbRates.rates);
+        }
         logger.warn('Using stale cached exchange rates due to API error');
         return rates;
       }
