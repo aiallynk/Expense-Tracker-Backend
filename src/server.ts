@@ -11,6 +11,7 @@ import { redisConnection , ocrQueue } from './config/queue';
 import { CompanyAdminDashboardService } from './services/companyAdminDashboard.service';
 import { SystemAnalyticsService } from './services/systemAnalytics.service';
 import { initializeSocketServer } from './socket/socketServer';
+import { startExchangeRateWorker } from './worker/exchangeRate.worker';
 
 import { logger } from '@/config/logger';
 
@@ -195,6 +196,9 @@ const initializeServices = async (): Promise<void> => {
         logger.error({ error: err }, 'Error in periodic company admin dashboard update');
       });
     }, 30000);
+
+    // Start exchange rate worker (daily cron job)
+    startExchangeRateWorker();
 
     logger.info('Periodic analytics services started');
   } catch (error) {

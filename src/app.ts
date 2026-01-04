@@ -30,6 +30,7 @@ import serviceAccountRoutes from './routes/serviceAccount.routes';
 import superAdminRoutes from './routes/superAdmin.routes';
 import usersRoutes from './routes/users.routes';
 import analyticsRoutes from './routes/analytics.routes';
+import currencyRoutes from './routes/currency.routes';
 
 import { logger } from '@/config/logger';
 
@@ -194,6 +195,9 @@ export const createApp = (): Express => {
 
   // Accountant routes
   app.use('/api/v1/accountant', accountantRoutes);
+
+  // Currency routes
+  app.use('/api/v1/currency', currencyRoutes);
 
   // 404 handler
   app.use((_req, res) => {
