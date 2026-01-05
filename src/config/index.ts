@@ -63,3 +63,10 @@ export const config = {
     apiKey: (process.env.ANALYTICS_API_KEY || '').trim().replace(/\r?\n/g, ''),
   },
 };
+
+// Log analytics API key status at startup (length only, not value)
+if (config.analytics.apiKey && config.analytics.apiKey.length > 0) {
+  console.log(`[CONFIG] Analytics API Key loaded (length: ${config.analytics.apiKey.length} characters)`);
+} else {
+  console.warn('[CONFIG] WARNING: ANALYTICS_API_KEY not configured or empty');
+}

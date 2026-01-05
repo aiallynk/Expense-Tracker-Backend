@@ -9,6 +9,7 @@ import { apiLoggerMiddleware } from './middleware/apiLogger.middleware';
 import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
+import { urlSanitizerMiddleware } from './middleware/urlSanitizer.middleware';
 import adminRoutes from './routes/admin.routes';
 import accountantRoutes from './routes/accountant.routes';
 import authRoutes from './routes/auth.routes';
@@ -45,6 +46,10 @@ export const createApp = (): Express => {
 
   // Request ID middleware (must be first to add requestId to all requests)
   app.use(requestIdMiddleware);
+
+  // URL sanitization middleware (fixes %0A bug from Microsoft Fabric / Power BI)
+  // Must be early in chain, before routes, to sanitize URLs before route matching
+  app.use(urlSanitizerMiddleware);
 
   // Security middleware
   if (config.app.env === 'development') {
