@@ -2,9 +2,9 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { CostCentresService } from '../services/costCentres.service';
-import { User } from '../models/User';
 import { CompanyAdmin } from '../models/CompanyAdmin';
+import { User } from '../models/User';
+import { CostCentresService } from '../services/costCentres.service';
 import {
   createCostCentreSchema,
   updateCostCentreSchema,

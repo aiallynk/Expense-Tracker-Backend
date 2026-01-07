@@ -149,6 +149,10 @@ expenseReportSchema.index({ projectId: 1, status: 1 });
 expenseReportSchema.index({ status: 1, createdAt: -1 });
 expenseReportSchema.index({ 'approvers.userId': 1 });
 
+// Indexes for approval history queries
+expenseReportSchema.index({ employeeName: 1 });
+expenseReportSchema.index({ projectId: 1, employeeName: 1 });
+
 // Validation
 expenseReportSchema.pre('save', function (next) {
   if (this.fromDate > this.toDate) {

@@ -4,9 +4,9 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { NotificationService } from '../services/notification.service';
 import { NotificationDataService } from '../services/notificationData.service';
+import { emitNotificationToRole, emitToCompanyAdmin, CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
 import { BroadcastTargetType } from '../utils/enums';
 import { getAllUsersTopic, getCompanyTopic, getRoleTopic } from '../utils/topicUtils';
-import { emitNotificationToRole, emitToCompanyAdmin, CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
 
 import { logger } from '@/config/logger';
 

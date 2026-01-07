@@ -15,6 +15,7 @@ export interface IExpense extends Document {
   // Invoice fields for duplicate detection
   invoiceId?: string; // Invoice number/ID
   invoiceDate?: Date; // Invoice date
+  invoiceFingerprint?: string; // Normalized composite fingerprint for duplicate detection
   status: ExpenseStatus;
   source: ExpenseSource;
   notes?: string;
@@ -23,6 +24,10 @@ export interface IExpense extends Document {
   // Bulk upload tracking
   sourceDocumentType?: 'pdf' | 'excel' | 'image';
   sourceDocumentSequence?: number; // Receipt number in the source document (page number for PDF)
+  // Advance cash (imprest)
+  advanceAppliedAmount?: number; // user-intended amount to apply; actual deduction happens on final approval
+  advanceCurrency?: string; // currency used for advance application (defaults to expense currency)
+  advanceAppliedAt?: Date; // set when the deduction is actually applied
   // Manager feedback
   managerComment?: string; // Comment from manager when rejecting/requesting changes
   managerAction?: 'approve' | 'reject' | 'request_changes'; // Last manager action
@@ -80,6 +85,10 @@ const expenseSchema = new Schema<IExpense>(
     invoiceDate: {
       type: Date,
     },
+    invoiceFingerprint: {
+      type: String,
+      trim: true,
+    },
     status: {
       type: String,
       enum: Object.values(ExpenseStatus),
@@ -112,6 +121,20 @@ const expenseSchema = new Schema<IExpense>(
     sourceDocumentSequence: {
       type: Number, // Receipt number in the source document (page number for PDF, row for Excel)
     },
+    // Advance cash (imprest)
+    advanceAppliedAmount: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    advanceCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+    },
+    advanceAppliedAt: {
+      type: Date,
+    },
     // Manager feedback
     managerComment: {
       type: String,
@@ -141,6 +164,16 @@ expenseSchema.index({ vendor: 1, expenseDate: 1 });
 expenseSchema.index({ expenseDate: -1 });
 // Index for duplicate invoice detection
 expenseSchema.index({ invoiceId: 1, vendor: 1, invoiceDate: 1, amount: 1 }, { sparse: true });
+// Fast lookup index for normalized fingerprint, excluding drafts (drafts are intentionally ignored)
+expenseSchema.index(
+  { invoiceFingerprint: 1 },
+  {
+    partialFilterExpression: {
+      invoiceFingerprint: { $exists: true },
+      status: { $ne: ExpenseStatus.DRAFT },
+    },
+  }
+);
 
 export const Expense = mongoose.model<IExpense>('Expense', expenseSchema);
 

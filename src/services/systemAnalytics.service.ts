@@ -237,7 +237,7 @@ export class SystemAnalyticsService {
 
       logger.debug('System analytics collected and emitted');
     } catch (error) {
-      logger.error({ error: error }, 'Error collecting system analytics:');
+      logger.error({ error }, 'Error collecting system analytics:');
     }
   }
 
@@ -448,7 +448,7 @@ export class SystemAnalyticsService {
 
       logger.debug('Dashboard analytics collected and emitted');
     } catch (error) {
-      logger.error({ error: error }, 'Error collecting dashboard analytics:');
+      logger.error({ error }, 'Error collecting dashboard analytics:');
     }
   }
 }

@@ -99,7 +99,7 @@ export class EmployeeIdService {
       logger.info(`Generated employee ID: ${employeeId} for company: ${company.name}`);
       return employeeId;
     } catch (error: any) {
-      logger.error({ error: error }, 'Error generating employee ID:');
+      logger.error({ error }, 'Error generating employee ID:');
       throw new Error(`Failed to generate employee ID: ${error.message}`);
     }
   }
@@ -148,7 +148,7 @@ export class EmployeeIdService {
       logger.info(`Assigned employee ID ${employeeId} to user ${userId}`);
       return employeeId;
     } catch (error: any) {
-      logger.error({ error: error }, 'Error assigning employee ID:');
+      logger.error({ error }, 'Error assigning employee ID:');
       throw error;
     }
   }

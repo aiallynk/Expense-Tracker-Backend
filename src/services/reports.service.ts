@@ -1,33 +1,40 @@
 import mongoose from 'mongoose';
 
+import { AuthRequest } from '../middleware/auth.middleware';
+import { ApprovalRule, ApprovalRuleTriggerType, ApprovalRuleApproverRole } from '../models/ApprovalRule';
+import { ApproverMapping } from '../models/ApproverMapping';
+import { CompanySettings } from '../models/CompanySettings';
+import { CostCentre } from '../models/CostCentre';
 import { Expense } from '../models/Expense';
 import {
   ExpenseReport,
   IExpenseReport,
   IApprover,
 } from '../models/ExpenseReport';
-import { User } from '../models/User';
 import { Project } from '../models/Project';
-import { CostCentre } from '../models/CostCentre';
-import { ApprovalRule, ApprovalRuleTriggerType, ApprovalRuleApproverRole } from '../models/ApprovalRule';
-import { ApproverMapping } from '../models/ApproverMapping';
-import { CompanySettings } from '../models/CompanySettings';
+import { User } from '../models/User';
 import { emitCompanyAdminDashboardUpdate, emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
+import { buildCompanyQuery } from '../utils/companyAccess';
 import { CreateReportDto, UpdateReportDto, ReportFiltersDto } from '../utils/dtoTypes';
-import { ExpenseReportStatus, UserRole, ExpenseStatus , AuditAction } from '../utils/enums';
+import { ExpenseReportStatus, UserRole, ExpenseStatus, AuditAction } from '../utils/enums';
 import { getPaginationOptions, createPaginatedResult } from '../utils/pagination';
 
+import { ApprovalService } from './ApprovalService';
 import { AuditService } from './audit.service';
-import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
-import { NotificationService } from './notification.service';
-import { DuplicateInvoiceService } from './duplicateInvoice.service';
 import { BusinessHeadSelectionService } from './businessHeadSelection.service';
-import { buildCompanyQuery } from '../utils/companyAccess';
-import { AuthRequest } from '../middleware/auth.middleware';
+import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
+import { DuplicateInvoiceService } from './duplicateInvoice.service';
+import { NotificationService } from './notification.service';
 
 import { logger } from '@/config/logger';
 
 export class ReportsService {
+  private static buildDefaultReportName(fromDate: Date, employeeName: string): string {
+    const month = fromDate.toLocaleString('en-US', { month: 'long' });
+    const safeEmployee = employeeName?.trim() || 'Employee';
+    return `Expense Report – ${month} – ${safeEmployee}`;
+  }
+
   static async createReport(
     userId: string,
     data: CreateReportDto
@@ -67,15 +74,26 @@ export class ReportsService {
         }
       }
 
+      const fromDate = new Date(data.fromDate);
+      const toDate = new Date(data.toDate);
+      const requestedName = (data.name || '').trim();
+      let finalName = requestedName;
+
+      if (!finalName) {
+        const user = await User.findById(userId).select('name email').exec();
+        const employeeName = (user?.name || user?.email || 'Employee').toString();
+        finalName = this.buildDefaultReportName(fromDate, employeeName);
+      }
+
       const report = new ExpenseReport({
         userId,
         projectId,
         projectName: data.projectName?.trim() || undefined,
         costCentreId,
-        name: data.name,
+        name: finalName,
         notes: data.notes,
-        fromDate: new Date(data.fromDate),
-        toDate: new Date(data.toDate),
+        fromDate,
+        toDate,
         status: ExpenseReportStatus.DRAFT,
       });
 
@@ -176,7 +194,7 @@ export class ReportsService {
 
     // Get expenses count for each report
     let reportsWithExpenses: any[] = reports.map((r) => r.toObject());
-    
+
     if (reports.length > 0) {
       const reportIds = reports.map((r) => r._id as mongoose.Types.ObjectId);
       const expensesCounts = await Expense.aggregate([
@@ -187,8 +205,8 @@ export class ReportsService {
       // Create a map of reportId -> expenses count
       const expensesCountMap = new Map<string, number>();
       expensesCounts.forEach((item) => {
-        const reportId = item._id instanceof mongoose.Types.ObjectId 
-          ? item._id.toString() 
+        const reportId = item._id instanceof mongoose.Types.ObjectId
+          ? item._id.toString()
           : String(item._id);
         expensesCountMap.set(reportId, item.count);
       });
@@ -239,7 +257,7 @@ export class ReportsService {
     // Handle both populated and non-populated userId
     let reportUserId: string;
     const userIdValue: any = report.userId;
-    
+
     if (userIdValue && typeof userIdValue === 'object') {
       // Check if it's a populated document (has _id property)
       if ('_id' in userIdValue && userIdValue._id) {
@@ -256,9 +274,9 @@ export class ReportsService {
       // userId is a string or primitive
       reportUserId = String(userIdValue);
     }
-    
+
     const requestingUserIdStr = String(requestingUserId);
-    
+
     logger.debug({
       reportId: id,
       reportUserId,
@@ -267,10 +285,10 @@ export class ReportsService {
       userIdType: typeof userIdValue,
       userIdIsObject: typeof userIdValue === 'object',
     }, 'Checking report access');
-    
+
     // Check access: owner, admin, business head, or company admin (if report user is in their company)
     let hasAccess = false;
-    
+
     if (reportUserId === requestingUserIdStr) {
       // Owner has access
       hasAccess = true;
@@ -281,14 +299,14 @@ export class ReportsService {
       // For all other roles (ADMIN, BUSINESS_HEAD, COMPANY_ADMIN, etc.), check company access
       try {
         const { User } = await import('../models/User');
-        
+
         // Get report user's company ID
         const reportUser = await User.findById(reportUserId).select('companyId').exec();
         if (!reportUser || !reportUser.companyId) {
           hasAccess = false;
         } else {
           const reportCompanyId = reportUser.companyId.toString();
-          
+
           // For COMPANY_ADMIN, check their company
           if (requestingUserRole === 'COMPANY_ADMIN') {
             const { CompanyAdmin } = await import('../models/CompanyAdmin');
@@ -310,7 +328,7 @@ export class ReportsService {
         hasAccess = false;
       }
     }
-    
+
     if (!hasAccess) {
       logger.warn({
         reportId: id,
@@ -438,7 +456,7 @@ export class ReportsService {
   static async computeApproverChain(report: IExpenseReport): Promise<IApprover[]> {
     const approvers: IApprover[] = [];
     const reportUser = await User.findById(report.userId);
-    
+
     if (!reportUser) {
       throw new Error('Report owner not found');
     }
@@ -509,23 +527,23 @@ export class ReportsService {
             userId: manager._id as mongoose.Types.ObjectId,
             role: manager.role,
           });
-          logger.info({ 
-            employeeId: reportUser._id, 
+          logger.info({
+            employeeId: reportUser._id,
             managerId: manager._id,
-            managerRole: manager.role 
+            managerRole: manager.role
           }, 'Assigned manager as Level 1 approver');
         } else {
-          logger.warn({ 
-            employeeId: reportUser._id, 
+          logger.warn({
+            employeeId: reportUser._id,
             managerId: reportUser.managerId,
-            managerStatus: manager?.status 
+            managerStatus: manager?.status
           }, 'Manager not found or inactive, skipping Level 1 approver assignment');
         }
       } else {
-        logger.warn({ 
+        logger.warn({
           employeeId: reportUser._id,
           hasManagerId: !!reportUser.managerId,
-          approvalLevels 
+          approvalLevels
         }, 'Employee has no managerId or approvalLevels < 1, cannot assign Level 1 approver');
       }
 
@@ -583,7 +601,7 @@ export class ReportsService {
 
             if (approver) {
               approvers.push({
-                level: level,
+                level,
                 userId: approver._id as mongoose.Types.ObjectId,
                 role: approver.role,
               });
@@ -603,7 +621,7 @@ export class ReportsService {
               const nextApprover = await User.findById(lastApproverUser.managerId);
               if (nextApprover && nextApprover.status === 'ACTIVE') {
                 approvers.push({
-                  level: level,
+                  level,
                   userId: nextApprover._id as mongoose.Types.ObjectId,
                   role: nextApprover.role,
                 });
@@ -624,12 +642,12 @@ export class ReportsService {
     const AMOUNT_THRESHOLD = 5000;
     if (report.totalAmount > AMOUNT_THRESHOLD) {
       const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
-      
+
       // If approvalMatrix is configured, use next enabled level
       if (approvalMatrix) {
         const nextLevel = maxLevel + 1;
         let nextLevelConfig = null;
-        
+
         if (nextLevel === 3 && approvalMatrix.level3?.enabled) {
           nextLevelConfig = approvalMatrix.level3;
         } else if (nextLevel === 4 && approvalMatrix.level4?.enabled) {
@@ -701,10 +719,10 @@ export class ReportsService {
     // STEP 4: Evaluate additional approval rules (budget-based)
     if (reportUser.companyId) {
       const additionalApprovers = await this.evaluateAdditionalApprovalRules(report, reportUser.companyId);
-      
+
       // Insert additional approvers after the last normal approver
       const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
-      
+
       additionalApprovers.forEach((additionalApprover, index) => {
         approvers.push({
           ...additionalApprover,
@@ -744,7 +762,7 @@ export class ReportsService {
     companyId: mongoose.Types.ObjectId
   ): Promise<IApprover[]> {
     const additionalApprovers: IApprover[] = [];
-    
+
     try {
       // Get all active approval rules for this company
       const activeRules = await ApprovalRule.find({
@@ -777,7 +795,7 @@ export class ReportsService {
                 const currentSpent = project.spentAmount || 0;
                 const projectedSpent = currentSpent + report.totalAmount;
                 const thresholdAmount = (project.budget * project.thresholdPercentage) / 100;
-                
+
                 if (projectedSpent >= thresholdAmount) {
                   shouldTrigger = true;
                   triggerReason = `Project budget threshold (${project.thresholdPercentage}% = ₹${thresholdAmount.toLocaleString('en-IN')}) will be exceeded`;
@@ -794,7 +812,7 @@ export class ReportsService {
                 const currentSpent = costCentre.spentAmount || 0;
                 const projectedSpent = currentSpent + report.totalAmount;
                 const thresholdAmount = (costCentre.budget * costCentre.thresholdPercentage) / 100;
-                
+
                 if (projectedSpent >= thresholdAmount) {
                   shouldTrigger = true;
                   triggerReason = `Cost centre budget threshold (${costCentre.thresholdPercentage}% = ₹${thresholdAmount.toLocaleString('en-IN')}) will be exceeded`;
@@ -854,7 +872,7 @@ export class ReportsService {
     };
 
     const targetRoles = roleMap[approverRole] || [];
-    
+
     if (targetRoles.length === 0) {
       return null;
     }
@@ -881,8 +899,8 @@ export class ReportsService {
     }
 
     // Allow submitting if report is DRAFT or CHANGES_REQUESTED (for resubmission)
-    const canSubmit = 
-      report.status === ExpenseReportStatus.DRAFT || 
+    const canSubmit =
+      report.status === ExpenseReportStatus.DRAFT ||
       report.status === ExpenseReportStatus.CHANGES_REQUESTED;
 
     if (!canSubmit) {
@@ -892,20 +910,20 @@ export class ReportsService {
     // If report was previously CHANGES_REQUESTED, check if there are any PENDING or REJECTED expenses
     // These must be addressed before resubmission
     if (report.status === ExpenseReportStatus.CHANGES_REQUESTED) {
-      const pendingExpensesCount = await Expense.countDocuments({ 
-        reportId: id, 
-        status: ExpenseStatus.PENDING 
+      const pendingExpensesCount = await Expense.countDocuments({
+        reportId: id,
+        status: ExpenseStatus.PENDING
       });
-      
-      const rejectedExpensesCount = await Expense.countDocuments({ 
-        reportId: id, 
-        status: ExpenseStatus.REJECTED 
+
+      const rejectedExpensesCount = await Expense.countDocuments({
+        reportId: id,
+        status: ExpenseStatus.REJECTED
       });
-      
+
       if (pendingExpensesCount > 0) {
         throw new Error('Please update all expenses that need changes before resubmitting');
       }
-      
+
       if (rejectedExpensesCount > 0) {
         throw new Error('Please update or delete all rejected expenses before resubmitting');
       }
@@ -931,42 +949,84 @@ export class ReportsService {
       }
     }
 
-    // Compute approver chain
-    const approvers = await this.computeApproverChain(report);
-    if (approvers.length === 0) {
-      logger.error({ reportId: id, userId }, 'No approvers found for report');
-      throw new Error('No approvers found for this report');
-    }
+    // Track approvers for audit/logging without relying on a scoped variable
+    let approvalInstanceIdForAudit: string | undefined;
 
-    logger.info({ 
-      reportId: id, 
-      userId, 
-      approversCount: approvers.length,
-      approvers: approvers.map(a => ({ level: a.level, userId: a.userId.toString(), role: a.role }))
-    }, 'Computed approver chain for report submission');
+    // Use the NEW Approval Matrix System
+    if (reportUser && reportUser.companyId) {
+      try {
+        // Initiate approval using the ApprovalService (Matrix-based)
+        const approvalInstance = await ApprovalService.initiateApproval(
+          reportUser.companyId.toString(),
+          id,
+          'EXPENSE_REPORT',
+          report
+        );
+        approvalInstanceIdForAudit = (approvalInstance._id as any)?.toString?.() || String(approvalInstance._id);
 
-    // Set initial status based on approval levels
-    // If there are approvers, set to PENDING_APPROVAL_L1, otherwise SUBMITTED
-    let initialStatus = ExpenseReportStatus.SUBMITTED;
-    if (approvers.length > 0) {
-      const firstApprover = approvers[0];
-      if (firstApprover.level === 1) {
-        initialStatus = ExpenseReportStatus.PENDING_APPROVAL_L1;
-      } else {
-        initialStatus = ExpenseReportStatus.SUBMITTED;
+        logger.info({
+          reportId: id,
+          userId,
+          approvalInstanceId: approvalInstance._id,
+          currentLevel: approvalInstance.currentLevel,
+          status: approvalInstance.status
+        }, 'Approval instance created via ApprovalService');
+
+        // Set initial status based on approval instance status
+        if (approvalInstance.status === 'PENDING') {
+          report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
+        } else if (approvalInstance.status === 'APPROVED') {
+          // Matrix has no levels or all levels skipped - auto-approved
+          report.status = ExpenseReportStatus.APPROVED;
+          report.approvedAt = new Date();
+        } else {
+          report.status = ExpenseReportStatus.SUBMITTED;
+        }
+
+        // Clear the old approvers array since we're using ApprovalInstance now
+        report.approvers = [];
+
+      } catch (error: any) {
+        logger.error({
+          error: error.message,
+          stack: error.stack,
+          reportId: id,
+          companyId: reportUser.companyId.toString()
+        }, 'Failed to initiate approval via ApprovalService');
+
+        // If ApprovalService fails, fall back to the old manual system
+        logger.warn({ reportId: id }, 'Falling back to manual approval chain computation');
+        const approvers = await this.computeApproverChain(report);
+
+        if (approvers.length === 0) {
+          logger.error({ reportId: id, userId }, 'No approvers found for report (fallback)');
+          throw new Error('No approvers found for this report. Please ensure an approval matrix is configured or assign a manager to your account.');
+        }
+
+        report.approvers = approvers;
+        report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
       }
+    } else {
+      // No company - shouldn't happen, but fallback to old system
+      logger.warn({ reportId: id, userId }, 'Report user has no company, using fallback approval');
+      const approvers = await this.computeApproverChain(report);
+
+      if (approvers.length === 0) {
+        throw new Error('No approvers found for this report. Please ensure an approval matrix is configured or assign a manager to your account.');
+      }
+
+      report.approvers = approvers;
+      report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
     }
 
-    report.status = initialStatus;
     report.submittedAt = new Date();
     report.updatedBy = new mongoose.Types.ObjectId(userId);
-    report.approvers = approvers;
-    
-    logger.info({ 
-      reportId: id, 
-      status: initialStatus,
-      approversCount: approvers.length 
-    }, 'Report status set and approvers assigned');
+
+    logger.info({
+      reportId: id,
+      status: report.status,
+      approversCount: report.approvers.length
+    }, 'Report status set and ready to save');
 
     const saved = await report.save();
 
@@ -975,20 +1035,27 @@ export class ReportsService {
       'ExpenseReport',
       id,
       AuditAction.STATUS_CHANGE,
-      { status: ExpenseReportStatus.SUBMITTED, approvers: approvers.map(a => ({ level: a.level, userId: a.userId.toString() })) }
+      {
+        status: saved.status,
+        approvers: (saved.approvers || []).map((a: any) => ({
+          level: a.level,
+          userId: a.userId?.toString ? a.userId.toString() : String(a.userId),
+        })),
+        approvalInstanceId: approvalInstanceIdForAudit,
+      }
     );
 
     // Notify approvers - reload report to ensure approvers are properly serialized
     try {
       logger.info({ reportId: saved._id, approversCount: saved.approvers.length }, 'Sending notifications to approvers');
-      
+
       // Reload report to ensure all fields are properly populated
       const reportForNotification = await ExpenseReport.findById(saved._id).exec();
       if (!reportForNotification) {
         logger.error({ reportId: saved._id }, 'Report not found after save, cannot send notifications');
       } else {
-        logger.info({ 
-          reportId: reportForNotification._id, 
+        logger.info({
+          reportId: reportForNotification._id,
           approversCount: reportForNotification.approvers.length,
           approvers: reportForNotification.approvers.map((a: any) => ({
             level: a.level,
@@ -997,7 +1064,7 @@ export class ReportsService {
             decidedAt: a.decidedAt
           }))
         }, 'Report loaded for notification, approvers verified');
-        
+
         await NotificationService.notifyReportSubmitted(reportForNotification);
         logger.info({ reportId: saved._id }, 'Notifications sent successfully');
       }
@@ -1010,14 +1077,14 @@ export class ReportsService {
     try {
       // Get the user who submitted the report
       const reportUser = await User.findById(report.userId).select('managerId').exec();
-      
+
       if (reportUser && reportUser.managerId) {
         // Emit to manager that a report was submitted
         const populatedReport = await ExpenseReport.findById(saved._id)
           .populate('userId', 'name email')
           .populate('projectId', 'name code')
           .exec();
-        
+
         if (populatedReport) {
           emitManagerReportUpdate(reportUser.managerId.toString(), 'submitted', populatedReport);
           emitManagerDashboardUpdate(reportUser.managerId.toString());
@@ -1048,7 +1115,7 @@ export class ReportsService {
     // SECURITY: Verify approver is from same company as report
     const reportUser = await User.findById(report.userId).select('companyId').exec();
     const approverUser = await User.findById(userId).select('companyId').exec();
-    
+
     if (!reportUser || !approverUser) {
       throw new Error('Invalid user or approver');
     }
@@ -1057,7 +1124,7 @@ export class ReportsService {
     if (approverUser.role !== 'SUPER_ADMIN') {
       const reportCompanyId = reportUser.companyId?.toString();
       const approverCompanyId = approverUser.companyId?.toString();
-      
+
       if (reportCompanyId !== approverCompanyId) {
         logger.warn({
           reportId: id,
@@ -1131,10 +1198,10 @@ export class ReportsService {
       // Reset approval chain - will be recomputed on resubmission
       // This ensures that if employee structure changes, new approvers are assigned
       report.approvers = [];
-      
+
       // Set status to CHANGES_REQUESTED (not DRAFT) to indicate changes are needed
       report.status = ExpenseReportStatus.CHANGES_REQUESTED;
-      
+
       // Log the approval chain reset for audit purposes
       logger.info(
         { reportId: id, approverId: userId, level: currentLevel },
@@ -1144,6 +1211,12 @@ export class ReportsService {
 
     report.updatedBy = new mongoose.Types.ObjectId(userId);
     const saved = await report.save();
+
+    // Post-approval side-effect: apply advance cash deductions (does not affect approval routing)
+    if (saved.status === ExpenseReportStatus.APPROVED) {
+      const { AdvanceCashService } = await import('./advanceCash.service');
+      await AdvanceCashService.applyAdvanceForReport(id);
+    }
 
     await AuditService.log(
       userId,
@@ -1164,7 +1237,7 @@ export class ReportsService {
       const nextLevelApprovers = saved.approvers.filter(
         (a: any) => a.level === currentLevel + 1 && !a.decidedAt
       );
-      
+
       if (nextLevelApprovers.length > 0) {
         await NotificationService.notifyNextApprover(saved, nextLevelApprovers);
       }
@@ -1177,8 +1250,15 @@ export class ReportsService {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     const baseQuery: any = {};
 
+    // Company admins should only see reports that are in approval workflow or completed
+    // Exclude DRAFT reports by default unless explicitly requested
     if (filters.status) {
       baseQuery.status = filters.status;
+    } else {
+      // Default: exclude DRAFT status for company admins
+      baseQuery.status = {
+        $ne: ExpenseReportStatus.DRAFT
+      };
     }
 
     if (filters.userId) {
@@ -1248,14 +1328,14 @@ export class ReportsService {
       try {
         const expenses = await Expense.find({ reportId: new mongoose.Types.ObjectId(id) }).exec();
         const reportUserId = saved.userId.toString();
-        
+
         // Update all expenses to APPROVED
         await Expense.updateMany(
           { reportId: new mongoose.Types.ObjectId(id) },
-          { 
-            $set: { 
-              status: ExpenseStatus.APPROVED 
-            } 
+          {
+            $set: {
+              status: ExpenseStatus.APPROVED
+            }
           }
         );
         logger.info(`Approved all expenses for report ${id}`);
@@ -1274,6 +1354,10 @@ export class ReportsService {
         logger.error({ error, reportId: id }, 'Error approving expenses for report');
         // Don't fail report approval if expense update fails
       }
+
+      // Post-approval side-effect: apply advance cash deductions (does not affect approval routing)
+      const { AdvanceCashService } = await import('./advanceCash.service');
+      await AdvanceCashService.applyAdvanceForReport(id);
     }
 
     await AuditService.log(

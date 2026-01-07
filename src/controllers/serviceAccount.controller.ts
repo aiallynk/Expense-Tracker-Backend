@@ -3,9 +3,9 @@ import { z } from 'zod';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { ServiceAccountService } from '../services/serviceAccount.service';
 import { CompanyAdmin } from '../models/CompanyAdmin';
 import { User } from '../models/User';
+import { ServiceAccountService } from '../services/serviceAccount.service';
 
 // Validation schemas
 const createServiceAccountSchema = z.object({

@@ -9,6 +9,7 @@ import { initializeFirebase } from './config/firebase';
 import { config } from './config/index';
 import { redisConnection , ocrQueue } from './config/queue';
 import { CompanyAdminDashboardService } from './services/companyAdminDashboard.service';
+import { NotificationBroadcastService } from './services/notificationBroadcast.service';
 import { SystemAnalyticsService } from './services/systemAnalytics.service';
 import { initializeSocketServer } from './socket/socketServer';
 import { startExchangeRateWorker } from './worker/exchangeRate.worker';
@@ -199,6 +200,13 @@ const initializeServices = async (): Promise<void> => {
 
     // Start exchange rate worker (daily cron job)
     startExchangeRateWorker();
+
+    // Process scheduled notification broadcasts (every 60 seconds)
+    setInterval(() => {
+      NotificationBroadcastService.processDueScheduled().catch((err) => {
+        logger.error({ error: err }, 'Error processing scheduled notification broadcasts');
+      });
+    }, 60_000);
 
     logger.info('Periodic analytics services started');
   } catch (error) {

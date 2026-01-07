@@ -121,7 +121,7 @@ export class BackupService {
 
         logger.info(`Backup created successfully: ${backup._id}`);
       } catch (error: any) {
-        logger.error({ error: error }, 'Backup creation failed:');
+        logger.error({ error }, 'Backup creation failed:');
         
         backup.status = 'failed';
         backup.error = error.message || 'Unknown error';
@@ -232,7 +232,7 @@ export class BackupService {
 
         logger.info(`Backup restored successfully: ${backupId}`);
       } catch (error: any) {
-        logger.error({ error: error }, 'Backup restore failed:');
+        logger.error({ error }, 'Backup restore failed:');
         throw error;
       }
     });

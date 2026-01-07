@@ -61,7 +61,7 @@ export const createUserSchema = z.object({
   role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'], {
     errorMap: () => ({ message: 'Role must be EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT' })
   }).optional().default('EMPLOYEE'),
-  roles: z.array(z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'])).optional(), // Additional roles array
+  roles: z.array(z.string()).optional(), // Additional roles array (ObjectIds)
   companyId: emptyStringToUndefined,
   managerId: emptyStringToUndefined,
   departmentId: emptyStringToUndefined,
@@ -87,7 +87,7 @@ export const updateUserSchema = z.object({
   name: z.string().min(1, 'Name is required').trim().optional(),
   email: z.string().email('Valid email is required').trim().toLowerCase().optional(),
   role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT']).optional(),
-  roles: z.array(z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'])).optional(), // Additional roles array
+  roles: z.array(z.string()).optional(), // Additional roles array (ObjectIds)
   managerId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
@@ -137,7 +137,8 @@ export const updateCostCentreSchema = z.object({
 
 // Expense Report DTOs
 export const createReportSchema = z.object({
-  name: z.string().min(1),
+  // Name is optional; server will auto-generate a default if missing/blank
+  name: z.string().optional().or(z.literal('')),
   // projectId is optional and can be any string (will be validated in service)
   // If it's not a valid ObjectId, it will be ignored
   projectId: z.string().optional().or(z.literal('')),
@@ -197,6 +198,8 @@ export const createExpenseSchema = z.object({
   source: z.nativeEnum(ExpenseSource),
   notes: z.string().optional(),
   receiptId: z.string().optional(), // Receipt ID to link to expense (e.g., source PDF/Excel document)
+  // Advance cash (imprest) - intended application, actual deduction occurs on final approval
+  advanceAppliedAmount: z.number().min(0).optional(),
   // Invoice fields for duplicate detection
   invoiceId: z.string().optional(),
   invoiceDate: z.string().refine(
@@ -225,6 +228,8 @@ export const updateExpenseSchema = z.object({
     { message: 'Invalid datetime format for expenseDate' }
   ).optional(),
   notes: z.string().optional(),
+  // Advance cash (imprest)
+  advanceAppliedAmount: z.number().min(0).optional(),
   // Invoice fields for duplicate detection
   invoiceId: z.string().optional().nullable(),
   invoiceDate: z.string().refine(

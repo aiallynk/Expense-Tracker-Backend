@@ -1,8 +1,9 @@
+import { Readable } from 'stream';
+
 import { GetObjectCommand } from '@aws-sdk/client-s3';
 import ExcelJS from 'exceljs';
 import mongoose from 'mongoose';
 import sharp from 'sharp';
-import { Readable } from 'stream';
 
 import { s3Client, getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
@@ -10,6 +11,7 @@ import { openaiClient, getVisionModel } from '../config/openai';
 import { Category } from '../models/Category';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
+import { User } from '../models/User';
 import { ExpenseStatus } from '../utils/enums';
 
 import { ReportsService } from './reports.service';
@@ -29,6 +31,7 @@ interface PdfParseResult {
 export interface ExtractedReceipt {
   vendor?: string;
   date?: string;
+  invoiceId?: string;
   totalAmount?: number;
   currency?: string;
   tax?: number;
@@ -43,13 +46,41 @@ export interface ExtractedReceipt {
 export interface DocumentProcessingResult {
   success: boolean;
   receipts: ExtractedReceipt[];
-  expensesCreated: string[];
+  // Keep index alignment with receipts: each element is the created expenseId OR null (duplicate/error)
+  expensesCreated: Array<string | null>;
+  // Optional detailed per-receipt outcome for richer UIs (backwards compatible)
+  results?: Array<{
+    index: number;
+    status: 'created' | 'duplicate' | 'error';
+    expenseId?: string;
+    duplicateExpense?: any;
+    message?: string;
+  }>;
   errors: string[];
   documentType: 'pdf' | 'excel' | 'image';
   totalPages?: number;
 }
 
 export class DocumentProcessingService {
+  private static normalizeAiReceipt(raw: any): ExtractedReceipt {
+    const invoiceId =
+      raw?.invoiceId ??
+      raw?.invoice_id ??
+      raw?.invoiceNo ??
+      raw?.invoice_no ??
+      raw?.billNo ??
+      raw?.bill_no ??
+      raw?.receiptNo ??
+      raw?.receipt_no;
+
+    const date = raw?.date ?? raw?.invoiceDate ?? raw?.invoice_date;
+
+    return {
+      ...raw,
+      invoiceId: invoiceId != null ? String(invoiceId).trim() : undefined,
+      date: date != null ? String(date).trim() : raw?.date,
+    };
+  }
   /**
    * Process a document (PDF, Excel, or image) and extract receipts
    */
@@ -75,6 +106,9 @@ export class DocumentProcessingService {
       throw new Error('Can only add expenses to draft reports or reports with changes requested');
     }
 
+    const user = await User.findById(userId).select('companyId').exec();
+    const companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+
     const bucket = getS3Bucket('receipts');
     const command = new GetObjectCommand({
       Bucket: bucket,
@@ -90,15 +124,15 @@ export class DocumentProcessingService {
 
     // Determine document type and process accordingly
     if (mimeType === 'application/pdf') {
-      return await this.processPdf(buffer, storageKey, reportId, userId, documentReceiptId);
+      return await this.processPdf(buffer, storageKey, reportId, userId, documentReceiptId, companyId);
     } else if (
       mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       mimeType === 'application/vnd.ms-excel' ||
       mimeType === 'text/csv'
     ) {
-      return await this.processExcel(buffer, reportId, userId, mimeType, documentReceiptId);
+      return await this.processExcel(buffer, reportId, userId, mimeType, documentReceiptId, companyId);
     } else if (mimeType.startsWith('image/')) {
-      return await this.processImage(buffer, mimeType, storageKey, reportId, userId, documentReceiptId);
+      return await this.processImage(buffer, mimeType, storageKey, reportId, userId, documentReceiptId, companyId);
     } else {
       throw new Error(`Unsupported document type: ${mimeType}`);
     }
@@ -112,7 +146,8 @@ export class DocumentProcessingService {
     storageKey: string,
     reportId: string,
     userId: string,
-    documentReceiptId?: string
+    documentReceiptId?: string,
+    companyId?: mongoose.Types.ObjectId
   ): Promise<DocumentProcessingResult> {
     logger.info({ storageKey, documentReceiptId }, 'Processing PDF document');
 
@@ -120,6 +155,7 @@ export class DocumentProcessingService {
       success: true,
       receipts: [],
       expensesCreated: [],
+      results: [],
       errors: [],
       documentType: 'pdf',
     };
@@ -155,6 +191,37 @@ export class DocumentProcessingService {
       for (let i = 0; i < receipts.length; i++) {
         const receipt = receipts[i];
         try {
+          // Duplicate detection must happen immediately after OCR (extraction) and before saving any draft.
+          const invoiceId = receipt.invoiceId?.toString().trim();
+          const vendor = receipt.vendor?.toString().trim();
+          const amount = receipt.totalAmount;
+          const dateStr = receipt.date;
+
+          if (invoiceId && vendor && dateStr && typeof amount === 'number') {
+            const invoiceDate = new Date(dateStr);
+            if (!isNaN(invoiceDate.getTime())) {
+              const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+              const dup = await DuplicateInvoiceService.checkDuplicate(
+                invoiceId,
+                vendor,
+                invoiceDate,
+                amount,
+                undefined,
+                companyId
+              );
+              if (dup.isDuplicate) {
+                result.expensesCreated.push(null);
+                result.results?.push({
+                  index: i,
+                  status: 'duplicate',
+                  duplicateExpense: dup.duplicateExpense,
+                  message: dup.message || 'Duplicate invoice detected',
+                });
+                continue;
+              }
+            }
+          }
+
           const expenseId = await this.createExpenseDraft(
             receipt,
             reportId,
@@ -164,9 +231,13 @@ export class DocumentProcessingService {
             i + 1 // Sequence number (1-indexed)
           );
           result.expensesCreated.push(expenseId);
+          result.results?.push({ index: i, status: 'created', expenseId });
         } catch (error: any) {
           logger.error({ error: error.message, receipt }, 'Failed to create expense draft');
           result.errors.push(`Failed to create expense for receipt: ${error.message}`);
+          // Keep index alignment
+          result.expensesCreated.push(null);
+          result.results?.push({ index: i, status: 'error', message: error.message });
         }
       }
 
@@ -217,7 +288,7 @@ export class DocumentProcessingService {
           // Convert page image buffer to base64
           const base64Image = Buffer.from(pageImage).toString('base64');
 
-          const prompt = `Extract ALL receipts from this PDF page. For each receipt return: vendor, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. If no receipts, return {"receipts": []}. JSON only, no markdown.`;
+          const prompt = `Extract ALL receipts from this PDF page. For each receipt return: vendor, invoiceId, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. If no receipts, return {"receipts": []}. JSON only, no markdown.`;
 
           const response = await openaiClient.chat.completions.create({
             model,
@@ -252,7 +323,7 @@ export class DocumentProcessingService {
 
             const parsed = JSON.parse(cleanedContent);
             const pageReceipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => ({
-              ...r,
+              ...this.normalizeAiReceipt(r),
               sourceType: 'pdf' as const,
               pageNumber,
               confidence: 0.85,
@@ -315,6 +386,19 @@ export class DocumentProcessingService {
       const match = text.match(pattern);
       if (match && match[1]) {
         receipt.vendor = match[1].trim().substring(0, 100);
+        break;
+      }
+    }
+
+    // Try to extract invoice ID / bill number
+    const invoicePatterns = [
+      /(?:invoice|inv|bill|receipt)\s*(?:no|number|#)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{2,})/im,
+      /(?:gstin|gst)\s*(?:no|number|#)?[:\s]*([A-Z0-9]{8,})/im, // fallback identifier if present
+    ];
+    for (const pattern of invoicePatterns) {
+      const match = text.match(pattern);
+      if (match && match[1]) {
+        receipt.invoiceId = match[1].trim().substring(0, 50);
         break;
       }
     }
@@ -391,7 +475,8 @@ export class DocumentProcessingService {
     reportId: string,
     userId: string,
     mimeType: string,
-    documentReceiptId?: string
+    documentReceiptId?: string,
+    companyId?: mongoose.Types.ObjectId
   ): Promise<DocumentProcessingResult> {
     logger.info({ mimeType, reportId, documentReceiptId }, 'Processing Excel document');
 
@@ -399,6 +484,7 @@ export class DocumentProcessingService {
       success: true,
       receipts: [],
       expensesCreated: [],
+      results: [],
       errors: [],
       documentType: 'excel',
     };
@@ -437,6 +523,7 @@ export class DocumentProcessingService {
         vendor: ['vendor', 'merchant', 'store', 'supplier', 'name', 'description'],
         amount: ['amount', 'total', 'price', 'cost', 'value', 'sum'],
         date: ['date', 'expense date', 'transaction date', 'purchase date'],
+        invoiceId: ['invoice', 'invoice id', 'invoice no', 'invoice number', 'bill', 'bill no', 'bill number', 'receipt no', 'receipt number'],
         category: ['category', 'type', 'expense type', 'expense category'],
         currency: ['currency', 'curr'],
         notes: ['notes', 'description', 'memo', 'comments', 'remarks'],
@@ -455,6 +542,7 @@ export class DocumentProcessingService {
       const vendorCol = getColumn('vendor');
       const amountCol = getColumn('amount');
       const dateCol = getColumn('date');
+      const invoiceIdCol = getColumn('invoiceId');
       const categoryCol = getColumn('category');
       const currencyCol = getColumn('currency');
       const notesCol = getColumn('notes');
@@ -476,6 +564,11 @@ export class DocumentProcessingService {
           if (vendorCol) {
             const vendorValue = row.getCell(vendorCol).value;
             receipt.vendor = vendorValue?.toString().trim() || undefined;
+          }
+
+          if (invoiceIdCol) {
+            const invValue = row.getCell(invoiceIdCol).value;
+            receipt.invoiceId = invValue?.toString().trim() || undefined;
           }
 
           if (amountCol) {
@@ -531,6 +624,36 @@ export class DocumentProcessingService {
       for (let i = 0; i < result.receipts.length; i++) {
         const receipt = result.receipts[i];
         try {
+          const invoiceId = receipt.invoiceId?.toString().trim();
+          const vendor = receipt.vendor?.toString().trim();
+          const amount = receipt.totalAmount;
+          const dateStr = receipt.date;
+
+          if (invoiceId && vendor && dateStr && typeof amount === 'number') {
+            const invoiceDate = new Date(dateStr);
+            if (!isNaN(invoiceDate.getTime())) {
+              const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+              const dup = await DuplicateInvoiceService.checkDuplicate(
+                invoiceId,
+                vendor,
+                invoiceDate,
+                amount,
+                undefined,
+                companyId
+              );
+              if (dup.isDuplicate) {
+                result.expensesCreated.push(null);
+                result.results?.push({
+                  index: i,
+                  status: 'duplicate',
+                  duplicateExpense: dup.duplicateExpense,
+                  message: dup.message || 'Duplicate invoice detected',
+                });
+                continue;
+              }
+            }
+          }
+
           const expenseId = await this.createExpenseDraft(
             receipt,
             reportId,
@@ -540,9 +663,12 @@ export class DocumentProcessingService {
             i + 1 // Row number (1-indexed, excluding header)
           );
           result.expensesCreated.push(expenseId);
+          result.results?.push({ index: i, status: 'created', expenseId });
         } catch (error: any) {
           logger.error({ error: error.message, receipt }, 'Failed to create expense draft from Excel');
           result.errors.push(`Failed to create expense: ${error.message}`);
+          result.expensesCreated.push(null);
+          result.results?.push({ index: i, status: 'error', message: error.message });
         }
       }
 
@@ -569,7 +695,8 @@ export class DocumentProcessingService {
     storageKey: string,
     reportId: string,
     userId: string,
-    documentReceiptId?: string
+    documentReceiptId?: string,
+    companyId?: mongoose.Types.ObjectId
   ): Promise<DocumentProcessingResult> {
     logger.info({ storageKey, mimeType, documentReceiptId }, 'Processing image document');
 
@@ -577,6 +704,7 @@ export class DocumentProcessingService {
       success: true,
       receipts: [],
       expensesCreated: [],
+      results: [],
       errors: [],
       documentType: 'image',
       totalPages: 1,
@@ -602,7 +730,7 @@ export class DocumentProcessingService {
       const base64Image = processedBuffer.toString('base64');
       const model = getVisionModel();
 
-      const prompt = `Extract ALL receipts from this image. For each: vendor, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. JSON only, no markdown.`;
+      const prompt = `Extract ALL receipts from this image. For each receipt return: vendor, invoiceId, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. JSON only, no markdown.`;
 
       const response = await openaiClient.chat.completions.create({
         model,
@@ -640,7 +768,7 @@ export class DocumentProcessingService {
 
       const parsed = JSON.parse(cleanedContent);
       const receipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => ({
-        ...r,
+        ...this.normalizeAiReceipt(r),
         sourceType: 'image' as const,
         confidence: 0.85,
       }));
@@ -671,17 +799,50 @@ export class DocumentProcessingService {
             1
           );
           result.expensesCreated.push(expenseId);
+          result.results?.push({ index: 0, status: 'created', expenseId });
           result.receipts.push(placeholderReceipt);
           logger.info({ expenseId, documentReceiptId }, 'Created placeholder expense draft for image with no extracted receipts');
         } catch (error: any) {
           logger.error({ error: error.message }, 'Failed to create placeholder expense draft');
           result.errors.push(`Failed to create placeholder expense: ${error.message}`);
+          result.expensesCreated.push(null);
+          result.results?.push({ index: 0, status: 'error', message: error.message });
         }
       } else {
         // Create expense drafts for each extracted receipt
         for (let i = 0; i < receipts.length; i++) {
           const receipt = receipts[i];
           try {
+            const invoiceId = receipt.invoiceId?.toString().trim();
+            const vendor = receipt.vendor?.toString().trim();
+            const amount = receipt.totalAmount;
+            const dateStr = receipt.date;
+
+            if (invoiceId && vendor && dateStr && typeof amount === 'number') {
+              const invoiceDate = new Date(dateStr);
+              if (!isNaN(invoiceDate.getTime())) {
+                const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+                const dup = await DuplicateInvoiceService.checkDuplicate(
+                  invoiceId,
+                  vendor,
+                  invoiceDate,
+                  amount,
+                  undefined,
+                  companyId
+                );
+                if (dup.isDuplicate) {
+                  result.expensesCreated.push(null);
+                  result.results?.push({
+                    index: i,
+                    status: 'duplicate',
+                    duplicateExpense: dup.duplicateExpense,
+                    message: dup.message || 'Duplicate invoice detected',
+                  });
+                  continue;
+                }
+              }
+            }
+
             const expenseId = await this.createExpenseDraft(
               receipt,
               reportId,
@@ -691,9 +852,12 @@ export class DocumentProcessingService {
               i + 1 // Sequence number (1-indexed)
             );
             result.expensesCreated.push(expenseId);
+            result.results?.push({ index: i, status: 'created', expenseId });
           } catch (error: any) {
             logger.error({ error: error.message }, 'Failed to create expense draft from image');
             result.errors.push(`Failed to create expense: ${error.message}`);
+            result.expensesCreated.push(null);
+            result.results?.push({ index: i, status: 'error', message: error.message });
           }
         }
       }
@@ -745,6 +909,19 @@ export class DocumentProcessingService {
       receiptIds.push(new mongoose.Types.ObjectId(documentReceiptId));
     }
 
+    const invoiceDate = receipt.date ? new Date(receipt.date) : undefined;
+    const invoiceId = receipt.invoiceId?.toString().trim() || undefined;
+    let invoiceFingerprint: string | undefined = undefined;
+    if (invoiceId && invoiceDate && !isNaN(invoiceDate.getTime()) && typeof receipt.totalAmount === 'number') {
+      const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+      invoiceFingerprint = DuplicateInvoiceService.computeFingerprint(
+        invoiceId,
+        receipt.vendor || 'Receipt Processing...',
+        invoiceDate,
+        receipt.totalAmount
+      );
+    }
+
     const expense = new Expense({
       reportId: new mongoose.Types.ObjectId(reportId),
       userId: new mongoose.Types.ObjectId(userId),
@@ -752,7 +929,7 @@ export class DocumentProcessingService {
       categoryId,
       amount: receipt.totalAmount || 0,
       currency: receipt.currency || 'INR',
-      expenseDate: receipt.date ? new Date(receipt.date) : new Date(),
+      expenseDate: invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : new Date(),
       status: ExpenseStatus.DRAFT,
       source: receipt.sourceType === 'excel' ? 'MANUAL' : 'SCANNED',
       notes: receipt.notes || (receipt.lineItems 
@@ -760,6 +937,10 @@ export class DocumentProcessingService {
         : undefined),
       receiptIds,
       receiptPrimaryId: documentReceiptId ? new mongoose.Types.ObjectId(documentReceiptId) : undefined,
+      // Invoice fields for duplicate detection
+      invoiceId,
+      invoiceDate: invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : undefined,
+      invoiceFingerprint,
       // Bulk upload tracking
       sourceDocumentType,
       sourceDocumentSequence,

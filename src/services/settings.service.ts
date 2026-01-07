@@ -1,5 +1,6 @@
 import { GlobalSettings, IGlobalSettings } from '../models/GlobalSettings';
 import { emitSettingsUpdated } from '../socket/realtimeEvents';
+
 import { logger } from '@/config/logger';
 
 // No references to togetherAiApiKey. Use openAiApiKey only

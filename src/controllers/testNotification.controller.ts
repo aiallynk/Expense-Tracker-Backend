@@ -2,11 +2,11 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { NotificationService } from '../services/notification.service';
-import { NotificationDataService } from '../services/notificationData.service';
+import { NotificationType } from '../models/Notification';
 import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
-import { NotificationType } from '../models/Notification';
+import { NotificationService } from '../services/notification.service';
+import { NotificationDataService } from '../services/notificationData.service';
 import { emitNotificationToUser } from '../socket/realtimeEvents';
 
 import { logger } from '@/config/logger';

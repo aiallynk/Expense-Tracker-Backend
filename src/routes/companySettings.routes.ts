@@ -53,6 +53,9 @@ router.put('/notifications/:id/read', CompanyNotificationsController.markAsRead)
 // PUT /api/v1/company-admin/notifications/read-all - Mark all notifications as read
 router.put('/notifications/read-all', CompanyNotificationsController.markAllAsRead);
 
+// DELETE /api/v1/company-admin/notifications - Clear all notifications for this company admin user
+router.delete('/notifications', CompanyNotificationsController.clearAll);
+
 // Approver Mapping routes
 // GET /api/v1/company-admin/approver-mappings - Get all approver mappings
 router.get('/approver-mappings', ApproverMappingController.getMappings);

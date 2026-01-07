@@ -3,7 +3,9 @@ import mongoose from 'mongoose';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
+import { CompanyAdmin } from '../models/CompanyAdmin';
 import { Notification } from '../models/Notification';
+import { User } from '../models/User';
 import { NotificationDataService } from '../services/notificationData.service';
 import { emitNotificationToUser } from '../socket/realtimeEvents';
 
@@ -17,29 +19,26 @@ export class NotificationController {
     const limit = parseInt(req.query.limit as string) || 50;
     const skip = (page - 1) * limit;
 
-    // Get user to check company isolation
-    const { User } = await import('../models/User');
-    const user = await User.findById(userId).select('companyId').exec();
+    // Get user or company admin to check existence and company isolation
+    let user: any = await User.findById(userId).select('companyId').exec();
+
+    // If not found in User, check CompanyAdmin
+    if (!user) {
+      user = await CompanyAdmin.findById(userId).select('companyId').exec();
+    }
 
     if (!user) {
-      res.status(404).json({
+      res.status(401).json({
         success: false,
-        message: 'User not found',
+        message: 'User associated with token not found',
       });
       return;
     }
 
-    // Build query - user's notifications or company-wide notifications
-    const query: any = {
-      $or: [
-        { userId: new mongoose.Types.ObjectId(userId) },
-      ],
-    };
-
-    // Include company-wide notifications if user has a company
-    if (user.companyId) {
-      query.$or.push({ companyId: user.companyId });
-    }
+    // IMPORTANT:
+    // Notifications are per-recipient records (userId is required in schema).
+    // Do NOT include companyId-based matching here, otherwise users see other peoples' notifications.
+    const query: any = { userId: new mongoose.Types.ObjectId(userId) };
 
     const [notifications, total, unreadCount] = await Promise.all([
       Notification.find(query)
@@ -72,27 +71,23 @@ export class NotificationController {
   static getUnreadCount = asyncHandler(async (req: AuthRequest, res: Response): Promise<void> => {
     const userId = req.user!.id;
 
-    const { User } = await import('../models/User');
-    const user = await User.findById(userId).select('companyId').exec();
+    let user: any = await User.findById(userId).select('companyId').exec();
+
+    // If not found in User, check CompanyAdmin
+    if (!user) {
+      user = await CompanyAdmin.findById(userId).select('companyId').exec();
+    }
 
     if (!user) {
-      res.status(404).json({
+      res.status(401).json({
         success: false,
-        message: 'User not found',
+        message: 'User associated with token not found',
       });
       return;
     }
 
-    const query: any = {
-      $or: [
-        { userId: new mongoose.Types.ObjectId(userId) },
-      ],
-      read: false,
-    };
-
-    if (user.companyId) {
-      query.$or.push({ companyId: user.companyId });
-    }
+    // Only count unread notifications for this specific user (avoid companyId broad match)
+    const query: any = { userId: new mongoose.Types.ObjectId(userId), read: false };
 
     const unreadCount = await Notification.countDocuments(query);
 
@@ -137,27 +132,23 @@ export class NotificationController {
   static markAllAsRead = asyncHandler(async (req: AuthRequest, res: Response): Promise<void> => {
     const userId = req.user!.id;
 
-    const { User } = await import('../models/User');
-    const user = await User.findById(userId).select('companyId').exec();
+    let user: any = await User.findById(userId).select('companyId').exec();
+
+    // If not found in User, check CompanyAdmin
+    if (!user) {
+      user = await CompanyAdmin.findById(userId).select('companyId').exec();
+    }
 
     if (!user) {
-      res.status(404).json({
+      res.status(401).json({
         success: false,
-        message: 'User not found',
+        message: 'User associated with token not found',
       });
       return;
     }
 
-    const query: any = {
-      $or: [
-        { userId: new mongoose.Types.ObjectId(userId) },
-      ],
-      read: false,
-    };
-
-    if (user.companyId) {
-      query.$or.push({ companyId: user.companyId });
-    }
+    // Mark read only for current user
+    const query: any = { userId: new mongoose.Types.ObjectId(userId), read: false };
 
     const result = await Notification.updateMany(
       query,
@@ -178,6 +169,35 @@ export class NotificationController {
         count: result.modifiedCount,
       },
       message: `${result.modifiedCount} notifications marked as read`,
+    });
+  });
+
+  /**
+   * Clear (delete) all notifications for current user
+   * DELETE /api/v1/notifications
+   */
+  static clearAll = asyncHandler(async (req: AuthRequest, res: Response): Promise<void> => {
+    const userId = req.user!.id;
+
+    // Verify token user still exists (User or CompanyAdmin)
+    let user: any = await User.findById(userId).select('_id').exec();
+    if (!user) {
+      user = await CompanyAdmin.findById(userId).select('_id').exec();
+    }
+    if (!user) {
+      res.status(401).json({
+        success: false,
+        message: 'User associated with token not found',
+      });
+      return;
+    }
+
+    const result = await Notification.deleteMany({ userId: new mongoose.Types.ObjectId(userId) }).exec();
+
+    res.status(200).json({
+      success: true,
+      data: { count: result.deletedCount || 0 },
+      message: `Cleared ${result.deletedCount || 0} notifications`,
     });
   });
 }

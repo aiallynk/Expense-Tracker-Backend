@@ -2,9 +2,9 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { CategoriesService } from '../services/categories.service';
-import { User } from '../models/User';
 import { CompanyAdmin } from '../models/CompanyAdmin';
+import { User } from '../models/User';
+import { CategoriesService } from '../services/categories.service';
 import {
   createCategorySchema,
   updateCategorySchema,

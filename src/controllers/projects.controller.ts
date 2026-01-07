@@ -2,9 +2,9 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { ProjectsService } from '../services/projects.service';
-import { User } from '../models/User';
 import { CompanyAdmin } from '../models/CompanyAdmin';
+import { User } from '../models/User';
+import { ProjectsService } from '../services/projects.service';
 
 // Helper function to get company ID for both regular users and company admins
 async function getCompanyId(req: AuthRequest): Promise<string | undefined> {
@@ -31,7 +31,18 @@ export class ProjectsController {
       return;
     }
 
-    const projects = await ProjectsService.getAllProjects(companyId);
+    // If user is company admin, show all projects
+    if (req.user?.role === 'COMPANY_ADMIN') {
+      const projects = await ProjectsService.getAdminProjects(companyId);
+      res.status(200).json({
+        success: true,
+        data: projects,
+      });
+      return;
+    }
+
+    // Otherwise, show only projects accessible to the user
+    const projects = await ProjectsService.getUserProjects(req.user!.id, companyId);
 
     res.status(200).json({
       success: true,
@@ -94,11 +105,13 @@ export class ProjectsController {
       code: req.body.code,
       description: req.body.description,
       companyId,
+      costCentreId: req.body.costCentreId,
       managerId: req.body.managerId,
       startDate: req.body.startDate,
       endDate: req.body.endDate,
       budget: req.body.budget,
       status: req.body.status,
+      isGlobal: req.body.isGlobal,
     });
 
     res.status(201).json({
@@ -112,11 +125,13 @@ export class ProjectsController {
       name: req.body.name,
       code: req.body.code,
       description: req.body.description,
+      costCentreId: req.body.costCentreId,
       managerId: req.body.managerId,
       startDate: req.body.startDate,
       endDate: req.body.endDate,
       budget: req.body.budget,
       status: req.body.status,
+      isGlobal: req.body.isGlobal,
     });
 
     res.status(200).json({

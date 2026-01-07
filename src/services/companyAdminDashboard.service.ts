@@ -25,7 +25,7 @@ export class CompanyAdminDashboardService {
         if (!admin.companyId) continue;
 
         const companyId = (admin.companyId as any)._id?.toString() || admin.companyId.toString();
-        
+
         try {
           const stats = await this.getDashboardStatsForCompany(companyId);
           emitCompanyAdminDashboardUpdate(companyId, stats);
@@ -74,11 +74,15 @@ export class CompanyAdminDashboardService {
     // Build queries
     const reportQuery = { userId: { $in: userIds } };
 
-    // Only include expenses whose reports are at/after manager or BH approval
     const approvedReportStatuses = [
       ExpenseReportStatus.MANAGER_APPROVED,
       ExpenseReportStatus.BH_APPROVED,
       ExpenseReportStatus.APPROVED,
+      ExpenseReportStatus.PENDING_APPROVAL_L1,
+      ExpenseReportStatus.PENDING_APPROVAL_L2,
+      ExpenseReportStatus.PENDING_APPROVAL_L3,
+      ExpenseReportStatus.PENDING_APPROVAL_L4,
+      ExpenseReportStatus.PENDING_APPROVAL_L5,
     ];
 
     const approvedReports = await ExpenseReport.find({
@@ -104,7 +108,19 @@ export class CompanyAdminDashboardService {
         managers: companyUsers.filter(u => u.role === 'MANAGER').length,
         businessHeads: companyUsers.filter(u => u.role === 'BUSINESS_HEAD').length,
         totalReports: await ExpenseReport.countDocuments(reportQuery),
-        pendingApprovals: await ExpenseReport.countDocuments({ ...reportQuery, status: ExpenseReportStatus.SUBMITTED }),
+        pendingApprovals: await ExpenseReport.countDocuments({
+          ...reportQuery,
+          status: {
+            $in: [
+              ExpenseReportStatus.SUBMITTED,
+              ExpenseReportStatus.PENDING_APPROVAL_L1,
+              ExpenseReportStatus.PENDING_APPROVAL_L2,
+              ExpenseReportStatus.PENDING_APPROVAL_L3,
+              ExpenseReportStatus.PENDING_APPROVAL_L4,
+              ExpenseReportStatus.PENDING_APPROVAL_L5
+            ]
+          }
+        }),
         totalSpendThisMonth: 0,
         userTrend: 0,
         reportsTrend: 0,
@@ -139,7 +155,19 @@ export class CompanyAdminDashboardService {
       totalUsers,
     ] = await Promise.all([
       ExpenseReport.countDocuments(reportQuery),
-      ExpenseReport.countDocuments({ ...reportQuery, status: ExpenseReportStatus.SUBMITTED }),
+      ExpenseReport.countDocuments({
+        ...reportQuery,
+        status: {
+          $in: [
+            ExpenseReportStatus.SUBMITTED,
+            ExpenseReportStatus.PENDING_APPROVAL_L1,
+            ExpenseReportStatus.PENDING_APPROVAL_L2,
+            ExpenseReportStatus.PENDING_APPROVAL_L3,
+            ExpenseReportStatus.PENDING_APPROVAL_L4,
+            ExpenseReportStatus.PENDING_APPROVAL_L5
+          ]
+        }
+      }),
       ExpenseModel.aggregate([
         { $match: monthExpenseQuery },
         { $group: { _id: null, total: { $sum: '$amount' } } },
@@ -159,8 +187,8 @@ export class CompanyAdminDashboardService {
     // Calculate trends (simplified - compare with previous period)
     const spendThisMonth = totalAmountThisMonth[0]?.total || 0;
     const spendLastMonth = totalAmountLastMonth[0]?.total || 0;
-    const spendTrend = spendLastMonth > 0 
-      ? ((spendThisMonth - spendLastMonth) / spendLastMonth) * 100 
+    const spendTrend = spendLastMonth > 0
+      ? ((spendThisMonth - spendLastMonth) / spendLastMonth) * 100
       : 0;
 
     return {

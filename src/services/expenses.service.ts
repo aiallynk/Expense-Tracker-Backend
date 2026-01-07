@@ -1,18 +1,19 @@
 import mongoose from 'mongoose';
 
+import { AuthRequest } from '../middleware/auth.middleware';
 import { Expense, IExpense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
 import { emitCompanyAdminDashboardUpdate } from '../socket/realtimeEvents';
+import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
 import { CreateExpenseDto, UpdateExpenseDto, ExpenseFiltersDto } from '../utils/dtoTypes';
 import { ExpenseStatus, ExpenseReportStatus , AuditAction } from '../utils/enums';
 import { getPaginationOptions, createPaginatedResult } from '../utils/pagination';
 
 import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
+import { ProjectStakeholderService } from './projectStakeholder.service';
 import { ReportsService } from './reports.service';
-import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
-import { AuthRequest } from '../middleware/auth.middleware';
 
 import { logger } from '@/config/logger';
 
@@ -43,16 +44,25 @@ export class ExpensesService {
       receiptIds.push(new mongoose.Types.ObjectId(data.receiptId));
     }
 
+    const invoiceDate = data.invoiceDate ? new Date(data.invoiceDate) : undefined;
+    let invoiceFingerprint: string | undefined = undefined;
+
     // Check for duplicate invoice if invoice fields are provided
-    if (data.invoiceId && data.invoiceDate) {
+    if (data.invoiceId && invoiceDate) {
       const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
       const user = await User.findById(userId).select('companyId').exec();
+      invoiceFingerprint = DuplicateInvoiceService.computeFingerprint(
+        data.invoiceId,
+        data.vendor,
+        invoiceDate,
+        data.amount
+      );
       
       if (user && user.companyId) {
         const duplicateCheck = await DuplicateInvoiceService.checkDuplicate(
           data.invoiceId,
           data.vendor,
-          new Date(data.invoiceDate),
+          invoiceDate,
           data.amount,
           undefined, // No excludeExpenseId for new expenses
           user.companyId
@@ -61,6 +71,32 @@ export class ExpensesService {
         if (duplicateCheck.isDuplicate) {
           throw new Error(duplicateCheck.message || 'Duplicate invoice detected');
         }
+      }
+    }
+
+    // Validate project access if projectId is provided
+    if (data.projectId) {
+      const user = await User.findById(userId).select('companyId').exec();
+      if (!user || !user.companyId) {
+        throw new Error('User company not found');
+      }
+
+      const userProjects = await ProjectStakeholderService.getUserProjects(userId, user.companyId.toString());
+      const hasAccess = userProjects.some((project: any) => (project._id as any).toString() === data.projectId);
+
+      if (!hasAccess) {
+        throw new Error('Access denied: You do not have permission to assign expenses to this project');
+      }
+    }
+
+    // Validate advance application
+    if ((data.advanceAppliedAmount ?? 0) > 0) {
+      const adv = Number(data.advanceAppliedAmount);
+      if (!isFinite(adv) || adv < 0) {
+        throw new Error('Invalid advanceAppliedAmount');
+      }
+      if (adv > data.amount) {
+        throw new Error('advanceAppliedAmount cannot exceed expense amount');
       }
     }
 
@@ -81,7 +117,11 @@ export class ExpensesService {
       receiptPrimaryId: data.receiptId ? new mongoose.Types.ObjectId(data.receiptId) : undefined,
       // Invoice fields
       invoiceId: data.invoiceId,
-      invoiceDate: data.invoiceDate ? new Date(data.invoiceDate) : undefined,
+      invoiceDate,
+      invoiceFingerprint,
+      // Advance cash
+      advanceAppliedAmount: data.advanceAppliedAmount ?? 0,
+      advanceCurrency: (data.currency || 'INR').toString().toUpperCase(),
     });
 
     const saved = await expense.save();
@@ -158,6 +198,20 @@ export class ExpensesService {
     }
 
     if (data.projectId !== undefined) {
+      // Validate project access if projectId is being set
+      if (data.projectId) {
+        const user = await User.findById(userId).select('companyId').exec();
+        if (!user || !user.companyId) {
+          throw new Error('User company not found');
+        }
+
+        const userProjects = await ProjectStakeholderService.getUserProjects(userId, user.companyId.toString());
+        const hasAccess = userProjects.some((project: any) => (project._id as any).toString() === data.projectId);
+
+        if (!hasAccess) {
+          throw new Error('Access denied: You do not have permission to assign expenses to this project');
+        }
+      }
       expense.projectId = data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined;
     }
 
@@ -167,6 +221,19 @@ export class ExpensesService {
 
     if (data.currency !== undefined) {
       expense.currency = data.currency;
+    }
+
+    if (data.advanceAppliedAmount !== undefined) {
+      const n = Number(data.advanceAppliedAmount || 0);
+      if (!isFinite(n) || n < 0) {
+        throw new Error('Invalid advanceAppliedAmount');
+      }
+      expense.advanceAppliedAmount = n;
+      expense.advanceCurrency = (expense.currency || 'INR').toString().toUpperCase();
+    }
+
+    if (expense.advanceAppliedAmount && expense.advanceAppliedAmount > expense.amount) {
+      throw new Error('advanceAppliedAmount cannot exceed expense amount');
     }
 
     if (data.expenseDate !== undefined) {
@@ -183,6 +250,18 @@ export class ExpensesService {
     }
     if (data.invoiceDate !== undefined) {
       expense.invoiceDate = data.invoiceDate ? new Date(data.invoiceDate) : undefined;
+    }
+    // Keep invoiceFingerprint consistent with invoice fields
+    if (expense.invoiceId && expense.invoiceDate) {
+      const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
+      expense.invoiceFingerprint = DuplicateInvoiceService.computeFingerprint(
+        expense.invoiceId,
+        expense.vendor,
+        expense.invoiceDate,
+        expense.amount
+      );
+    } else {
+      expense.invoiceFingerprint = undefined;
     }
 
     // Check for duplicate invoice if invoice fields are being updated
@@ -452,7 +531,7 @@ export class ExpensesService {
 
     const [expenses, total] = await Promise.all([
       Expense.find(query)
-        .populate('reportId', 'name status userId')
+        .populate('reportId', 'name status userId projectId costCentreId')
         .populate('categoryId', 'name code')
         .populate('costCentreId', 'name code')
         .sort({ expenseDate: -1 })

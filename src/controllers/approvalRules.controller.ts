@@ -2,8 +2,8 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { ApprovalRulesService } from '../services/approvalRules.service';
 import { CompanyAdmin } from '../models/CompanyAdmin';
+import { ApprovalRulesService } from '../services/approvalRules.service';
 
 export class ApprovalRulesController {
   /**

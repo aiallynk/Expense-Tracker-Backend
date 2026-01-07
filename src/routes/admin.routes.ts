@@ -3,8 +3,9 @@ import { z } from 'zod';
 
 import { ActivityController } from '../controllers/activity.controller';
 import { AdminController } from '../controllers/admin.controller';
-import { TestNotificationController } from '../controllers/testNotification.controller';
 import { BroadcastNotificationController } from '../controllers/broadcastNotification.controller';
+import { NotificationBroadcastController } from '../controllers/notificationBroadcast.controller';
+import { TestNotificationController } from '../controllers/testNotification.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireAdmin, requireRole } from '../middleware/role.middleware';
 import {
@@ -12,6 +13,7 @@ import {
   validateServiceAccountEndpoint,
 } from '../middleware/serviceAccount.middleware';
 import { validate } from '../middleware/validate.middleware';
+import { NotificationBroadcastChannel, NotificationBroadcastStatus, NotificationBroadcastType } from '../models/NotificationBroadcast';
 import { UserRole, BroadcastTargetType } from '../utils/enums';
 
 const router = Router();
@@ -90,6 +92,44 @@ router.post(
   requireRole(UserRole.SUPER_ADMIN),
   validate(broadcastNotificationSchema),
   BroadcastNotificationController.sendBroadcastNotification
+);
+
+// ===================== Super Admin Notification Broadcast System (V2) =====================
+// POST /api/v1/admin/notifications/broadcast
+const notificationBroadcastV2Schema = z.object({
+  title: z.string().min(1, 'Title is required'),
+  message: z.string().min(1, 'Message is required'),
+  type: z.nativeEnum(NotificationBroadcastType),
+  targetType: z.enum([BroadcastTargetType.ALL_USERS, BroadcastTargetType.COMPANY]),
+  companyId: z.string().optional(),
+  channels: z.array(z.nativeEnum(NotificationBroadcastChannel)).min(1, 'At least one channel is required'),
+  scheduledAt: z.union([z.string().datetime(), z.null()]).optional(),
+}).refine((data) => {
+  if (data.targetType === BroadcastTargetType.COMPANY && !data.companyId) return false;
+  return true;
+}, { message: 'companyId is required when targetType is COMPANY' });
+
+router.post(
+  '/notifications/broadcast',
+  requireRole(UserRole.SUPER_ADMIN),
+  validate(notificationBroadcastV2Schema),
+  NotificationBroadcastController.create
+);
+
+// GET /api/v1/admin/notifications/broadcasts
+const listBroadcastsSchema = z.object({
+  page: z.string().optional(),
+  limit: z.string().optional(),
+  status: z.nativeEnum(NotificationBroadcastStatus).optional(),
+  targetType: z.enum([BroadcastTargetType.ALL_USERS, BroadcastTargetType.COMPANY]).optional(),
+  companyId: z.string().optional(),
+});
+
+router.get(
+  '/notifications/broadcasts',
+  requireRole(UserRole.SUPER_ADMIN),
+  validate(listBroadcastsSchema),
+  NotificationBroadcastController.list
 );
 
 export default router;

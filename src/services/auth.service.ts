@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 
 import { config } from '../config/index';
-import { CompanyAdmin, ICompanyAdmin , CompanyAdminStatus } from '../models/CompanyAdmin';
+import { CompanyAdmin, ICompanyAdmin, CompanyAdminStatus } from '../models/CompanyAdmin';
 import { User, IUser } from '../models/User';
 import { AuditAction, UserRole } from '../utils/enums';
 
@@ -87,10 +87,10 @@ export class AuthService {
    */
   static async checkUserRoles(email: string): Promise<{ requiresRoleSelection: boolean; roles?: string[] }> {
     const normalizedEmail = email.toLowerCase().trim();
-    
+
     // Try to find user
     const user = await User.findOne({ email: normalizedEmail }).select('role roles').exec();
-    
+
     if (!user) {
       return { requiresRoleSelection: false };
     }
@@ -98,9 +98,10 @@ export class AuthService {
     // Get all roles: primary role + additional roles from roles array
     const allRoles: string[] = [user.role];
     if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
-      user.roles.forEach((role) => {
-        if (role && !allRoles.includes(role)) {
-          allRoles.push(role);
+      user.roles.forEach((roleRef) => {
+        const roleStr = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+        if (roleStr && !allRoles.includes(roleStr)) {
+          allRoles.push(roleStr);
         }
       });
     }
@@ -116,9 +117,9 @@ export class AuthService {
     return { requiresRoleSelection: false };
   }
 
-  static async login(email: string, password: string, selectedRole?: string): Promise<AuthResult> {
+  static async login(email: string, password: string): Promise<AuthResult> {
     const normalizedEmail = email.toLowerCase().trim();
-    
+
     // Try to find user first
     const user = await User.findOne({ email: normalizedEmail });
     let companyAdmin: ICompanyAdmin | null = null;
@@ -171,49 +172,26 @@ export class AuthService {
 
     // Update last login and generate tokens
     if (user) {
-      // Get all roles: primary role + additional roles from roles array
+      // Get all roles: primary role + additional roles from roles array (for approvals)
       const allRoles: string[] = [user.role];
       if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
-        user.roles.forEach((role) => {
-          if (role && !allRoles.includes(role)) {
-            allRoles.push(role);
+        user.roles.forEach((roleRef) => {
+          const roleStr = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+          if (roleStr && !allRoles.includes(roleStr)) {
+            allRoles.push(roleStr);
           }
         });
       }
 
-      // If user has multiple roles and no role selected, return roles for selection
-      if (allRoles.length > 1 && !selectedRole) {
-        return {
-          user: {
-            id: (user._id as mongoose.Types.ObjectId).toString(),
-            email: user.email,
-            name: user.name,
-            role: user.role, // Primary role
-            roles: allRoles, // All available roles
-            ...(user.companyId && { companyId: (user.companyId as mongoose.Types.ObjectId).toString() }),
-          },
-          requiresRoleSelection: true,
-          tokens: null as any,
-        } as any;
-      }
+      // Always use the primary role for access level
+      // Additional roles are used for approval workflow only
+      const roleToUse: string = user.role;
 
-      // Validate selected role if provided
-      let roleToUse: string = user.role; // Default to primary role
-      if (selectedRole) {
-        if (!allRoles.includes(selectedRole)) {
-          const error: any = new Error('Invalid role selected');
-          error.statusCode = 400;
-          error.code = 'INVALID_ROLE';
-          throw error;
-        }
-        roleToUse = selectedRole;
-      }
-
-      logger.info({ email: normalizedEmail, role: roleToUse }, 'Login successful');
+      logger.info({ email: normalizedEmail, role: roleToUse, additionalRoles: allRoles.slice(1) }, 'Login successful');
       user.lastLoginAt = new Date();
       await user.save();
 
-      // Generate tokens with selected role
+      // Generate tokens with primary role
       const tokens = this.generateTokensForUserWithRole(user, roleToUse);
       const userId = (user._id as mongoose.Types.ObjectId).toString();
 
@@ -231,7 +209,7 @@ export class AuthService {
           email: user.email,
           name: user.name,
           role: roleToUse,
-          roles: allRoles.length > 1 ? allRoles : undefined, // Include if multiple roles
+          roles: allRoles.length > 1 ? allRoles : undefined, // Include for reference
           ...(user.companyId && { companyId: (user.companyId as mongoose.Types.ObjectId).toString() }),
         },
         tokens,
@@ -293,17 +271,18 @@ export class AuthService {
         if (!user || user.status !== 'ACTIVE') {
           throw new Error('User not found or inactive');
         }
-        
+
         // Validate that the role from token is valid for this user
         const allRoles: string[] = [user.role];
         if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
-          user.roles.forEach((role) => {
-            if (role && !allRoles.includes(role)) {
-              allRoles.push(role);
+          user.roles.forEach((roleRef) => {
+            const roleStr = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+            if (roleStr && !allRoles.includes(roleStr)) {
+              allRoles.push(roleStr);
             }
           });
         }
-        
+
         // Use the role from the token (selected role), not the primary role
         const roleToUse: string = allRoles.includes(decoded.role as string) ? (decoded.role as string) : user.role;
         const accessToken = this.generateAccessTokenForUserWithRole(user, roleToUse);
@@ -351,11 +330,22 @@ export class AuthService {
 
   static generateAccessTokenForUser(user: IUser): string {
     const userId = (user._id as mongoose.Types.ObjectId).toString();
+
+    // Extract approval role IDs from user.roles array
+    const approvalRoles: string[] = [];
+    if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+      user.roles.forEach((roleRef) => {
+        const roleId = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+        approvalRoles.push(roleId);
+      });
+    }
+
     const payload: {
       id: string;
       email: string;
       role: string;
       companyId?: string;
+      approvalRoles?: string[];
     } = {
       id: userId,
       email: user.email,
@@ -363,6 +353,9 @@ export class AuthService {
     };
     if (user.companyId) {
       payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();
+    }
+    if (approvalRoles.length > 0) {
+      payload.approvalRoles = approvalRoles;
     }
     const secret = String(config.jwt.accessSecret);
     const options = {
@@ -392,11 +385,22 @@ export class AuthService {
 
   static generateRefreshTokenForUser(user: IUser): string {
     const userId = (user._id as mongoose.Types.ObjectId).toString();
+
+    // Extract approval role IDs from user.roles array
+    const approvalRoles: string[] = [];
+    if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+      user.roles.forEach((roleRef) => {
+        const roleId = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+        approvalRoles.push(roleId);
+      });
+    }
+
     const payload: {
       id: string;
       email: string;
       role: string;
       companyId?: string;
+      approvalRoles?: string[];
     } = {
       id: userId,
       email: user.email,
@@ -404,6 +408,9 @@ export class AuthService {
     };
     if (user.companyId) {
       payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();
+    }
+    if (approvalRoles.length > 0) {
+      payload.approvalRoles = approvalRoles;
     }
     const secret = String(config.jwt.refreshSecret);
     const options = {
@@ -414,18 +421,32 @@ export class AuthService {
 
   static generateAccessTokenForUserWithRole(user: IUser, role: string): string {
     const userId = (user._id as mongoose.Types.ObjectId).toString();
+
+    // Extract approval role IDs from user.roles array
+    const approvalRoles: string[] = [];
+    if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+      user.roles.forEach((roleRef) => {
+        const roleId = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+        approvalRoles.push(roleId);
+      });
+    }
+
     const payload: {
       id: string;
       email: string;
       role: string;
       companyId?: string;
+      approvalRoles?: string[];
     } = {
       id: userId,
       email: user.email,
-      role: role,
+      role,
     };
     if (user.companyId) {
       payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();
+    }
+    if (approvalRoles.length > 0) {
+      payload.approvalRoles = approvalRoles;
     }
     const secret = String(config.jwt.accessSecret);
     const options = {
@@ -436,18 +457,32 @@ export class AuthService {
 
   static generateRefreshTokenForUserWithRole(user: IUser, role: string): string {
     const userId = (user._id as mongoose.Types.ObjectId).toString();
+
+    // Extract approval role IDs from user.roles array
+    const approvalRoles: string[] = [];
+    if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+      user.roles.forEach((roleRef) => {
+        const roleId = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+        approvalRoles.push(roleId);
+      });
+    }
+
     const payload: {
       id: string;
       email: string;
       role: string;
       companyId?: string;
+      approvalRoles?: string[];
     } = {
       id: userId,
       email: user.email,
-      role: role,
+      role,
     };
     if (user.companyId) {
       payload.companyId = (user.companyId as mongoose.Types.ObjectId).toString();
+    }
+    if (approvalRoles.length > 0) {
+      payload.approvalRoles = approvalRoles;
     }
     const secret = String(config.jwt.refreshSecret);
     const options = {

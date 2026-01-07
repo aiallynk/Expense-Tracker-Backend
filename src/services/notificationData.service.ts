@@ -2,9 +2,9 @@ import mongoose from 'mongoose';
 
 import { CompanyAdmin } from '../models/CompanyAdmin';
 import { Notification, INotification, NotificationType } from '../models/Notification';
-import { BroadcastTargetType } from '../utils/enums';
-import { emitToCompanyAdmin , CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
 import { User } from '../models/User';
+import { emitToCompanyAdmin , CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
+import { BroadcastTargetType } from '../utils/enums';
 
 import { logger } from '@/config/logger';
 
@@ -122,15 +122,11 @@ export class NotificationDataService {
       return { notifications: [], total: 0, unreadCount: 0 };
     }
 
-    const companyId = companyAdmin.companyId.toString();
+    // companyId is not used in this function but kept for future use
     const userId = (companyAdmin._id as any).toString();
 
-    const query: any = {
-      $or: [
-        { userId: new mongoose.Types.ObjectId(userId) },
-        { companyId: new mongoose.Types.ObjectId(companyId) },
-      ],
-    };
+    // Notifications are stored per-recipient (userId required). Avoid broad companyId matching.
+    const query: any = { userId: new mongoose.Types.ObjectId(userId) };
 
     if (filters.type) {
       query.type = filters.type;
@@ -206,10 +202,7 @@ export class NotificationDataService {
 
     const result = await Notification.updateMany(
       {
-        $or: [
-          { userId: new mongoose.Types.ObjectId(userId) },
-          { companyId: new mongoose.Types.ObjectId(companyId) },
-        ],
+        userId: new mongoose.Types.ObjectId(userId),
         read: false,
       },
       {

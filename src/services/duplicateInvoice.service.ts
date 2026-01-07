@@ -1,6 +1,10 @@
+import { createHash } from 'crypto';
+
 import mongoose from 'mongoose';
 
 import { Expense } from '../models/Expense';
+
+
 import { logger } from '@/config/logger';
 
 /**
@@ -12,6 +16,57 @@ import { logger } from '@/config/logger';
  * - Invoice Amount
  */
 export class DuplicateInvoiceService {
+  private static normalizeInvoiceId(invoiceId: string): string {
+    return String(invoiceId || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+  }
+
+  private static normalizeVendor(vendor: string): string {
+    // Keep letters/numbers, collapse everything else to spaces for stability across punctuation variants.
+    const cleaned = String(vendor || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    return cleaned;
+  }
+
+  private static toDateOnlyString(d: Date): string {
+    const dt = new Date(d);
+    const y = dt.getUTCFullYear();
+    const m = String(dt.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(dt.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${day}`;
+  }
+
+  private static amountToMinorUnits(amount: number): number {
+    // Normalize to 2 decimals (paise/cents). Avoid float drift via rounding.
+    return Math.round(Number(amount) * 100);
+  }
+
+  static computeFingerprint(invoiceId: string, vendor: string, invoiceDate: Date, amount: number): string {
+    const invoiceIdNorm = this.normalizeInvoiceId(invoiceId);
+    const vendorNorm = this.normalizeVendor(vendor);
+    const dateStr = this.toDateOnlyString(invoiceDate);
+    const amountMinor = this.amountToMinorUnits(amount);
+    const raw = `${invoiceIdNorm}|${vendorNorm}|${dateStr}|${amountMinor}`;
+    return createHash('sha256').update(raw).digest('hex');
+  }
+
+  private static escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
+
+  private static dayBoundsUtc(date: Date): { start: Date; end: Date } {
+    const dt = new Date(date);
+    const start = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(), 0, 0, 0, 0));
+    const end = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate() + 1, 0, 0, 0, 0));
+    return { start, end };
+  }
+
   /**
    * Check if an invoice is a duplicate
    * @param invoiceId - Invoice ID/number
@@ -40,17 +95,14 @@ export class DuplicateInvoiceService {
     }
 
     try {
-      // Build query to find duplicates
-      const query: any = {
-        invoiceId: invoiceId.trim(),
-        vendor: vendor.trim(),
-        invoiceDate: new Date(invoiceDate),
-        amount: amount,
-      };
+      const fingerprint = this.computeFingerprint(invoiceId, vendor, invoiceDate, amount);
+      const { start, end } = this.dayBoundsUtc(invoiceDate);
+
+      const baseQuery: any = {};
 
       // Exclude current expense if updating
       if (excludeExpenseId) {
-        query._id = { $ne: new mongoose.Types.ObjectId(excludeExpenseId) };
+        baseQuery._id = { $ne: new mongoose.Types.ObjectId(excludeExpenseId) };
       }
 
       // If companyId is provided, scope to expenses from that company's users
@@ -58,13 +110,32 @@ export class DuplicateInvoiceService {
         const { User } = await import('../models/User');
         const companyUsers = await User.find({ companyId }).select('_id').exec();
         const userIds = companyUsers.map(u => u._id);
-        query.userId = { $in: userIds };
+        baseQuery.userId = { $in: userIds };
       }
 
-      // Find duplicate expense
+      // Prefer fingerprint match (fast path). Also include a legacy-safe match for older rows
+      // that may not yet have invoiceFingerprint populated.
+      const legacyInvoiceId = invoiceId.trim();
+      const legacyVendor = vendor.trim();
+      const legacyQuery: any = {
+        invoiceId: { $regex: new RegExp(`^${this.escapeRegex(legacyInvoiceId)}$`, 'i') },
+        vendor: { $regex: new RegExp(`^${this.escapeRegex(legacyVendor)}$`, 'i') },
+        invoiceDate: { $gte: start, $lt: end },
+        amount,
+      };
+
+      const query: any = {
+        ...baseQuery,
+        $or: [
+          { invoiceFingerprint: fingerprint },
+          legacyQuery,
+        ],
+      };
+
       const duplicateExpense = await Expense.findOne(query)
         .populate('userId', 'name email')
         .populate('reportId', 'name status')
+        .sort({ createdAt: -1 })
         .exec();
 
       if (duplicateExpense) {
@@ -82,7 +153,7 @@ export class DuplicateInvoiceService {
             userName: user?.name || user?.email,
             expenseDate: duplicateExpense.expenseDate,
           },
-          message: `Duplicate invoice detected. This invoice (ID: ${invoiceId}) was already submitted in report "${report?.name || 'N/A'}" by ${user?.name || user?.email || 'N/A'}.`,
+          message: `Duplicate invoice detected. This invoice (ID: ${invoiceId}) already exists in report "${report?.name || 'N/A'}" (status: ${report?.status || 'N/A'}) for ${user?.name || user?.email || 'N/A'}.`,
         };
       }
 

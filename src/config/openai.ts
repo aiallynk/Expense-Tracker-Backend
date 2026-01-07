@@ -1,5 +1,7 @@
 import OpenAI from 'openai';
+
 import { logger } from './logger';
+
 import { config } from './index';
 
 // Initialize OpenAI Client (for Vision & Text)

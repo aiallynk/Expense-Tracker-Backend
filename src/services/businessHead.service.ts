@@ -182,7 +182,7 @@ export class BusinessHeadService {
         pendingReportsByManager,
       };
     } catch (error: any) {
-      logger.error({ error: error }, 'Error getting business head dashboard stats:');
+      logger.error({ error }, 'Error getting business head dashboard stats:');
       throw error;
     }
   }
@@ -326,7 +326,7 @@ export class BusinessHeadService {
 
       return managersWithStats;
     } catch (error: any) {
-      logger.error({ error: error }, 'Error getting managers:');
+      logger.error({ error }, 'Error getting managers:');
       throw error;
     }
   }
@@ -454,7 +454,7 @@ export class BusinessHeadService {
         total,
       };
     } catch (error: any) {
-      logger.error({ error: error }, 'Error getting company reports:');
+      logger.error({ error }, 'Error getting company reports:');
       throw error;
     }
   }
@@ -666,7 +666,7 @@ export class BusinessHeadService {
 
       return pendingReportsWithDetails;
     } catch (error: any) {
-      logger.error({ error: error }, 'Error getting pending reports:');
+      logger.error({ error }, 'Error getting pending reports:');
       throw error;
     }
   }
@@ -717,7 +717,7 @@ export class BusinessHeadService {
         companyId: reportUser.companyId?.toString()
       });
     } catch (error) {
-      logger.error({ error: error }, 'Error sending notification:');
+      logger.error({ error }, 'Error sending notification:');
     }
 
     return updatedReport;
@@ -788,7 +788,7 @@ export class BusinessHeadService {
         companyId: reportUser.companyId?.toString()
       });
     } catch (error) {
-      logger.error({ error: error }, 'Error sending notification:');
+      logger.error({ error }, 'Error sending notification:');
     }
 
     return updatedReport;

@@ -118,6 +118,9 @@ export class BulkUploadController {
           userId,
           data.receiptId // Pass receipt ID for linking
         );
+        const createdExpenseIds = (result.expensesCreated || []).filter(
+          (id: any): id is string => typeof id === 'string' && id.length > 0
+        );
 
         // Update receipt with processing results
         if (data.receiptId) {
@@ -126,7 +129,7 @@ export class BulkUploadController {
               isBulkDocument: true,
               reportId: data.reportId,
               receiptsExtracted: result.receipts.length,
-              expensesLinked: result.expensesCreated,
+              expensesLinked: createdExpenseIds,
               processedAt: new Date(),
             },
           });
@@ -136,7 +139,7 @@ export class BulkUploadController {
           userId,
           reportId: data.reportId,
           receiptsFound: result.receipts.length,
-          expensesCreated: result.expensesCreated.length,
+          expensesCreated: createdExpenseIds.length,
           errors: result.errors.length,
         }, 'Bulk document processed');
 
@@ -148,12 +151,13 @@ export class BulkUploadController {
             receiptsExtracted: result.receipts.length,
             expensesCreated: result.expensesCreated,
             extractedData: result.receipts,
+            results: result.results,
             documentReceiptId: data.receiptId, // Include receipt ID for frontend
             storageKey: data.storageKey,
             errors: result.errors,
           },
           message: result.success 
-            ? `Successfully extracted ${result.receipts.length} receipt(s) and created ${result.expensesCreated.length} expense draft(s)`
+            ? `Successfully extracted ${result.receipts.length} receipt(s) and created ${createdExpenseIds.length} expense draft(s)`
             : 'Document processing completed with errors',
         });
       } catch (error: any) {

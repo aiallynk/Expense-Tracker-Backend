@@ -10,28 +10,32 @@ import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
 import { urlSanitizerMiddleware } from './middleware/urlSanitizer.middleware';
-import adminRoutes from './routes/admin.routes';
 import accountantRoutes from './routes/accountant.routes';
+import adminRoutes from './routes/admin.routes';
+import advanceCashRoutes from './routes/advanceCash.routes';
+import analyticsRoutes from './routes/analytics.routes';
+import approvalMatrixRoutes from './routes/approvalMatrix.routes';
 import authRoutes from './routes/auth.routes';
 import bulkUploadRoutes from './routes/bulkUpload.routes';
 import businessHeadRoutes from './routes/businessHead.routes';
 import categoriesRoutes from './routes/categories.routes';
-import costCentresRoutes from './routes/costCentres.routes';
 import companyAdminRoutes from './routes/companyAdmin.routes';
 import companySettingsRoutes from './routes/companySettings.routes';
+import costCentresRoutes from './routes/costCentres.routes';
+import currencyRoutes from './routes/currency.routes';
 import departmentsRoutes from './routes/departments.routes';
+import employeeApprovalProfilesRoutes from './routes/employeeApprovalProfiles.routes';
 import expensesRoutes from './routes/expenses.routes';
 import managerRoutes from './routes/manager.routes';
 import notificationsRoutes from './routes/notifications.routes';
 import ocrRoutes from './routes/ocr.routes';
 import projectsRoutes from './routes/projects.routes';
+import projectStakeholderRoutes from './routes/projectStakeholder.routes';
 import receiptsRoutes from './routes/receipts.routes';
 import reportsRoutes from './routes/reports.routes';
 import serviceAccountRoutes from './routes/serviceAccount.routes';
 import superAdminRoutes from './routes/superAdmin.routes';
 import usersRoutes from './routes/users.routes';
-import analyticsRoutes from './routes/analytics.routes';
-import currencyRoutes from './routes/currency.routes';
 
 import { logger } from '@/config/logger';
 
@@ -177,8 +181,10 @@ export const createApp = (): Express => {
   app.use('/api/v1/auth', authRoutes);
   app.use('/api/v1/users', usersRoutes);
   app.use('/api/v1/projects', projectsRoutes);
+  app.use('/api/v1/project-stakeholders', projectStakeholderRoutes);
   app.use('/api/v1/categories', categoriesRoutes);
   app.use('/api/v1/cost-centres', costCentresRoutes);
+  app.use('/api/v1/advance-cash', advanceCashRoutes);
   app.use('/api/v1/reports', reportsRoutes);
   app.use('/api/v1', expensesRoutes);
   app.use('/api/v1', receiptsRoutes);
@@ -203,6 +209,12 @@ export const createApp = (): Express => {
 
   // Currency routes
   app.use('/api/v1/currency', currencyRoutes);
+
+  // Approval Matrix routes
+  app.use('/api/v1/approval-matrix', approvalMatrixRoutes);
+
+  // Employee Approval Profiles (AI-generated + manual override chains)
+  app.use('/api/v1/employee-approval-profiles', employeeApprovalProfilesRoutes);
 
   // 404 handler
   app.use((_req, res) => {

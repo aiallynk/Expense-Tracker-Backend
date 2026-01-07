@@ -1,7 +1,9 @@
 import mongoose from 'mongoose';
-import { User, IUser } from '../models/User';
+
 import { ApproverMapping, IApproverMapping } from '../models/ApproverMapping';
+import { User, IUser } from '../models/User';
 import { UserRole, UserStatus } from '../utils/enums';
+
 import { logger } from '@/config/logger';
 
 /**

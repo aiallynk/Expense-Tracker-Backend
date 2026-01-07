@@ -8,7 +8,7 @@ import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
 
 // import { AuthRequest } from '../middleware/auth.middleware'; // Unused
 
-import { UserRole, UserStatus , AuditAction } from '../utils/enums';
+import { UserRole, UserStatus, AuditAction } from '../utils/enums';
 
 import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
@@ -30,6 +30,7 @@ export class UsersService {
       .select('-passwordHash')
       .populate('companyId', 'name domain shortcut')
       .populate('departmentId', 'name code')
+      .populate('roles', 'name type') // Populate approval roles
       .exec();
   }
 
@@ -55,7 +56,7 @@ export class UsersService {
       }
 
       await admin.save();
-      
+
       // Return admin without passwordHash (similar to getCurrentUser)
       const adminObj = admin.toObject();
       if ('passwordHash' in adminObj) {
@@ -105,7 +106,7 @@ export class UsersService {
           throw new Error('Department does not belong to your company');
         }
       }
-      
+
       if (!user.departmentId) {
         // Only allow setting if not already set
         if (data.departmentId) {
@@ -130,10 +131,10 @@ export class UsersService {
         if (employeeId) {
           user.employeeId = employeeId;
         }
-       } catch (error: any) {
-         // Log error but don't fail the update
-         logger.error({ error }, 'Error generating employee ID');
-       }
+      } catch (error: any) {
+        // Log error but don't fail the update
+        logger.error({ error }, 'Error generating employee ID');
+      }
     }
 
     const updatedUser = await user.save();
@@ -143,7 +144,7 @@ export class UsersService {
       .populate('departmentId', 'name code')
       .select('-passwordHash')
       .exec();
-    
+
     // Emit profile update to the user themselves for real-time updates
     if (result) {
       const formattedUser = {
@@ -165,11 +166,11 @@ export class UsersService {
       emitToUser(userId, 'user:profile-updated', formattedUser);
       logger.debug({ userId }, 'Emitted profile update to user');
     }
-    
+
     // Emit to company admin if user has company
     if (result?.companyId) {
-      const companyId = typeof result.companyId === 'object' 
-        ? (result.companyId as any)._id?.toString() 
+      const companyId = typeof result.companyId === 'object'
+        ? (result.companyId as any)._id?.toString()
         : (result.companyId as any).toString();
       const formattedUser = {
         id: (result._id as any).toString(),
@@ -178,7 +179,7 @@ export class UsersService {
         phone: result.phone,
         employeeId: result.employeeId,
         role: result.role,
-        companyId: companyId,
+        companyId,
         departmentId: result.departmentId ? {
           _id: (result.departmentId as any)._id?.toString() || (result.departmentId as any).toString(),
           name: (result.departmentId as any).name || null,
@@ -186,7 +187,7 @@ export class UsersService {
       };
       emitUserUpdated(companyId, formattedUser);
     }
-    
+
     return result || updatedUser;
   }
 
@@ -263,14 +264,14 @@ export class UsersService {
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return null;
     }
-    
+
     const query: any = { _id: id };
-    
+
     // If companyId is provided, ensure user belongs to that company
     if (companyId) {
       query.companyId = new mongoose.Types.ObjectId(companyId);
     }
-    
+
     return User.findOne(query)
       .select('-passwordHash')
       .populate('managerId', 'name email')
@@ -364,14 +365,14 @@ export class UsersService {
     if (user.companyId) {
       try {
         const companyId = user.companyId.toString();
-        
+
         // Fetch populated user data for real-time event
         const populatedUser = await User.findById(user._id)
           .select('-passwordHash')
           .populate('managerId', 'name email')
           .populate('departmentId', 'name code')
           .exec();
-        
+
         if (populatedUser) {
           // Emit user created event (send formatted user data)
           const formattedUser = {
@@ -388,7 +389,7 @@ export class UsersService {
           };
           emitUserCreated(companyId, formattedUser);
         }
-        
+
         // Emit dashboard stats update
         const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
         emitCompanyAdminDashboardUpdate(companyId, stats);
@@ -408,7 +409,7 @@ export class UsersService {
     requestingUserRole: string
   ): Promise<IUser> {
     const user = await User.findById(userId);
-    
+
     if (!user) {
       const error: any = new Error('User not found');
       error.statusCode = 404;
@@ -430,7 +431,7 @@ export class UsersService {
           throw error;
         }
       }
-      
+
       // Ensure COMPANY_ADMIN cannot change role to admin roles
       if (data.role && ![UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD, UserRole.ACCOUNTANT].includes(data.role as UserRole)) {
         const error: any = new Error('Company admins can only assign EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT roles');
@@ -444,14 +445,14 @@ export class UsersService {
     if (data.name !== undefined) {
       user.name = data.name;
     }
-    
+
     if (data.phone !== undefined) {
       user.phone = data.phone || undefined;
     }
-    
+
     if (data.email !== undefined) {
       // Check if email is already taken by another user
-      const existingUser = await User.findOne({ 
+      const existingUser = await User.findOne({
         email: data.email.toLowerCase(),
         _id: { $ne: userId }
       });
@@ -463,30 +464,30 @@ export class UsersService {
       }
       user.email = data.email.toLowerCase();
     }
-    
+
     if (data.role !== undefined) {
       user.role = data.role as UserRole;
     }
-    
+
     if (data.roles !== undefined) {
       // Filter out duplicates and the primary role
       const primaryRole = data.role !== undefined ? data.role : user.role;
       const additionalRoles = data.roles.filter(r => r && r !== primaryRole);
-      user.roles = additionalRoles;
+      user.roles = additionalRoles.map(role => new mongoose.Types.ObjectId(role));
     }
-    
+
     if (data.departmentId !== undefined) {
-      user.departmentId = data.departmentId 
-        ? new mongoose.Types.ObjectId(data.departmentId) 
+      user.departmentId = data.departmentId
+        ? new mongoose.Types.ObjectId(data.departmentId)
         : undefined;
     }
-    
+
     if (data.managerId !== undefined) {
-      user.managerId = data.managerId 
-        ? new mongoose.Types.ObjectId(data.managerId) 
+      user.managerId = data.managerId
+        ? new mongoose.Types.ObjectId(data.managerId)
         : undefined;
     }
-    
+
     if (data.status !== undefined) {
       user.status = data.status as UserStatus;
     }
@@ -516,7 +517,7 @@ export class UsersService {
     if (updatedUser.companyId) {
       try {
         const companyId = updatedUser.companyId.toString();
-        
+
         // Emit user updated event (send formatted user data with populated fields)
         const formattedUser = {
           id: updatedUser._id?.toString(),
@@ -531,7 +532,7 @@ export class UsersService {
           companyId: updatedUser.companyId,
         };
         emitUserUpdated(companyId, formattedUser);
-        
+
         // Emit dashboard stats update
         const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
         emitCompanyAdminDashboardUpdate(companyId, stats);

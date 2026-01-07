@@ -1,8 +1,8 @@
 import mongoose from 'mongoose';
 
 import { AuthRequest } from '../middleware/auth.middleware';
-import { User } from '../models/User';
 import { CompanyAdmin } from '../models/CompanyAdmin';
+import { User } from '../models/User';
 
 import { logger } from '@/config/logger';
 

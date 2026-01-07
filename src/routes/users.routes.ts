@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
-import { UsersController } from '../controllers/users.controller';
 import { BrandingController } from '../controllers/branding.controller';
+import { UsersController } from '../controllers/users.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireAdmin } from '../middleware/role.middleware';
 import { validate } from '../middleware/validate.middleware';

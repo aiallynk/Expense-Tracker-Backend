@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 
 import { config } from '../config/index';
+
 import { logger } from '@/config/logger';
 
 export interface AnalyticsRequest extends Request {

@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
 
-import { authMiddleware , AuthRequest } from '../middleware/auth.middleware';
+import { NotificationController } from '../controllers/notification.controller';
+import { authMiddleware, AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { NotificationService } from '../services/notification.service';
-import { NotificationController } from '../controllers/notification.controller';
 import { NotificationPlatform } from '../utils/enums';
 
 const router = Router();
@@ -45,6 +45,9 @@ router.put('/:id/read', NotificationController.markAsRead);
 
 // Mark all notifications as read
 router.put('/read-all', NotificationController.markAllAsRead);
+
+// Clear all notifications for current user
+router.delete('/', NotificationController.clearAll);
 
 export default router;
 

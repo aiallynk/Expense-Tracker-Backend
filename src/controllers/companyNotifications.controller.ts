@@ -1,8 +1,9 @@
 import { Response } from 'express';
+import mongoose from 'mongoose';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { NotificationType } from '../models/Notification';
+import { Notification , NotificationType } from '../models/Notification';
 import { NotificationDataService } from '../services/notificationData.service';
 
 export class CompanyNotificationsController {
@@ -75,6 +76,25 @@ export class CompanyNotificationsController {
       success: true,
       message: `Marked ${count} notifications as read`,
       data: { count },
+    });
+  });
+
+  /**
+   * Clear (delete) all notifications for this company admin user only
+   * DELETE /api/v1/company-admin/notifications
+   */
+  static clearAll = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const companyAdminId = req.user!.id;
+
+    // Only delete notifications addressed to this company admin (NOT company-wide)
+    const result = await Notification.deleteMany({
+      userId: new mongoose.Types.ObjectId(companyAdminId),
+    }).exec();
+
+    res.status(200).json({
+      success: true,
+      message: `Cleared ${result.deletedCount || 0} notifications`,
+      data: { count: result.deletedCount || 0 },
     });
   });
 }

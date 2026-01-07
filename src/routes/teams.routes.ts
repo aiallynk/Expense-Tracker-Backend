@@ -1,7 +1,7 @@
 import { Router } from 'express';
 
-import { TeamsController } from '../controllers/teams.controller';
 import { ManagerController } from '../controllers/manager.controller';
+import { TeamsController } from '../controllers/teams.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/role.middleware';
 import { UserRole } from '../utils/enums';

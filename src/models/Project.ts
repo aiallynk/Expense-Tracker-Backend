@@ -11,6 +11,7 @@ export interface IProject extends Document {
   code?: string;
   description?: string;
   companyId: mongoose.Types.ObjectId;
+  costCentreId?: mongoose.Types.ObjectId;
   managerId?: mongoose.Types.ObjectId;
   startDate?: Date;
   endDate?: Date;
@@ -18,6 +19,7 @@ export interface IProject extends Document {
   spentAmount?: number; // Total amount spent on this project
   thresholdPercentage?: number; // Percentage threshold for additional approval (e.g., 80 = 80% of budget)
   status: ProjectStatus;
+  isGlobal: boolean; // If true, visible to all company users
   metadata?: Record<string, any>;
   createdAt: Date;
   updatedAt: Date;
@@ -43,6 +45,10 @@ const projectSchema = new Schema<IProject>(
       type: Schema.Types.ObjectId,
       ref: 'Company',
       required: true,
+    },
+    costCentreId: {
+      type: Schema.Types.ObjectId,
+      ref: 'CostCentre',
     },
     managerId: {
       type: Schema.Types.ObjectId,
@@ -75,6 +81,10 @@ const projectSchema = new Schema<IProject>(
       default: ProjectStatus.ACTIVE,
       required: true,
     },
+    isGlobal: {
+      type: Boolean,
+      default: false,
+    },
     metadata: {
       type: Schema.Types.Mixed,
       default: {},
@@ -88,6 +98,7 @@ const projectSchema = new Schema<IProject>(
 // Indexes - name must be unique within a company
 projectSchema.index({ companyId: 1, name: 1 }, { unique: true });
 projectSchema.index({ companyId: 1, status: 1 });
+projectSchema.index({ companyId: 1, costCentreId: 1, status: 1 });
 projectSchema.index({ companyId: 1, code: 1 }, { unique: true, sparse: true });
 projectSchema.index({ managerId: 1 });
 

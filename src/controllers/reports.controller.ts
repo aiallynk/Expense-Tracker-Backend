@@ -2,14 +2,15 @@ import { Response } from 'express';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
-import { ReportsService } from '../services/reports.service';
 import { ExportService } from '../services/export.service';
+import { ReportsService } from '../services/reports.service';
 import {
   createReportSchema,
   updateReportSchema,
   reportFiltersSchema,
   reportActionSchema,
 } from '../utils/dtoTypes';
+import { ExportFormat } from '../utils/enums';
 
 import { logger } from '@/config/logger';
 // import { ExpenseReportStatus } from '../utils/enums'; // Unused
@@ -146,7 +147,6 @@ export class ReportsController {
     const reportId = req.params.id;
     const buffer = await ExportService.generateStructuredExport(
       reportId,
-      'xlsx',
       req.user!.id,
       req.user!.role
     );
@@ -165,29 +165,28 @@ export class ReportsController {
   });
 
   /**
-   * Export report as structured CSV (Expense Reimbursement Form)
-   * GET /api/v1/reports/:id/export/csv
+   * Export report as structured PDF (Expense Reimbursement Form)
+   * GET /api/v1/reports/:id/export/pdf
    */
-  static exportCSV = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const reportId = req.params.id;
-    const buffer = await ExportService.generateStructuredExport(
-      reportId,
-      'csv',
-      req.user!.id,
-      req.user!.role
-    );
+  static exportPDF = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const buffer = await ExportService.generateExport(
+      req.params.id,
+      ExportFormat.PDF,
+      true // return buffer directly
+    ) as Buffer;
 
     const report = await ReportsService.getReportById(
-      reportId,
+      req.params.id,
       req.user!.id,
       req.user!.role
     );
 
-    const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.csv`;
+    const filename = `Expense_Reimbursement_${report?.name || req.params.id}_${new Date().toISOString().split('T')[0]}.pdf`;
 
-    res.setHeader('Content-Type', 'text/csv;charset=utf-8');
+    res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.status(200).send(buffer);
   });
+
 }
 

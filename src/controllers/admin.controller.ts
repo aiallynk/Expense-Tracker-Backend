@@ -96,7 +96,7 @@ export class AdminController {
       }
     }
 
-    const csvBuffer = await ExportService.generateBulkCSV({
+    const excelBuffer = await ExportService.generateBulkExcel({
       ...filters,
       companyId,
       fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
@@ -105,11 +105,11 @@ export class AdminController {
 
     // Generate filename
     const timestamp = new Date().toISOString().split('T')[0];
-    const filename = `expense-export-${timestamp}.csv`;
+    const filename = `expense-export-${timestamp}.xlsx`;
 
-    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.status(200).send(csvBuffer);
+    res.status(200).send(excelBuffer);
   });
 
   /**

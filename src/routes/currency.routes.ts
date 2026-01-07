@@ -1,4 +1,5 @@
 import { Router } from 'express';
+
 import { CurrencyController } from '@/controllers/currency.controller';
 import { authMiddleware } from '@/middleware/auth.middleware';
 

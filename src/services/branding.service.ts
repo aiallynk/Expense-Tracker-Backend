@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto';
 
 import { Company } from '../models/Company';
-import { getPresignedUploadUrl, getPresignedDownloadUrl } from '../utils/s3';
 import { UploadIntentDto } from '../utils/dtoTypes';
+import { getPresignedUploadUrl, getPresignedDownloadUrl } from '../utils/s3';
+
 import { logger } from '@/config/logger';
 
 /**

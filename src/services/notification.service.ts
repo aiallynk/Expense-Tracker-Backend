@@ -1,10 +1,11 @@
 import mongoose from 'mongoose';
+
 import { getMessaging } from '../config/firebase';
 import { getResendClient, getFromEmail } from '../config/resend';
 import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused
-import { NotificationPlatform , ExpenseReportStatus } from '../utils/enums';
+import { NotificationPlatform, ExpenseReportStatus } from '../utils/enums';
 import { getAllUsersTopic, getCompanyTopic, getRoleTopic } from '../utils/topicUtils';
 
 import { logger } from '@/config/logger';
@@ -17,10 +18,10 @@ export class NotificationService {
     platform: NotificationPlatform
   ): Promise<void> {
     // Remove existing token if exists (by fcmToken or token field)
-    await NotificationToken.findOneAndDelete({ 
+    await NotificationToken.findOneAndDelete({
       $or: [
         { fcmToken: token },
-        { token: token }
+        { token }
       ]
     });
 
@@ -29,7 +30,7 @@ export class NotificationService {
       { userId, platform },
       {
         userId,
-        token: token,
+        token,
         fcmToken: token,
         platform,
       },
@@ -180,7 +181,7 @@ export class NotificationService {
               if (!resp.success) {
                 const errorCode = resp.error?.code;
                 if (errorCode === 'messaging/registration-token-not-registered' ||
-                    errorCode === 'messaging/invalid-registration-token') {
+                  errorCode === 'messaging/invalid-registration-token') {
                   invalidTokens.push(fcmTokens[idx]);
                 }
               }
@@ -292,10 +293,10 @@ export class NotificationService {
       }
 
       // Find tokens for this user (handle both string and ObjectId)
-      const userIdQuery = typeof userId === 'string' 
-        ? new mongoose.Types.ObjectId(userId) 
+      const userIdQuery = typeof userId === 'string'
+        ? new mongoose.Types.ObjectId(userId)
         : userId;
-      
+
       const tokens = await NotificationToken.find({ userId: userIdQuery }).select('fcmToken platform token').exec();
 
       if (tokens.length === 0) {
@@ -371,7 +372,7 @@ export class NotificationService {
           if (!resp.success) {
             const errorCode = resp.error?.code;
             if (errorCode === 'messaging/registration-token-not-registered' ||
-                errorCode === 'messaging/invalid-registration-token') {
+              errorCode === 'messaging/invalid-registration-token') {
               invalidTokens.push(fcmTokens[idx]);
             }
           }
@@ -398,14 +399,14 @@ export class NotificationService {
       return;
     }
 
-    logger.info({ 
-      reportId: report._id, 
+    logger.info({
+      reportId: report._id,
       approversCount: report.approvers.length,
-      approvers: report.approvers.map((a: any) => ({ 
-        level: a.level, 
-        userId: a.userId?.toString(), 
+      approvers: report.approvers.map((a: any) => ({
+        level: a.level,
+        userId: a.userId?.toString(),
         role: a.role,
-        decidedAt: a.decidedAt 
+        decidedAt: a.decidedAt
       }))
     }, 'Processing notifications for report submission');
 
@@ -455,7 +456,7 @@ export class NotificationService {
     for (const approver of level1Approvers) {
       const approverUserId = approver.userId;
       let approverId: string;
-      
+
       if (typeof approverUserId === 'string') {
         approverId = approverUserId;
       } else if (approverUserId && typeof approverUserId.toString === 'function') {
@@ -463,12 +464,12 @@ export class NotificationService {
       } else {
         approverId = String(approverUserId);
       }
-      
+
       if (!approverId || approverId === 'undefined' || approverId === 'null') {
         logger.warn({ approver, reportId: report._id }, 'Invalid approver userId, skipping');
         continue;
       }
-      
+
       // Verify approver is from same company as report owner
       if (reportOwner.companyId) {
         const approverUser = await User.findById(approverId).select('companyId').exec();
@@ -601,7 +602,7 @@ export class NotificationService {
     // Determine approver level and role
     const approverLevel = approvers[0]?.level || 2;
     const levelName = approverLevel === 2 ? 'Business Head' : `Level ${approverLevel} Approver`;
-    
+
     // Level 2 approvers are typically BUSINESS_HEAD role
     const targetRole = approverLevel === 2 ? 'BUSINESS_HEAD' : approvers[0]?.role || 'BUSINESS_HEAD';
 
@@ -634,7 +635,7 @@ export class NotificationService {
 
     for (const approver of approvers) {
       const approverId = approver.userId.toString();
-      
+
       // Verify approver is from same company as report owner
       if (reportOwner.companyId) {
         const approverUser = await User.findById(approverId).select('companyId').exec();
@@ -752,6 +753,48 @@ export class NotificationService {
               <li><strong>Approval Level:</strong> ${(data as any).level || 'N/A'}</li>
             </ul>
             <p>Please review and approve or reject the report.</p>
+          `;
+          break;
+        case 'approval_required':
+          html = `
+            <h2>New Approval Required</h2>
+            <p>A new ${(data as any).requestType || 'request'} requires your approval:</p>
+            <ul>
+              <li><strong>Request:</strong> ${(data as any).requestName}</li>
+              <li><strong>Submitted by:</strong> ${(data as any).requesterName}</li>
+              <li><strong>Your Role(s):</strong> ${(data as any).roleNames}</li>
+              <li><strong>Approval Level:</strong> ${(data as any).level || 'N/A'}</li>
+            </ul>
+            <p>Please review and approve or reject this request in your Pending Approvals inbox.</p>
+          `;
+          break;
+        case 'request_approved':
+          html = `
+            <h2>${(data as any).requestType || 'Request'} Approved</h2>
+            <p>Your ${(data as any).requestType || 'request'} has been approved:</p>
+            <ul>
+              <li><strong>Request:</strong> ${(data as any).requestName}</li>
+              ${(data as any).comments ? `<li><strong>Comments:</strong> ${(data as any).comments}</li>` : ''}
+            </ul>
+            <p>Thank you for your submission.</p>
+          `;
+          break;
+        case 'request_rejected':
+          html = `
+            <h2>${(data as any).requestType || 'Request'} Rejected</h2>
+            <p>Your ${(data as any).requestType || 'request'} has been rejected:</p>
+            <ul>
+              <li><strong>Request:</strong> ${(data as any).requestName}</li>
+              ${(data as any).comments ? `<li><strong>Reason:</strong> ${(data as any).comments}</li>` : ''}
+            </ul>
+            <p>Please review the feedback and resubmit if necessary.</p>
+          `;
+          break;
+        case 'broadcast':
+          html = `
+            <h2>${(data as any).title || data.subject}</h2>
+            <p style="margin: 12px 0; font-size: 14px; line-height: 1.6;">${(data as any).message || ''}</p>
+            ${(data as any).type ? `<p style="margin-top: 16px; font-size: 12px; opacity: 0.8;">Type: ${(data as any).type}</p>` : ''}
           `;
           break;
         default:

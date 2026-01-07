@@ -1,5 +1,4 @@
-import { Router } from 'express';
-import express from 'express';
+import express, { Router } from 'express';
 
 import { ReceiptsController } from '../controllers/receipts.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
