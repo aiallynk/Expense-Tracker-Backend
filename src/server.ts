@@ -11,6 +11,7 @@ import { redisConnection , ocrQueue } from './config/queue';
 import { CompanyAdminDashboardService } from './services/companyAdminDashboard.service';
 import { NotificationBroadcastService } from './services/notificationBroadcast.service';
 import { SystemAnalyticsService } from './services/systemAnalytics.service';
+import { schedulerService } from './services/scheduler.service';
 import { initializeSocketServer } from './socket/socketServer';
 import { startExchangeRateWorker } from './worker/exchangeRate.worker';
 
@@ -61,6 +62,14 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
     }
   } catch (error) {
     logger.error({ error }, 'Error closing Redis connection');
+  }
+
+  // Stop scheduler service
+  try {
+    schedulerService.stop();
+    logger.info('Scheduler service stopped');
+  } catch (error) {
+    logger.error({ error }, 'Error stopping scheduler service');
   }
 
   // Give connections time to close (max 10 seconds)
@@ -207,6 +216,10 @@ const initializeServices = async (): Promise<void> => {
         logger.error({ error: err }, 'Error processing scheduled notification broadcasts');
       });
     }, 60_000);
+
+    // Start SuperAdmin insight detection scheduler
+    schedulerService.start();
+    logger.info('SuperAdmin insight scheduler started');
 
     logger.info('Periodic analytics services started');
   } catch (error) {

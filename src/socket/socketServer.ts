@@ -83,6 +83,19 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
     if (user.role === UserRole.SUPER_ADMIN) {
       socket.join('super-admin');
       logger.debug(`Super admin ${user.email} joined super-admin room`);
+
+      // Handle analytics requests from super admin
+      socket.on('super-admin:system-analytics-request', async (filters = {}) => {
+        try {
+          logger.debug({ filters }, 'Received system analytics request from super admin');
+          const { SystemAnalyticsService } = await import('../services/systemAnalytics.service');
+          await SystemAnalyticsService.collectAndEmitAnalytics();
+          // Note: The analytics service already includes filtering in the HTTP endpoint,
+          // but for WebSocket requests, we could implement filter-specific updates if needed
+        } catch (error) {
+          logger.error({ error }, 'Failed to handle system analytics request');
+        }
+      });
     }
 
     // Join company admin room if user is company admin

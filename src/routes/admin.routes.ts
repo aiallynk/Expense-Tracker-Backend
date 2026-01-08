@@ -23,9 +23,15 @@ router.use(authMiddleware);
 
 // Analytics endpoints (read-only) - allow service accounts
 router.get('/summary/dashboard', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getDashboard);
+router.get('/summary/dashboard/filtered', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getFilteredDashboard);
 router.get('/summary/storage-growth', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getStorageGrowth);
 router.get('/export/csv', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkCsvExport);
 router.get('/export/excel', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkExcelExport);
+
+// Company Analytics (read-only) - allow service accounts
+router.get('/companies', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getCompaniesList);
+router.get('/companies/:id/analytics', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getCompanyAnalytics);
+router.get('/companies/:id/mini-stats', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getCompanyMiniStats);
 
 // Other routes require admin role (no service accounts)
 router.use(requireAdmin);
@@ -47,7 +53,21 @@ router.post('/expenses/:id/reject', AdminController.rejectExpense);
 
 // Dashboard
 router.get('/summary/dashboard', AdminController.getDashboard);
+router.get('/summary/dashboard/filtered', AdminController.getFilteredDashboard);
 router.get('/summary/storage-growth', AdminController.getStorageGrowth);
+
+// Company Analytics
+router.get('/companies/:id/analytics', AdminController.getCompanyAnalytics);
+router.get('/companies/:id/mini-stats', AdminController.getCompanyMiniStats);
+
+// Insight Detection (Admin only - triggers alerts)
+router.post('/insights/detect/ocr-spike', AdminController.detectOCRSpike);
+router.post('/insights/detect/api-abuse', AdminController.detectAPIAbuse);
+router.post('/insights/check/storage-thresholds', AdminController.checkStorageThresholds);
+
+// Cache Management (Admin only)
+router.get('/cache/stats', AdminController.getCacheStats);
+router.post('/cache/clear', AdminController.clearCache);
 
 // Activity Logs
 router.get('/activity', ActivityController.getActivityLogs);

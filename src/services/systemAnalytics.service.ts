@@ -1,13 +1,14 @@
+
 import mongoose from 'mongoose';
 
 import { ApiRequestLog } from '../models/ApiRequestLog';
-import { CompanyAdmin } from '../models/CompanyAdmin';
+import { Company } from '../models/Company';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { OcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
 import { User } from '../models/User';
 import { emitSystemAnalyticsUpdate, emitDashboardStatsUpdate } from '../socket/realtimeEvents';
-import { ExpenseReportStatus, OcrJobStatus } from '../utils/enums';
+import { ExpenseReportStatus, OcrJobStatus, UserStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
 
@@ -194,16 +195,36 @@ export class SystemAnalyticsService {
         value: value || 0,
       }));
 
-      // System status - REAL DATA
-      const dbConnectionState = mongoose.connection.readyState;
-      const isDbConnected = dbConnectionState === 1;
-      
+      // Individual metrics for real-time updates
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
+
+      // API requests count (last hour) - REAL DATA
+      const apiRequestsLastHour = await ApiRequestLog.countDocuments({
+        createdAt: { $gte: oneHourAgo },
+      });
+
+      // Error rate calculation - REAL DATA
+      const totalRequestsLastHour = apiRequestsLastHour;
+      const errorRequestsLastHour = await ApiRequestLog.countDocuments({
+        createdAt: { $gte: oneHourAgo },
+        statusCode: { $gte: 400 },
+      });
+      const errorRate = totalRequestsLastHour > 0
+        ? ((errorRequestsLastHour / totalRequestsLastHour) * 100).toFixed(2)
+        : '0.00';
+
+      // Peak concurrent users (active users) - REAL DATA
+      const peakConcurrentUsers = await User.countDocuments({ status: UserStatus.ACTIVE });
+
       // Get current OCR queue size
       const currentOcrQueueSize = await OcrJob.countDocuments({
         status: { $in: [OcrJobStatus.QUEUED, OcrJobStatus.PROCESSING] },
       });
 
       // Calculate database uptime (approximate - based on connection state)
+      const dbConnectionState = mongoose.connection.readyState;
+      const isDbConnected = dbConnectionState === 1;
+
       const systemStatus = {
         s3: { status: 'operational', uptime: 99.9 }, // Would need S3 health check
         database: { 
@@ -226,6 +247,12 @@ export class SystemAnalyticsService {
 
       // Emit real-time update
       emitSystemAnalyticsUpdate({
+        // Individual metrics
+        apiRequestsLastHour,
+        errorRate: parseFloat(errorRate),
+        peakConcurrentUsers,
+        ocrQueueSize: currentOcrQueueSize,
+        // Chart data
         apiRequests: formattedApiRequests,
         errorRateOverTime: formattedErrorRate, // Renamed to avoid conflict
         apiUsageByEndpoint: formattedApiUsageByEndpoint,
@@ -348,8 +375,9 @@ export class SystemAnalyticsService {
         value: item.count,
       }));
 
-      // User growth trend
-      const userGrowth = await User.aggregate([
+      // User growth trend - cumulative active users over time
+      // First try last 30 days, if no data, try last 90 days, then all time
+      let userGrowthRaw = await User.aggregate([
         {
           $match: {
             createdAt: { $gte: thirtyDaysAgo },
@@ -362,19 +390,72 @@ export class SystemAnalyticsService {
               month: { $month: '$createdAt' },
               day: { $dayOfMonth: '$createdAt' },
             },
-            active: { $sum: 1 },
+            newUsers: { $sum: 1 },
           },
         },
         { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
       ]);
 
-      const formattedUserGrowth = userGrowth.map((item) => ({
-        name: `${item._id.month}/${item._id.day}`,
-        active: item.active,
-      }));
+      if (userGrowthRaw.length === 0) {
+        logger.debug('No user data in last 30 days, trying last 90 days');
+        const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+        userGrowthRaw = await User.aggregate([
+          {
+            $match: {
+              createdAt: { $gte: ninetyDaysAgo },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+                day: { $dayOfMonth: '$createdAt' },
+              },
+              newUsers: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
+        ]);
+      }
+
+      if (userGrowthRaw.length === 0) {
+        logger.debug('No user data in last 90 days, getting all users');
+        userGrowthRaw = await User.aggregate([
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+                day: { $dayOfMonth: '$createdAt' },
+              },
+              newUsers: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
+          { $limit: 30 }, // Last 30 days of activity
+        ]);
+      }
+
+      logger.debug(`User growth aggregation returned ${userGrowthRaw.length} records`);
+
+      // Calculate cumulative growth
+      let cumulativeUsers = 0;
+      const formattedUserGrowth = userGrowthRaw.map((item) => {
+        cumulativeUsers += item.newUsers;
+        return {
+          name: `${item._id.month.toString().padStart(2, '0')}/${item._id.day.toString().padStart(2, '0')}`,
+          active: cumulativeUsers,
+        };
+      });
+
+      logger.debug(`Formatted user growth data: ${formattedUserGrowth.length} data points`);
+
+      // No sample data - only show real data or empty charts
 
       // Company signups
-      const companySignups = await CompanyAdmin.aggregate([
+      // First try last 30 days, if no data, try last 90 days, then all time
+      let companySignups = await Company.aggregate([
         {
           $match: {
             createdAt: { $gte: thirtyDaysAgo },
@@ -393,10 +474,57 @@ export class SystemAnalyticsService {
         { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
       ]);
 
+      if (companySignups.length === 0) {
+        logger.debug('No company data in last 30 days, trying last 90 days');
+        const ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+        companySignups = await Company.aggregate([
+          {
+            $match: {
+              createdAt: { $gte: ninetyDaysAgo },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+                day: { $dayOfMonth: '$createdAt' },
+              },
+              signups: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
+        ]);
+      }
+
+      if (companySignups.length === 0) {
+        logger.debug('No company data in last 90 days, getting all companies');
+        companySignups = await Company.aggregate([
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+                day: { $dayOfMonth: '$createdAt' },
+              },
+              signups: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1, '_id.day': 1 } },
+          { $limit: 30 }, // Last 30 days of activity
+        ]);
+      }
+
+      logger.debug(`Company signups aggregation returned ${companySignups.length} records`);
+
       const formattedCompanySignups = companySignups.map((item) => ({
-        name: `${item._id.month}/${item._id.day}`,
+        name: `${item._id.month.toString().padStart(2, '0')}/${item._id.day.toString().padStart(2, '0')}`,
         signups: item.signups,
       }));
+
+      logger.debug(`Formatted company signups data: ${formattedCompanySignups.length} data points`);
+
+      // No sample data - only show real data or empty charts
 
       // Revenue trend
       const revenueTrend = await ExpenseReport.aggregate([

@@ -33,6 +33,8 @@ router.get('/platform/stats', SuperAdminController.getPlatformStats);
 router.get('/companies', SuperAdminController.getCompanies);
 router.post('/companies', validate(createCompanySchema), SuperAdminController.createCompany);
 router.get('/companies/:id', SuperAdminController.getCompanyById);
+router.get('/companies/:id/analytics', SuperAdminController.getCompanyAnalytics);
+router.get('/companies/:id/mini-stats', SuperAdminController.getCompanyMiniStats);
 router.put('/companies/:id', validate(updateCompanySchema), SuperAdminController.updateCompany);
 router.delete('/companies/:id', SuperAdminController.deleteCompany);
 

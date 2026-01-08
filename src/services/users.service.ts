@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 import { CompanyAdmin, ICompanyAdmin } from '../models/CompanyAdmin';
 import { User, IUser } from '../models/User';
 import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated, emitToUser } from '../socket/realtimeEvents';
+import { SystemAnalyticsService } from './systemAnalytics.service';
 import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
 
 // import { AuthRequest } from '../middleware/auth.middleware'; // Unused
@@ -390,9 +391,16 @@ export class UsersService {
           emitUserCreated(companyId, formattedUser);
         }
 
-        // Emit dashboard stats update
+        // Emit dashboard stats update for company admin
         const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
         emitCompanyAdminDashboardUpdate(companyId, stats);
+
+        // Update super admin dashboard analytics in real-time
+        try {
+          await SystemAnalyticsService.collectAndEmitDashboardAnalytics();
+        } catch (analyticsError) {
+          logger.warn({ error: analyticsError }, 'Failed to update super admin dashboard analytics after user creation');
+        }
       } catch (error) {
         // Don't fail user creation if real-time updates fail
         logger.error({ error }, 'Error emitting real-time updates');

@@ -10,6 +10,7 @@ export enum SuperAdminEvent {
   COMPANY_DELETED = 'super-admin:company-deleted',
   SUBSCRIPTION_PLAN_UPDATED = 'super-admin:subscription-plan-updated',
   SYSTEM_ANALYTICS_UPDATE = 'super-admin:system-analytics-update',
+  SYSTEM_ANALYTICS_REQUEST = 'super-admin:system-analytics-request',
   LOG_ENTRY = 'super-admin:log-entry',
   SETTINGS_UPDATED = 'super-admin:settings-updated',
   BACKUP_CREATED = 'super-admin:backup-created',

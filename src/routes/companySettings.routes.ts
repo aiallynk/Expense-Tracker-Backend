@@ -6,8 +6,7 @@ import { BrandingController } from '../controllers/branding.controller';
 import { CompanyNotificationsController } from '../controllers/companyNotifications.controller';
 import { CompanySettingsController } from '../controllers/companySettings.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { requireRole } from '../middleware/role.middleware';
-import { UserRole } from '../utils/enums';
+import { requireCompanyAdmin } from '../middleware/role.middleware';
 // Import models to ensure they're registered with Mongoose
 import '../models/ApprovalRule';
 import '../models/ApproverMapping';
@@ -16,9 +15,9 @@ import '../models/Notification';
 
 const router = Router();
 
-// All routes require authentication and COMPANY_ADMIN role
+// All routes require authentication and COMPANY_ADMIN or SUPER_ADMIN role
 router.use(authMiddleware);
-router.use(requireRole(UserRole.COMPANY_ADMIN));
+router.use(requireCompanyAdmin);
 
 // Company Settings routes
 // GET /api/v1/company-admin/settings - Get company settings
