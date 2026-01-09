@@ -77,8 +77,12 @@ export const authMiddleware = async (
   next: NextFunction
 ): Promise<void> => {
   try {
-    // Skip authentication for health check endpoints
-    if (req.path === '/health' || req.path === '/healthz') {
+    // Skip authentication for health check endpoints and auth routes
+    if (
+      req.path === '/health' || 
+      req.path === '/healthz' ||
+      req.path.startsWith('/api/v1/auth')
+    ) {
       return next();
     }
 
@@ -169,6 +173,31 @@ export const authMiddleware = async (
         role: decoded.role,
         companyId: decoded.companyId,
       };
+
+      // Check maintenance mode - block non-super-admin users
+      if (decoded.role !== 'SUPER_ADMIN') {
+        const { SettingsService } = await import('../services/settings.service');
+        const settings = await SettingsService.getSettings();
+        
+        if (settings.features?.maintenanceMode === true) {
+          logger.warn(
+            { userId: decoded.id, email: decoded.email, role: decoded.role },
+            'Auth middleware - User blocked due to maintenance mode'
+          );
+          
+          // Emit maintenance mode logout event to user's socket
+          const { emitMaintenanceModeLogout } = await import('../socket/realtimeEvents');
+          emitMaintenanceModeLogout(decoded.id);
+          
+          res.status(503).json({
+            success: false,
+            message: 'System is under maintenance. Please try again later.',
+            code: 'MAINTENANCE_MODE',
+            maintenanceMode: true,
+          });
+          return;
+        }
+      }
 
       logger.debug(`Auth middleware - Token verified for user: ${decoded.email} (${decoded.id})`);
       next();

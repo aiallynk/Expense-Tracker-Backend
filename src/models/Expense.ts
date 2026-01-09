@@ -28,6 +28,14 @@ export interface IExpense extends Document {
   advanceAppliedAmount?: number; // user-intended amount to apply; actual deduction happens on final approval
   advanceCurrency?: string; // currency used for advance application (defaults to expense currency)
   advanceAppliedAt?: Date; // set when the deduction is actually applied
+  // Currency conversion metadata (Rule 5: Mandatory Metadata Storage)
+  conversionApplied?: boolean; // Whether currency conversion was applied
+  originalAmount?: number; // Original amount in original currency
+  originalCurrency?: string; // Original currency detected (from OCR, manual input, or existing expense)
+  convertedAmount?: number; // Converted amount in selected currency (same as amount if conversionApplied = false)
+  selectedCurrency?: string; // Company's selected currency (the currency amount is stored in)
+  exchangeRateUsed?: number; // Exchange rate used for conversion
+  exchangeRateDate?: Date; // Date when exchange rate was fetched/used
   // Manager feedback
   managerComment?: string; // Comment from manager when rejecting/requesting changes
   managerAction?: 'approve' | 'reject' | 'request_changes'; // Last manager action
@@ -133,6 +141,36 @@ const expenseSchema = new Schema<IExpense>(
       uppercase: true,
     },
     advanceAppliedAt: {
+      type: Date,
+    },
+    // Currency conversion metadata (Rule 5: Mandatory Metadata Storage)
+    conversionApplied: {
+      type: Boolean,
+      default: false,
+    },
+    originalAmount: {
+      type: Number,
+      min: 0,
+    },
+    originalCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+    },
+    convertedAmount: {
+      type: Number,
+      min: 0,
+    },
+    selectedCurrency: {
+      type: String,
+      trim: true,
+      uppercase: true,
+    },
+    exchangeRateUsed: {
+      type: Number,
+      min: 0,
+    },
+    exchangeRateDate: {
       type: Date,
     },
     // Manager feedback

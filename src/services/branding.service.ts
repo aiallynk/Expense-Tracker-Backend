@@ -15,11 +15,13 @@ export class BrandingService {
    * Create upload intent for company logo
    * @param companyId - Company ID
    * @param data - Upload intent data (filename, mimeType, sizeBytes)
+   * @param mode - Logo mode: 'light' or 'dark' (default: 'light')
    * @returns Upload URL and storage key
    */
   static async createUploadIntent(
     companyId: string,
-    data: UploadIntentDto
+    data: UploadIntentDto,
+    mode: 'light' | 'dark' = 'light'
   ): Promise<{ uploadUrl: string; storageKey: string }> {
     // Validate file type
     const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/svg+xml', 'image/webp'];
@@ -33,9 +35,9 @@ export class BrandingService {
       throw new Error('Logo file size exceeds 5MB limit');
     }
 
-    // Generate storage key
+    // Generate storage key with mode prefix
     const fileExtension = data.filename?.split('.').pop() || 'png';
-    const storageKey = `company-logos/${companyId}/${randomUUID()}.${fileExtension}`;
+    const storageKey = `company-logos/${companyId}/${mode}/${randomUUID()}.${fileExtension}`;
 
     // Generate presigned upload URL
     const uploadUrl = await getPresignedUploadUrl({
@@ -50,6 +52,7 @@ export class BrandingService {
       storageKey,
       mimeType: data.mimeType,
       filename: data.filename,
+      mode,
     }, 'Created logo upload intent');
 
     return { uploadUrl, storageKey };
@@ -59,11 +62,13 @@ export class BrandingService {
    * Confirm logo upload and update company record
    * @param companyId - Company ID
    * @param storageKey - Storage key from upload intent
+   * @param mode - Logo mode: 'light' or 'dark' (default: 'light')
    * @returns Logo URL and storage key
    */
   static async confirmUpload(
     companyId: string,
-    storageKey: string
+    storageKey: string,
+    mode: 'light' | 'dark' = 'light'
   ): Promise<{ logoUrl: string; logoStorageKey: string }> {
     // Small delay to ensure S3 upload has fully propagated
     await new Promise(resolve => setTimeout(resolve, 1000));
@@ -74,18 +79,34 @@ export class BrandingService {
       throw new Error('Company not found');
     }
 
-    // Delete old logo if exists (just clear reference, S3 cleanup can be done separately)
-    if (company.logoStorageKey && company.logoStorageKey !== storageKey) {
-      try {
-        logger.info({ oldStorageKey: company.logoStorageKey }, 'Old logo storage key (not deleted from S3)');
-      } catch (error) {
-        logger.error({ error }, 'Error handling old logo');
+    if (mode === 'dark') {
+      // Delete old dark logo if exists
+      if (company.darkLogoStorageKey && company.darkLogoStorageKey !== storageKey) {
+        try {
+          logger.info({ oldStorageKey: company.darkLogoStorageKey }, 'Old dark logo storage key (not deleted from S3)');
+        } catch (error) {
+          logger.error({ error }, 'Error handling old dark logo');
+        }
       }
+
+      // Store dark logo storage key
+      company.darkLogoStorageKey = storageKey;
+      company.darkLogoUrl = undefined; // Clear old URL if exists, will be generated on-demand
+    } else {
+      // Delete old light logo if exists
+      if (company.logoStorageKey && company.logoStorageKey !== storageKey) {
+        try {
+          logger.info({ oldStorageKey: company.logoStorageKey }, 'Old light logo storage key (not deleted from S3)');
+        } catch (error) {
+          logger.error({ error }, 'Error handling old light logo');
+        }
+      }
+
+      // Store light logo storage key
+      company.logoStorageKey = storageKey;
+      company.logoUrl = undefined; // Clear old URL if exists, will be generated on-demand
     }
 
-    // Store only the storage key, generate presigned URL on-demand (max 7 days for S3)
-    company.logoStorageKey = storageKey;
-    company.logoUrl = undefined; // Clear old URL if exists, will be generated on-demand
     await company.save();
 
     // Generate fresh presigned URL (max 7 days for S3 Signature Version 4)
@@ -94,6 +115,7 @@ export class BrandingService {
     logger.info({
       companyId,
       storageKey,
+      mode,
       logoUrl: logoUrl.substring(0, 50) + '...',
     }, 'Logo upload confirmed');
 
@@ -104,23 +126,40 @@ export class BrandingService {
    * Get company logo URL
    * Always generates a fresh presigned URL (max 7 days expiration for S3)
    * @param companyId - Company ID
+   * @param mode - Logo mode: 'light' or 'dark' (default: 'light')
+   * @param fallback - If true, fallback to light logo if dark logo not found (default: true)
    * @returns Logo URL or null
    */
-  static async getLogoUrl(companyId: string): Promise<string | null> {
-    const company = await Company.findById(companyId).select('logoStorageKey').exec();
+  static async getLogoUrl(
+    companyId: string,
+    mode: 'light' | 'dark' = 'light',
+    fallback: boolean = true
+  ): Promise<string | null> {
+    const company = await Company.findById(companyId).select('logoStorageKey darkLogoStorageKey').exec();
 
     if (!company) {
       return null;
     }
 
-    // Always generate fresh presigned URL from storage key (max 7 days for S3 Signature Version 4)
-    if (company.logoStorageKey) {
+    // Try to get logo based on mode
+    let storageKey: string | undefined;
+    if (mode === 'dark') {
+      storageKey = company.darkLogoStorageKey;
+      // If dark logo not found and fallback is enabled, use light logo
+      if (!storageKey && fallback) {
+        storageKey = company.logoStorageKey;
+      }
+    } else {
+      storageKey = company.logoStorageKey;
+    }
+
+    if (storageKey) {
       try {
         // Generate presigned URL with 7 days expiration (max allowed by S3)
-        const logoUrl = await getPresignedDownloadUrl('receipts', company.logoStorageKey, 7 * 24 * 60 * 60);
+        const logoUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60);
         return logoUrl;
       } catch (error) {
-        logger.error({ error, companyId, storageKey: company.logoStorageKey }, 'Error generating logo URL');
+        logger.error({ error, companyId, storageKey }, 'Error generating logo URL');
         return null;
       }
     }
@@ -129,10 +168,22 @@ export class BrandingService {
   }
 
   /**
+   * Get both light and dark logo URLs
+   * @param companyId - Company ID
+   * @returns Object with lightLogoUrl and darkLogoUrl (or null if not found)
+   */
+  static async getLogos(companyId: string): Promise<{ lightLogoUrl: string | null; darkLogoUrl: string | null }> {
+    const lightLogoUrl = await this.getLogoUrl(companyId, 'light', false);
+    const darkLogoUrl = await this.getLogoUrl(companyId, 'dark', false);
+    return { lightLogoUrl, darkLogoUrl };
+  }
+
+  /**
    * Delete company logo
    * @param companyId - Company ID
+   * @param mode - Logo mode: 'light' or 'dark' (default: 'light')
    */
-  static async deleteLogo(companyId: string): Promise<void> {
+  static async deleteLogo(companyId: string, mode: 'light' | 'dark' = 'light'): Promise<void> {
     const company = await Company.findById(companyId);
     if (!company) {
       throw new Error('Company not found');
@@ -140,11 +191,16 @@ export class BrandingService {
 
     // Note: In production, you might want to delete the file from S3
     // For now, we'll just clear the reference
-    company.logoUrl = undefined;
-    company.logoStorageKey = undefined;
+    if (mode === 'dark') {
+      company.darkLogoUrl = undefined;
+      company.darkLogoStorageKey = undefined;
+    } else {
+      company.logoUrl = undefined;
+      company.logoStorageKey = undefined;
+    }
     await company.save();
 
-    logger.info({ companyId }, 'Company logo deleted');
+    logger.info({ companyId, mode }, 'Company logo deleted');
   }
 }
 

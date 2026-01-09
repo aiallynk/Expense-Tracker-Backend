@@ -1634,11 +1634,40 @@ export class SuperAdminController {
     }
 
     const now = new Date();
-    const { dateRange = '30d', companies = [] } = req.query;
+    const { 
+      timeRange,
+      dateRange = '30d', // Legacy support
+      startDate, // Custom start date (ISO string)
+      endDate, // Custom end date (ISO string)
+      companies = [],
+      // apiKeys = [], // Reserved for future use
+      endpoints = [],
+      // ocrTypes = [], // Reserved for future use
+      httpStatusGroups = [],
+      requestStatus = [],
+      // environments = [], // Reserved for future use
+      apiRequestsGranularity = 'hour',
+      responseLatencyGranularity = 'hour',
+      errorRateGranularity = 'hour',
+      ocrQueueGranularity = 'hour',
+      storageGrowthGranularity = 'month'
+    } = req.query;
+    
+    // Convert granularity query params to strings (they come as ParsedQs from req.query)
+    const apiRequestsGranularityStr = String(apiRequestsGranularity || 'hour');
+    const responseLatencyGranularityStr = String(responseLatencyGranularity || 'hour');
+    const errorRateGranularityStr = String(errorRateGranularity || 'hour');
+    const ocrQueueGranularityStr = String(ocrQueueGranularity || 'hour');
 
-    // Calculate time ranges based on dateRange filter
+    // Calculate time ranges based on timeRange (preferred) or dateRange (legacy)
     let timeRangeHours = 24; // default 24 hours
-    switch (dateRange) {
+    const effectiveTimeRange = String(timeRange || dateRange || '24h');
+    
+    switch (effectiveTimeRange) {
+      case '1h':
+        timeRangeHours = 1;
+        break;
+      case '24h':
       case 'today':
         timeRangeHours = 24;
         break;
@@ -1654,14 +1683,197 @@ export class SuperAdminController {
       default:
         timeRangeHours = 24;
     }
-
+    
     const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
-    const timeRangeAgo = new Date(now.getTime() - timeRangeHours * 60 * 60 * 1000);
+    let timeRangeAgo: Date;
+    
+    // Handle custom time range or explicit date range
+    if (startDate && endDate) {
+      // Explicit date range provided (for comparison mode or custom ranges)
+      const start = new Date(startDate as string);
+      const end = new Date(endDate as string);
+      // Add time if provided
+      if (req.query.startTime) {
+        const [hours, minutes] = (req.query.startTime as string).split(':');
+        start.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+      }
+      if (req.query.endTime) {
+        const [hours, minutes] = (req.query.endTime as string).split(':');
+        end.setHours(parseInt(hours), parseInt(minutes), 59, 999);
+      }
+      timeRangeAgo = start;
+      // Calculate hours for custom range
+      timeRangeHours = (end.getTime() - start.getTime()) / (1000 * 60 * 60);
+    } else if (String(effectiveTimeRange) === 'custom' && req.query.startDate && req.query.endDate) {
+      // Legacy custom range support
+      const customStartDate = new Date(req.query.startDate as string);
+      const customEndDate = new Date(req.query.endDate as string);
+      // Add time if provided
+      if (req.query.startTime) {
+        const [hours, minutes] = (req.query.startTime as string).split(':');
+        customStartDate.setHours(parseInt(hours), parseInt(minutes), 0, 0);
+      }
+      if (req.query.endTime) {
+        const [hours, minutes] = (req.query.endTime as string).split(':');
+        customEndDate.setHours(parseInt(hours), parseInt(minutes), 59, 999);
+      }
+      timeRangeAgo = customStartDate;
+      // Calculate hours for custom range
+      timeRangeHours = (customEndDate.getTime() - customStartDate.getTime()) / (1000 * 60 * 60);
+    }
     const sixMonthsAgo = new Date(now.getTime() - 6 * 30 * 24 * 60 * 60 * 1000);
+    
+    // Initialize timeRangeAgo (will be overridden if custom dates provided)
+    timeRangeAgo = new Date(now.getTime() - timeRangeHours * 60 * 60 * 1000);
+    
+    // Helper function to format date based on granularity
+    const formatDateByGranularity = (date: Date, granularity: string, timeRange?: string, minute?: number): string => {
+      const d = new Date(date);
+      
+      // Special handling for 1h time range or minute granularity - show minute-level format (HH:MM)
+      if (String(timeRange) === '1h' || String(effectiveTimeRange) === '1h' || granularity === 'minute') {
+        const hour = d.getHours();
+        const min = minute !== undefined ? minute : d.getMinutes();
+        return `${hour.toString().padStart(2, '0')}:${min.toString().padStart(2, '0')}`;
+      }
+      
+      switch (granularity) {
+        case 'hour':
+          // For hour view: show "HH:00" if within same day, or "DD/MM HH:00" if spanning multiple days
+          // Since we're grouping by hour, we'll show date+hour for clarity
+          return `${d.getDate().toString().padStart(2, '0')}/${(d.getMonth() + 1).toString().padStart(2, '0')} ${d.getHours().toString().padStart(2, '0')}:00`;
+        case 'day':
+          // Format: "DD MMM" (e.g., "15 Jan") for better readability
+          const dayMonthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          return `${d.getDate().toString().padStart(2, '0')} ${dayMonthNames[d.getMonth()]}`;
+        case 'week':
+          // Get ISO week number - calculate week start date
+          const weekDate = new Date(d);
+          const startOfYear = new Date(weekDate.getFullYear(), 0, 1);
+          const days = Math.floor((weekDate.getTime() - startOfYear.getTime()) / (24 * 60 * 60 * 1000));
+          const weekNumber = Math.ceil((days + startOfYear.getDay() + 1) / 7);
+          // Show week number and year
+          return `W${weekNumber} ${weekDate.getFullYear()}`;
+        case 'month':
+          // Format: "MMM YYYY" (e.g., "Jan 2024")
+          const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+          return `${monthNames[d.getMonth()]} ${d.getFullYear()}`;
+        default:
+          return `${d.getHours().toString().padStart(2, '0')}:00`;
+      }
+    };
+    
+    // Helper function to reconstruct date from aggregation _id
+    // MongoDB date operators return UTC values, so we create UTC dates
+    const reconstructDateFromId = (id: any, granularity: string, timeRange?: string): Date => {
+      const now = new Date();
+      // Ensure we have valid values from MongoDB aggregation
+      const year = id.year || now.getUTCFullYear();
+      const month = (id.month || now.getUTCMonth() + 1) - 1; // MongoDB month is 1-12
+      const day = id.day || now.getUTCDate();
+      const hour = id.hour !== undefined ? id.hour : now.getUTCHours();
+      const minute = id.minute !== undefined ? id.minute : 0;
+      const week = id.week;
+      
+      // Special handling for 1h time range or minute granularity - use minute precision
+      if (String(timeRange) === '1h' || String(effectiveTimeRange) === '1h' || granularity === 'minute') {
+        return new Date(Date.UTC(year, month, day, hour, minute, 0));
+      }
+      
+      // Special handling for minute granularity
+      if (granularity === 'minute') {
+        return new Date(Date.UTC(year, month, day, hour, minute, 0));
+      }
+      
+      switch (granularity) {
+        case 'hour':
+          // Create UTC date for hour
+          return new Date(Date.UTC(year, month, day, hour, 0, 0));
+        case 'day':
+          // Create UTC date for day (start of day)
+          return new Date(Date.UTC(year, month, day, 0, 0, 0));
+        case 'week':
+          // For week, calculate date from week number (ISO week)
+          if (week !== undefined && year) {
+            // Calculate first day of the week
+            const jan4 = new Date(Date.UTC(year, 0, 4));
+            const jan4Day = jan4.getUTCDay() || 7; // Monday = 1, Sunday = 7
+            const daysToAdd = (week - 1) * 7 + (1 - jan4Day);
+            return new Date(Date.UTC(year, 0, 4 + daysToAdd));
+          }
+          return new Date(Date.UTC(year, month, day, 0, 0, 0));
+        case 'month':
+          // Create UTC date for first day of month
+          return new Date(Date.UTC(year, month, 1, 0, 0, 0));
+        default:
+          return new Date(Date.UTC(year, month, day, hour, 0, 0));
+      }
+    };
+    
+    // Helper function to get group by expression based on granularity
+    // Special handling: if timeRange is '1h' or granularity is 'minute', use minute-level granularity
+    const getGroupByExpression = (granularity: string, timeRange?: string) => {
+      // For 1h time range or minute granularity, always use minute-level grouping
+      if (timeRange === '1h' || effectiveTimeRange === '1h' || granularity === 'minute') {
+        return {
+          minute: { $minute: '$createdAt' },
+          hour: { $hour: '$createdAt' },
+          day: { $dayOfMonth: '$createdAt' },
+          month: { $month: '$createdAt' },
+          year: { $year: '$createdAt' }
+        };
+      }
+      
+      switch (granularity) {
+        case 'minute':
+          return {
+            minute: { $minute: '$createdAt' },
+            hour: { $hour: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' },
+            month: { $month: '$createdAt' },
+            year: { $year: '$createdAt' }
+          };
+        case 'hour':
+          return {
+            hour: { $hour: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' },
+            month: { $month: '$createdAt' },
+            year: { $year: '$createdAt' }
+          };
+        case 'day':
+          return {
+            day: { $dayOfMonth: '$createdAt' },
+            month: { $month: '$createdAt' },
+            year: { $year: '$createdAt' }
+          };
+        case 'week':
+          return {
+            week: { $week: '$createdAt' },
+            year: { $year: '$createdAt' }
+          };
+        case 'month':
+          return {
+            month: { $month: '$createdAt' },
+            year: { $year: '$createdAt' }
+          };
+        default:
+          return {
+            hour: { $hour: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' },
+            month: { $month: '$createdAt' },
+            year: { $year: '$createdAt' }
+          };
+      }
+    };
 
-    // Parse companies and feature types filters
+    // Parse filter arrays
     const companyIds = Array.isArray(companies) ? companies : [companies].filter(Boolean);
-    // const features = Array.isArray(featureTypes) ? featureTypes : [featureTypes].filter(Boolean); // TODO: Implement feature type filtering
+    // const apiKeyIds = Array.isArray(apiKeys) ? apiKeys : [apiKeys].filter(Boolean); // Reserved for future use
+    const endpointPaths = Array.isArray(endpoints) ? endpoints : [endpoints].filter(Boolean);
+    // const ocrTypeFilters = Array.isArray(ocrTypes) ? ocrTypes : [ocrTypes].filter(Boolean); // Reserved for future use
+    const httpStatusGroupFilters = Array.isArray(httpStatusGroups) ? httpStatusGroups : [httpStatusGroups].filter(Boolean);
+    const requestStatusFilters = Array.isArray(requestStatus) ? requestStatus : [requestStatus].filter(Boolean);
+    // const environmentFilters = Array.isArray(environments) ? environments : [environments].filter(Boolean); // Reserved for future use
 
     // Get user IDs for company filtering
     let userIds: string[] = [];
@@ -1669,6 +1881,61 @@ export class SuperAdminController {
       const companyUsers = await User.find({ companyId: { $in: companyIds } }).select('_id').lean();
       userIds = companyUsers.map(u => u._id.toString());
     }
+
+    // Helper function to build base match query for API requests
+    const buildBaseMatch = (additionalFilters: any = {}) => {
+      const match: any = {
+        createdAt: { $gte: timeRangeAgo },
+        ...additionalFilters,
+      };
+
+      // User filtering (from companies)
+      if (userIds.length > 0) {
+        match.userId = { $in: userIds };
+      }
+
+      // Endpoint filtering
+      if (endpointPaths.length > 0) {
+        match.path = { $in: endpointPaths };
+      }
+
+      // HTTP status group filtering
+      if (httpStatusGroupFilters.length > 0) {
+        const statusConditions: any[] = [];
+        httpStatusGroupFilters.forEach((group) => {
+          const groupStr = String(group);
+          if (groupStr === '2xx') statusConditions.push({ statusCode: { $gte: 200, $lt: 300 } });
+          else if (groupStr === '4xx') statusConditions.push({ statusCode: { $gte: 400, $lt: 500 } });
+          else if (groupStr === '5xx') statusConditions.push({ statusCode: { $gte: 500, $lt: 600 } });
+        });
+        if (statusConditions.length > 0) {
+          if (statusConditions.length === 1) {
+            Object.assign(match, statusConditions[0]);
+          } else {
+            match.$or = statusConditions;
+          }
+        }
+      }
+
+      // Request status filtering (success/failure)
+      if (requestStatusFilters.length > 0 && requestStatusFilters.length < 2) {
+        // Only apply if one status is selected (both = no filter)
+        if (requestStatusFilters.includes('success')) {
+          match.statusCode = { $gte: 200, $lt: 300 };
+        } else if (requestStatusFilters.includes('failure')) {
+          match.statusCode = { $gte: 400, $lt: 600 };
+        }
+      }
+
+      return match;
+    };
+
+    // Helper function to calculate percentile from sorted array
+    const calculatePercentile = (sortedArray: number[], percentile: number): number => {
+      if (sortedArray.length === 0) return 0;
+      const index = Math.ceil((percentile / 100) * sortedArray.length) - 1;
+      return sortedArray[Math.max(0, Math.min(index, sortedArray.length - 1))];
+    };
 
     // Parallel execution of fast metrics for better performance
     const [
@@ -1708,84 +1975,139 @@ export class SuperAdminController {
       : '0.00';
 
     // API requests over time (time range based on filter) - REAL DATA
+    // For 1h time range, use minute-level granularity
+    const apiRequestsGranularityToUse = (String(effectiveTimeRange) === '1h') ? 'minute' : apiRequestsGranularityStr;
+    
+    // Optimize: Use indexes and limit results for better performance
     const apiRequests = await ApiRequestLog.aggregate([
       {
-        $match: {
-          createdAt: { $gte: timeRangeAgo },
-          ...(userIds.length > 0 && { userId: { $in: userIds } }),
-        },
+        $match: buildBaseMatch(),
       },
       {
         $group: {
-          _id: {
-            hour: { $hour: '$createdAt' },
-          },
+          _id: getGroupByExpression(apiRequestsGranularityToUse, effectiveTimeRange),
           value: { $sum: 1 },
+          createdAt: { $min: '$createdAt' }, // Use min to get earliest date in the group
         },
       },
-      { $sort: { '_id.hour': 1 } },
-    ]);
+      { $sort: { createdAt: 1 } },
+      // Limit results to prevent excessive data points (max 1000 points)
+      // For 1h range, limit to 60 data points (one per minute)
+      { $limit: (String(effectiveTimeRange) === '1h') ? 60 : 1000 },
+    ]).allowDiskUse(true); // Allow disk use for large datasets
 
-    // Fill in missing hours with 0
-    const hourMap = new Map();
-    for (let h = 0; h < 24; h++) {
-      hourMap.set(h, 0);
-    }
-    apiRequests.forEach((item) => {
-      hourMap.set(item._id.hour, item.value);
-    });
+    // Format based on granularity - reconstruct date from _id if needed
+    const formattedApiRequests = apiRequests.map((item) => {
+      // Handle MongoDB date object properly
+      let dateForFormatting: Date;
+      if (item.createdAt && item.createdAt instanceof Date && !isNaN(item.createdAt.getTime())) {
+        dateForFormatting = item.createdAt;
+      } else if (item.createdAt && typeof item.createdAt === 'string') {
+        dateForFormatting = new Date(item.createdAt);
+      } else {
+        // Reconstruct from _id
+        dateForFormatting = reconstructDateFromId(item._id, apiRequestsGranularityToUse, effectiveTimeRange);
+      }
+      
+      // Ensure valid date
+      if (isNaN(dateForFormatting.getTime())) {
+        dateForFormatting = new Date(); // Fallback to now
+      }
+      
+      // For 1h range, extract minute from _id
+      const minute = String(effectiveTimeRange) === '1h' ? (item._id.minute !== undefined ? item._id.minute : dateForFormatting.getMinutes()) : undefined;
+      
+      return {
+        name: formatDateByGranularity(dateForFormatting, apiRequestsGranularityToUse, effectiveTimeRange, minute),
+        value: item.value || 0,
+        sortKey: dateForFormatting.getTime(), // For proper sorting
+      };
+    })
+    .filter(item => item.value >= 0) // Filter out invalid data
+    .sort((a, b) => a.sortKey - b.sortKey)
+    .map(({ sortKey, ...item }) => item); // Sort and remove sortKey
 
-    const formattedApiRequests = Array.from(hourMap.entries()).map(([hour, value]) => ({
-      name: `${hour.toString().padStart(2, '0')}:00`,
-      value,
-    }));
-
-    // Response latency (time range based on filter) - REAL DATA
-    const responseLatencyData = await ApiRequestLog.aggregate([
+    // Response latency with percentiles (P50, P90, P95, P99) - REAL DATA
+    // IMPORTANT: Calculate percentiles instead of misleading averages
+    // Strategy: Group by time bucket, collect all response times, then calculate percentiles
+    // For 1h time range, use minute-level granularity
+    const responseLatencyGranularityToUse = (String(effectiveTimeRange) === '1h') ? 'minute' : responseLatencyGranularityStr;
+    
+    const responseLatencyRaw = await ApiRequestLog.aggregate([
       {
-        $match: {
-          createdAt: { $gte: timeRangeAgo },
-          ...(userIds.length > 0 && { userId: { $in: userIds } }),
-        },
+        $match: buildBaseMatch({
+          responseTime: { $exists: true, $ne: null, $gt: 0 }, // Only valid response times
+        }),
       },
       {
         $group: {
-          _id: {
-            hour: { $hour: '$createdAt' },
-          },
-          avgLatency: { $avg: '$responseTime' },
+          _id: getGroupByExpression(responseLatencyGranularityToUse, effectiveTimeRange),
+          responseTimes: { $push: '$responseTime' }, // Collect all response times
+          createdAt: { $min: '$createdAt' },
         },
       },
-      { $sort: { '_id.hour': 1 } },
-    ]);
+      { $sort: { createdAt: 1 } },
+      { $limit: effectiveTimeRange === '1h' ? 60 : 
+                 responseLatencyGranularityToUse === 'hour' ? 2000 : 
+                 responseLatencyGranularityToUse === 'day' ? 730 : 
+                 responseLatencyGranularityToUse === 'week' ? 208 : 
+                 responseLatencyGranularityToUse === 'month' ? 120 : 2000 },
+    ]).allowDiskUse(true);
 
-    // Fill in missing hours
-    const latencyHourMap = new Map();
-    for (let h = 0; h < 24; h++) {
-      latencyHourMap.set(h, 0);
-    }
-    responseLatencyData.forEach((item) => {
-      latencyHourMap.set(item._id.hour, Math.round(item.avgLatency || 0));
-    });
-
-    const formattedResponseLatency = Array.from(latencyHourMap.entries()).map(([hour, value]) => ({
-      name: `${hour.toString().padStart(2, '0')}:00`,
-      value,
-    }));
+    // Calculate percentiles for each time bucket
+    const formattedResponseLatency = responseLatencyRaw.map((item) => {
+      // Handle MongoDB date object properly
+      let dateForFormatting: Date;
+      if (item.createdAt && item.createdAt instanceof Date && !isNaN(item.createdAt.getTime())) {
+        dateForFormatting = item.createdAt;
+      } else if (item.createdAt && typeof item.createdAt === 'string') {
+        dateForFormatting = new Date(item.createdAt);
+      } else {
+        dateForFormatting = reconstructDateFromId(item._id, responseLatencyGranularityToUse, effectiveTimeRange);
+      }
+      
+      if (isNaN(dateForFormatting.getTime())) {
+        dateForFormatting = new Date();
+      }
+      
+      // Sort response times and calculate percentiles
+      const sortedTimes = (item.responseTimes || []).sort((a: number, b: number) => a - b);
+      const p50 = calculatePercentile(sortedTimes, 50);
+      const p90 = calculatePercentile(sortedTimes, 90);
+      const p95 = calculatePercentile(sortedTimes, 95);
+      const p99 = calculatePercentile(sortedTimes, 99);
+      
+      // For 1h range, extract minute from _id
+      const minute = String(effectiveTimeRange) === '1h' ? (item._id.minute !== undefined ? item._id.minute : dateForFormatting.getMinutes()) : undefined;
+      
+      return {
+        name: formatDateByGranularity(dateForFormatting, responseLatencyGranularityToUse, effectiveTimeRange, minute),
+        p50: Math.round(p50),
+        p90: Math.round(p90),
+        p95: Math.round(p95),
+        p99: Math.round(p99),
+        sortKey: dateForFormatting.getTime(),
+      };
+    })
+    .filter(item => item.p50 >= 0)
+    .sort((a, b) => a.sortKey - b.sortKey)
+    .map(({ sortKey, ...item }) => item);
 
     // Error rate over time (time range based on filter) - REAL DATA
+    // Optimize: Only fetch error status codes
+    // For 1h time range, use minute-level granularity
+    const errorRateGranularityToUse = (String(effectiveTimeRange) === '1h') ? 'minute' : errorRateGranularityStr;
+    
     const errorRateData = await ApiRequestLog.aggregate([
       {
-        $match: {
-          createdAt: { $gte: timeRangeAgo },
-          statusCode: { $gte: 400 },
-          ...(userIds.length > 0 && { userId: { $in: userIds } }),
-        },
+        $match: buildBaseMatch({
+          statusCode: { $gte: 400, $lte: 599 }, // Only 4xx and 5xx errors
+        }),
       },
       {
         $group: {
           _id: {
-            hour: { $hour: '$createdAt' },
+            ...getGroupByExpression(errorRateGranularityToUse, effectiveTimeRange),
             statusType: {
               $cond: [
                 { $gte: ['$statusCode', 500] },
@@ -1795,54 +2117,95 @@ export class SuperAdminController {
             },
           },
           count: { $sum: 1 },
+          createdAt: { $min: '$createdAt' }, // Use min to get earliest date in the group
         },
       },
-      { $sort: { '_id.hour': 1 } },
-    ]);
+      { $sort: { createdAt: 1 } },
+      { $limit: effectiveTimeRange === '1h' ? 60 : 
+                 errorRateGranularityToUse === 'hour' ? 2000 : 
+                 errorRateGranularityToUse === 'day' ? 730 : 
+                 errorRateGranularityToUse === 'week' ? 208 : 
+                 errorRateGranularityToUse === 'month' ? 120 : 2000 }, // 2x for 4xx and 5xx
+    ]).allowDiskUse(true);
 
-    // Build error rate map
-    const errorRateMap = new Map();
-    for (let h = 0; h < 24; h++) {
-      errorRateMap.set(h, { '5xx': 0, '4xx': 0 });
-    }
+    // Build error rate map grouped by time period
+    const errorRateMap = new Map<string, { '5xx': number; '4xx': number; createdAt: Date; minute?: number }>();
     errorRateData.forEach((item) => {
-      const hour = item._id.hour;
-      const statusType = item._id.statusType;
-      if (errorRateMap.has(hour)) {
-        errorRateMap.get(hour)[statusType] = item.count;
+      // Reconstruct date from _id fields (excluding statusType)
+      const { statusType, ...dateParts } = item._id;
+      
+      // Handle MongoDB date object properly
+      let reconstructedDate: Date;
+      if (item.createdAt && item.createdAt instanceof Date && !isNaN(item.createdAt.getTime())) {
+        reconstructedDate = item.createdAt;
+      } else if (item.createdAt && typeof item.createdAt === 'string') {
+        reconstructedDate = new Date(item.createdAt);
+      } else {
+        reconstructedDate = reconstructDateFromId(dateParts, errorRateGranularityToUse, effectiveTimeRange);
+      }
+      
+      // Ensure valid date
+      if (isNaN(reconstructedDate.getTime())) {
+        reconstructedDate = new Date(); // Fallback to now
+      }
+      
+      // For 1h range, extract minute from _id
+      const minute = effectiveTimeRange === '1h' ? (dateParts.minute !== undefined ? dateParts.minute : reconstructedDate.getMinutes()) : undefined;
+      
+      const timeKey = formatDateByGranularity(reconstructedDate, errorRateGranularityToUse, effectiveTimeRange, minute);
+      if (!errorRateMap.has(timeKey)) {
+        errorRateMap.set(timeKey, { '5xx': 0, '4xx': 0, createdAt: reconstructedDate, minute });
+      }
+      const timeKeyEntry = errorRateMap.get(timeKey)!;
+      const statusTypeStr = String(statusType);
+      if (statusTypeStr === '5xx' || statusTypeStr === '4xx') {
+        timeKeyEntry[statusTypeStr as '5xx' | '4xx'] = (timeKeyEntry[statusTypeStr as '5xx' | '4xx'] || 0) + (item.count || 0);
       }
     });
 
-    const formattedErrorRate = Array.from(errorRateMap.entries()).map(([hour, counts]) => ({
-      name: `${hour.toString().padStart(2, '0')}:00`,
-      '5xx': counts['5xx'],
-      '4xx': counts['4xx'],
-    }));
+    const formattedErrorRate = Array.from(errorRateMap.values())
+      .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
+      .map((item) => ({
+        name: formatDateByGranularity(item.createdAt, errorRateGranularityToUse, effectiveTimeRange, item.minute),
+        '5xx': item['5xx'],
+        '4xx': item['4xx'],
+      }));
 
     // API usage by endpoint (time range based on filter) - REAL DATA
+    // Enhanced: Include average latency and error rate per endpoint
     const apiUsageByEndpoint = await ApiRequestLog.aggregate([
       {
-        $match: {
-          createdAt: { $gte: timeRangeAgo },
-          ...(userIds.length > 0 && { userId: { $in: userIds } }),
-        },
+        $match: buildBaseMatch(),
       },
       {
         $group: {
           _id: '$path',
-          value: { $sum: 1 },
+          requestCount: { $sum: 1 },
+          avgLatency: { $avg: '$responseTime' },
+          errorCount: {
+            $sum: {
+              $cond: [{ $gte: ['$statusCode', 400] }, 1, 0]
+            }
+          },
         },
       },
-      { $sort: { value: -1 } },
+      { $sort: { requestCount: -1 } },
       { $limit: 10 }, // Top 10 endpoints
     ]);
 
     const formattedApiUsageByEndpoint = apiUsageByEndpoint.map((item) => ({
       name: item._id,
-      value: item.value,
+      value: item.requestCount,
+      avgLatency: Math.round(item.avgLatency || 0),
+      errorRate: item.requestCount > 0 
+        ? ((item.errorCount / item.requestCount) * 100).toFixed(2)
+        : '0.00',
     }));
 
     // OCR queue depth (pending + processing jobs over time) - REAL DATA
+    // For 1h time range, use minute-level granularity
+    const ocrQueueGranularityToUse = (String(effectiveTimeRange) === '1h') ? 'minute' : ocrQueueGranularityStr;
+    
     const ocrQueueDepth = await OcrJob.aggregate([
       {
         $match: {
@@ -1853,28 +2216,45 @@ export class SuperAdminController {
       },
       {
         $group: {
-          _id: {
-            hour: { $hour: '$createdAt' },
-          },
+          _id: getGroupByExpression(ocrQueueGranularityToUse, effectiveTimeRange),
           value: { $sum: 1 },
+          createdAt: { $min: '$createdAt' }, // Use min to get earliest date in the group
         },
       },
-      { $sort: { '_id.hour': 1 } },
+      { $sort: { createdAt: 1 } },
+      { $limit: effectiveTimeRange === '1h' ? 60 : 1000 },
     ]);
 
-    // Fill in missing hours
-    const ocrHourMap = new Map();
-    for (let h = 0; h < 24; h++) {
-      ocrHourMap.set(h, 0);
-    }
-    ocrQueueDepth.forEach((item) => {
-      ocrHourMap.set(item._id.hour, item.value);
-    });
-
-    const formattedOcrQueueDepth = Array.from(ocrHourMap.entries()).map(([hour, value]) => ({
-      name: `${hour.toString().padStart(2, '0')}:00`,
-      value,
-    }));
+    // Format based on granularity - reconstruct date from _id if needed
+    const formattedOcrQueueDepth = ocrQueueDepth.map((item) => {
+      // Handle MongoDB date object properly
+      let dateForFormatting: Date;
+      if (item.createdAt && item.createdAt instanceof Date && !isNaN(item.createdAt.getTime())) {
+        dateForFormatting = item.createdAt;
+      } else if (item.createdAt && typeof item.createdAt === 'string') {
+        dateForFormatting = new Date(item.createdAt);
+      } else {
+        // Reconstruct from _id
+        dateForFormatting = reconstructDateFromId(item._id, ocrQueueGranularityToUse, effectiveTimeRange);
+      }
+      
+      // Ensure valid date
+      if (isNaN(dateForFormatting.getTime())) {
+        dateForFormatting = new Date(); // Fallback to now
+      }
+      
+      // For 1h range, extract minute from _id
+      const minute = String(effectiveTimeRange) === '1h' ? (item._id.minute !== undefined ? item._id.minute : dateForFormatting.getMinutes()) : undefined;
+      
+      return {
+        name: formatDateByGranularity(dateForFormatting, ocrQueueGranularityToUse, effectiveTimeRange, minute),
+        value: item.value || 0,
+        sortKey: dateForFormatting.getTime(), // For proper sorting
+      };
+    })
+    .filter(item => item.value >= 0) // Filter out invalid data
+    .sort((a, b) => a.sortKey - b.sortKey)
+    .map(({ sortKey, ...item }) => item); // Sort and remove sortKey
 
     // Storage growth (last 6 months) - REAL DATA
     const storageGrowth = await Receipt.aggregate([
@@ -1886,21 +2266,45 @@ export class SuperAdminController {
       },
       {
         $group: {
-          _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
-          },
+          _id: getGroupByExpression(storageGrowthGranularity as string),
           value: { $sum: 1 },
+          createdAt: { $min: '$createdAt' }, // Use min to get earliest date in the group
         },
       },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-    ]);
+      { $sort: { createdAt: 1 } },
+      { $limit: storageGrowthGranularity === 'hour' ? 1000 : 
+                 storageGrowthGranularity === 'day' ? 365 : 
+                 storageGrowthGranularity === 'week' ? 104 : 
+                 storageGrowthGranularity === 'month' ? 60 : 1000 },
+    ]).allowDiskUse(true);
 
-    const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const formattedStorageGrowth = storageGrowth.map((item) => ({
-      name: `${monthNames[item._id.month - 1]} ${item._id.year}`,
-      value: (item.value * 500) / (1024 * 1024), // Convert to GB (assuming 500KB per receipt)
-    }));
+    // Format based on granularity - reconstruct date from _id if needed
+    const formattedStorageGrowth = storageGrowth.map((item) => {
+      // Handle MongoDB date object properly
+      let dateForFormatting: Date;
+      if (item.createdAt && item.createdAt instanceof Date && !isNaN(item.createdAt.getTime())) {
+        dateForFormatting = item.createdAt;
+      } else if (item.createdAt && typeof item.createdAt === 'string') {
+        dateForFormatting = new Date(item.createdAt);
+      } else {
+        // Reconstruct from _id
+        dateForFormatting = reconstructDateFromId(item._id, storageGrowthGranularity as string);
+      }
+      
+      // Ensure valid date
+      if (isNaN(dateForFormatting.getTime())) {
+        dateForFormatting = new Date(); // Fallback to now
+      }
+      
+      return {
+        name: formatDateByGranularity(dateForFormatting, storageGrowthGranularity as string),
+        value: ((item.value || 0) * 500) / (1024 * 1024), // Convert to GB (assuming 500KB per receipt)
+        sortKey: dateForFormatting.getTime(), // For proper sorting
+      };
+    })
+    .filter(item => item.value >= 0) // Filter out invalid data
+    .sort((a, b) => a.sortKey - b.sortKey)
+    .map(({ sortKey, ...item }) => item); // Sort and remove sortKey
 
     // System status - REAL DATA
     const dbConnectionState = mongoose.connection.readyState;
@@ -1926,25 +2330,96 @@ export class SuperAdminController {
       },
     };
 
+    // Calculate Success Rate (for selected time range)
+    const totalRequests = await ApiRequestLog.countDocuments(buildBaseMatch());
+    const successfulRequests = await ApiRequestLog.countDocuments(buildBaseMatch({
+      statusCode: { $gte: 200, $lt: 300 },
+    }));
+    const successRate = totalRequests > 0 
+      ? ((successfulRequests / totalRequests) * 100).toFixed(2)
+      : '100.00';
+
+    // Top Consumers (by company)
+    const topConsumers = await ApiRequestLog.aggregate([
+      {
+        $match: buildBaseMatch(),
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'userId',
+          foreignField: '_id',
+          as: 'user',
+        },
+      },
+      {
+        $unwind: { path: '$user', preserveNullAndEmptyArrays: true },
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'user.companyId',
+          foreignField: '_id',
+          as: 'company',
+        },
+      },
+      {
+        $unwind: { path: '$company', preserveNullAndEmptyArrays: true },
+      },
+      {
+        $group: {
+          _id: '$company._id',
+          companyName: { $first: '$company.name' },
+          requestCount: { $sum: 1 },
+        },
+      },
+      { $sort: { requestCount: -1 } },
+      { $limit: 10 },
+    ]);
+
+    // Cost/Usage Estimation (simplified - would need actual pricing data)
+    const estimatedCost = {
+      apiCalls: totalRequests,
+      estimatedApiCost: totalRequests * 0.001, // $0.001 per API call (example)
+      ocrPages: await OcrJob.countDocuments({
+        createdAt: { $gte: timeRangeAgo },
+        ...(userIds.length > 0 && { userId: { $in: userIds } }),
+      }),
+      estimatedOcrCost: 0, // Would calculate based on OCR pricing
+    };
+
     const analyticsData = {
       apiRequests: formattedApiRequests,
       errorRateOverTime: formattedErrorRate, // Renamed to avoid conflict with errorRate percentage
       apiUsageByEndpoint: formattedApiUsageByEndpoint,
       ocrQueueDepth: formattedOcrQueueDepth,
       storageGrowth: formattedStorageGrowth,
-      responseLatency: formattedResponseLatency,
+      responseLatency: formattedResponseLatency, // Now includes P50, P90, P95, P99
       systemStatus,
+      successRate: parseFloat(successRate),
+      topConsumers: topConsumers.map(item => ({
+        companyId: item._id?.toString(),
+        companyName: item.companyName || 'Unknown',
+        requestCount: item.requestCount,
+      })),
+      costEstimation: estimatedCost,
     };
 
-    // Emit real-time update
-    emitSystemAnalyticsUpdate(analyticsData);
+    // Emit real-time update with granularity-aware data
+    // Include granularity info so frontend can update correctly
+    emitSystemAnalyticsUpdate({
+      ...analyticsData,
+      granularities: {
+        apiRequests: apiRequestsGranularity,
+        responseLatency: responseLatencyGranularity,
+        errorRate: errorRateGranularity,
+        ocrQueue: ocrQueueGranularity,
+        storageGrowth: storageGrowthGranularity,
+      },
+    });
 
-    // Also trigger a full analytics collection for real-time updates
-    try {
-      await SystemAnalyticsService.collectAndEmitAnalytics();
-    } catch (realtimeError) {
-      logger.warn('Failed to trigger real-time analytics update');
-    }
+    // Note: SystemAnalyticsService.collectAndEmitAnalytics() is called separately
+    // via scheduled worker and doesn't need granularity filters
 
     const resultData = {
       apiRequestsLastHour,
@@ -2207,10 +2682,15 @@ export class SuperAdminController {
   });
 
   // Backup & Restore
-  static createBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
+  /**
+   * Create full system backup
+   * POST /api/v1/super-admin/backup/full
+   */
+  static createFullBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
+    const { backupName } = req.body;
     
-    const backup = await BackupService.createBackup(req.user!.id);
+    const backup = await BackupService.createFullBackup(req.user!.id, backupName);
     
     // Format timestamp to IST
     const date = new Date(backup.createdAt);
@@ -2231,7 +2711,46 @@ export class SuperAdminController {
         id: (backup._id as any).toString(),
         timestamp: istTimestamp,
         size: '0 GB', // Will be updated when backup completes
-        type: backup.type,
+        backupType: backup.backupType,
+        backupName: backup.backupName,
+        status: backup.status,
+      },
+    });
+  });
+
+  /**
+   * Create company-specific backup
+   * POST /api/v1/super-admin/backup/company/:companyId
+   */
+  static createCompanyBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { BackupService } = await import('../services/backup.service');
+    const companyId = req.params.companyId;
+    const { backupName } = req.body;
+    
+    const backup = await BackupService.createCompanyBackup(companyId, req.user!.id, backupName);
+    
+    // Format timestamp to IST
+    const date = new Date(backup.createdAt);
+    const istOffset = 5.5 * 60 * 60 * 1000;
+    const utcTime = date.getTime() + (date.getTimezoneOffset() * 60 * 1000);
+    const istTime = new Date(utcTime + istOffset);
+    const year = istTime.getFullYear();
+    const month = String(istTime.getMonth() + 1).padStart(2, '0');
+    const day = String(istTime.getDate()).padStart(2, '0');
+    const hours = String(istTime.getHours()).padStart(2, '0');
+    const minutes = String(istTime.getMinutes()).padStart(2, '0');
+    const seconds = String(istTime.getSeconds()).padStart(2, '0');
+    const istTimestamp = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+
+    res.status(201).json({
+      success: true,
+      data: {
+        id: (backup._id as any).toString(),
+        timestamp: istTimestamp,
+        size: '0 GB',
+        backupType: backup.backupType,
+        companyId: companyId,
+        backupName: backup.backupName,
         status: backup.status,
       },
     });
@@ -2240,8 +2759,9 @@ export class SuperAdminController {
   static getBackups = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
     const limit = parseInt(req.query.limit as string) || 100;
+    const companyId = req.query.companyId as string | undefined;
     
-    const backups = await BackupService.getBackups(limit);
+    const backups = await BackupService.getBackups(limit, companyId);
     
     // Format backups with IST timestamps
     const formattedBackups = backups.map((backup: any) => {
@@ -2275,8 +2795,13 @@ export class SuperAdminController {
         id: (backup._id as any).toString(),
         timestamp: istTimestamp,
         size,
-        type: backup.type,
+        backupType: backup.backupType,
+        backupName: backup.backupName,
+        companyId: backup.companyId ? (backup.companyId._id || backup.companyId).toString() : undefined,
+        companyName: backup.companyId?.name || backup.manifest?.companyName,
         status: backup.status,
+        createdBy: backup.createdBy?.email || backup.createdBy?.name,
+        manifest: backup.manifest,
       };
     });
 
@@ -2292,10 +2817,19 @@ export class SuperAdminController {
   static restoreBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
     const backupId = req.params.id;
+    const { confirmText, restoreToCompanyId } = req.body;
     
-    await BackupService.restoreBackup(backupId, req.user!.id);
+    // Safety check: require confirmation
+    if (!confirmText || confirmText !== 'RESTORE') {
+      return res.status(400).json({
+        success: false,
+        message: 'Restore confirmation required. Please type "RESTORE" to confirm.',
+      });
+    }
     
-    res.status(200).json({
+    await BackupService.restoreBackup(backupId, req.user!.id, restoreToCompanyId, confirmText);
+    
+    return res.status(200).json({
       success: true,
       message: 'Backup restore process started',
     });
@@ -2312,6 +2846,22 @@ export class SuperAdminController {
       data: {
         downloadUrl,
       },
+    });
+  });
+
+  /**
+   * Delete backup
+   * DELETE /api/v1/super-admin/backup/:id
+   */
+  static deleteBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { BackupService } = await import('../services/backup.service');
+    const backupId = req.params.id;
+    
+    await BackupService.deleteBackup(backupId, req.user!.id);
+    
+    res.status(200).json({
+      success: true,
+      message: 'Backup deleted successfully',
     });
   });
 

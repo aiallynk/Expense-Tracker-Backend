@@ -45,10 +45,12 @@ router.delete('/companies/:id', SuperAdminController.deleteCompany);
 router.get('/logs', SuperAdminController.getLogs);
 
 // Backup & Restore
-router.post('/backup', SuperAdminController.createBackup);
+router.post('/backup/full', SuperAdminController.createFullBackup);
+router.post('/backup/company/:companyId', SuperAdminController.createCompanyBackup);
 router.get('/backups', SuperAdminController.getBackups);
 router.post('/backups/:id/restore', SuperAdminController.restoreBackup);
 router.get('/backups/:id/download', SuperAdminController.downloadBackup);
+router.delete('/backup/:id', SuperAdminController.deleteBackup);
 
 // Global Settings
 router.get('/settings', SuperAdminController.getGlobalSettings);

@@ -315,6 +315,127 @@ class CurrencyService {
   }
 
   /**
+   * Convert amount from one currency to another
+   * Returns conversion details including rate and date
+   * @param amount - Original amount
+   * @param fromCurrency - Source currency
+   * @param toCurrency - Target currency
+   * @returns Object with convertedAmount, rate, and date
+   */
+  async convertCurrency(
+    amount: number,
+    fromCurrency: string,
+    toCurrency: string
+  ): Promise<{
+    convertedAmount: number;
+    rate: number;
+    rateDate: Date;
+  }> {
+    if (!amount || amount === 0) {
+      return {
+        convertedAmount: 0,
+        rate: 1,
+        rateDate: new Date(),
+      };
+    }
+
+    const from = fromCurrency.toUpperCase();
+    const to = toCurrency.toUpperCase();
+
+    if (from === to) {
+      return {
+        convertedAmount: amount,
+        rate: 1,
+        rateDate: new Date(),
+      };
+    }
+
+    try {
+      const rates = await this.getExchangeRates();
+      const rateDate = new Date();
+      
+      // Log for debugging
+      logger.debug({
+        from,
+        to,
+        amount,
+        availableRates: Object.keys(rates),
+      }, 'Converting currency');
+
+      let rate = 1;
+      let convertedAmount = amount;
+
+      if (from === 'INR') {
+        // From INR to target
+        // rates[to] means: 1 INR = rates[to] * targetCurrency
+        const toRate = rates[to];
+        if (!toRate || toRate <= 0) {
+          logger.error(`Exchange rate not found for ${to}. Available rates: ${Object.keys(rates).join(', ')}`);
+          throw new Error(`Exchange rate not found for ${to}`);
+        }
+        rate = toRate;
+        convertedAmount = amount * toRate;
+      } else if (to === 'INR') {
+        // From source to INR
+        // rates[from] means: 1 INR = rates[from] * sourceCurrency
+        // So: 1 sourceCurrency = 1 / rates[from] INR
+        const fromRate = rates[from];
+        if (!fromRate || fromRate <= 0) {
+          logger.error(`Exchange rate not found for ${from}. Available rates: ${Object.keys(rates).join(', ')}`);
+          throw new Error(`Exchange rate not found for ${from}`);
+        }
+        // If 1 INR = X Currency, then 1 Currency = 1/X INR
+        rate = 1 / fromRate;
+        convertedAmount = amount / fromRate;
+      } else {
+        // From source to target via INR
+        // Both are non-INR currencies
+        const fromRate = rates[from];
+        const toRate = rates[to];
+        
+        if (!fromRate || fromRate <= 0) {
+          logger.error(`Exchange rate not found for ${from}. Available rates: ${Object.keys(rates).join(', ')}`);
+          throw new Error(`Exchange rate not found for ${from}`);
+        }
+        if (!toRate || toRate <= 0) {
+          logger.error(`Exchange rate not found for ${to}. Available rates: ${Object.keys(rates).join(', ')}`);
+          throw new Error(`Exchange rate not found for ${to}`);
+        }
+        
+        // Convert: fromCurrency -> INR -> toCurrency
+        // Step 1: fromCurrency to INR: amount / fromRate
+        // Step 2: INR to toCurrency: (amount / fromRate) * toRate
+        rate = toRate / fromRate;
+        convertedAmount = (amount / fromRate) * toRate;
+      }
+
+      logger.info({
+        from,
+        to,
+        originalAmount: amount,
+        convertedAmount,
+        rate,
+      }, 'Currency conversion successful');
+
+      return {
+        convertedAmount: Math.round(convertedAmount * 100) / 100, // Round to 2 decimals
+        rate: Math.round(rate * 10000) / 10000, // Round to 4 decimals
+        rateDate,
+      };
+    } catch (error: any) {
+      logger.error({
+        amount,
+        fromCurrency,
+        toCurrency,
+        error: error.message,
+        stack: error.stack,
+      }, 'Error converting currency');
+      // Re-throw to let caller handle it properly
+      throw new Error(`Currency conversion failed: ${error.message}`);
+    }
+  }
+
+  /**
    * Get current USD to INR rate (for backward compatibility)
    */
   async getUSDtoINRRate(): Promise<number> {

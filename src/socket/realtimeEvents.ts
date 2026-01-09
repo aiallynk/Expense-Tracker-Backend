@@ -74,6 +74,42 @@ export const emitBackupRestored = (backupId: string) => {
   logger.debug(`Emitted backup restored: ${backupId}`);
 };
 
+/**
+ * Emit maintenance mode logout to all non-super-admin users
+ * This will trigger logout on all active sessions except super admin
+ */
+export const emitMaintenanceModeLogout = (userId?: string) => {
+  const io = getIO();
+  if (!io) {
+    logger.warn('Socket.IO not initialized');
+    return;
+  }
+
+  try {
+    // If userId is provided, emit to specific user
+    if (userId) {
+      io.to(`user:${userId}`).emit('maintenance-mode-logout', {
+        message: "You'll be logged out for a while due to maintenance mode. Please try again later.",
+        maintenanceMode: true,
+      });
+      logger.debug(`Emitted maintenance mode logout to user ${userId}`);
+    } else {
+      // Emit to all users except super-admin room
+      // Emit to all role-based rooms except SUPER_ADMIN
+      const roles = ['MANAGER', 'BUSINESS_HEAD', 'EMPLOYEE', 'COMPANY_ADMIN', 'ADMIN', 'ACCOUNTANT'];
+      roles.forEach(role => {
+        io.to(`role:${role}`).emit('maintenance-mode-logout', {
+          message: "You'll be logged out for a while due to maintenance mode. Please try again later.",
+          maintenanceMode: true,
+        });
+      });
+      logger.debug('Emitted maintenance mode logout to all non-super-admin users');
+    }
+  } catch (error) {
+    logger.error({ error }, 'Error emitting maintenance mode logout');
+  }
+};
+
 // Real-time event types for company admin
 export enum CompanyAdminEvent {
   DASHBOARD_STATS_UPDATE = 'company-admin:dashboard-stats-update',

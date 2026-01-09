@@ -88,10 +88,10 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
       socket.on('super-admin:system-analytics-request', async (filters = {}) => {
         try {
           logger.debug({ filters }, 'Received system analytics request from super admin');
+          // For WebSocket requests, use the basic analytics service for faster updates
+          // The HTTP endpoint will be called when user changes filters/granularity
           const { SystemAnalyticsService } = await import('../services/systemAnalytics.service');
           await SystemAnalyticsService.collectAndEmitAnalytics();
-          // Note: The analytics service already includes filtering in the HTTP endpoint,
-          // but for WebSocket requests, we could implement filter-specific updates if needed
         } catch (error) {
           logger.error({ error }, 'Failed to handle system analytics request');
         }

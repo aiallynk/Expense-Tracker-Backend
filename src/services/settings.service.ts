@@ -1,5 +1,5 @@
 import { GlobalSettings, IGlobalSettings } from '../models/GlobalSettings';
-import { emitSettingsUpdated } from '../socket/realtimeEvents';
+import { emitSettingsUpdated, emitMaintenanceModeLogout } from '../socket/realtimeEvents';
 
 import { logger } from '@/config/logger';
 
@@ -21,6 +21,8 @@ export class SettingsService {
     userId: string
   ): Promise<IGlobalSettings> {
     let settings = await GlobalSettings.findOne();
+    const previousMaintenanceMode = settings?.features?.maintenanceMode || false;
+    
     if (!settings) {
       settings = await GlobalSettings.create({ ...updates, updatedBy: userId as any });
     } else {
@@ -45,6 +47,15 @@ export class SettingsService {
       settings.updatedBy = userId as any;
       await settings.save();
     }
+    
+    // Check if maintenance mode was just enabled
+    const newMaintenanceMode = settings.features?.maintenanceMode || false;
+    if (!previousMaintenanceMode && newMaintenanceMode) {
+      // Maintenance mode was just enabled - logout all non-super-admin users
+      logger.warn({ enabledBy: userId }, 'Maintenance mode enabled - logging out all non-super-admin users');
+      emitMaintenanceModeLogout(); // Emit to all users
+    }
+    
     emitSettingsUpdated(settings.toObject());
     logger.info(`Global settings updated by user ${userId}`);
     return settings;

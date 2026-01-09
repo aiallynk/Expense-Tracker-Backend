@@ -14,6 +14,8 @@ import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
 import { ProjectStakeholderService } from './projectStakeholder.service';
 import { ReportsService } from './reports.service';
+import { CompanySettingsService } from './companySettings.service';
+import { currencyService } from './currency.service';
 
 import { logger } from '@/config/logger';
 
@@ -47,7 +49,12 @@ export class ExpensesService {
     const invoiceDate = data.invoiceDate ? new Date(data.invoiceDate) : undefined;
     let invoiceFingerprint: string | undefined = undefined;
 
+    // Rule 1: Detect original currency (from OCR, manual input, or existing expense)
+    const originalCurrency = (data.currency || 'INR').toUpperCase();
+    const originalAmount = data.amount;
+
     // Check for duplicate invoice if invoice fields are provided
+    // Use original amount for duplicate detection (not converted amount)
     if (data.invoiceId && invoiceDate) {
       const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
       const user = await User.findById(userId).select('companyId').exec();
@@ -55,7 +62,7 @@ export class ExpensesService {
         data.invoiceId,
         data.vendor,
         invoiceDate,
-        data.amount
+        originalAmount // Use original amount for duplicate detection
       );
       
       if (user && user.companyId) {
@@ -63,7 +70,7 @@ export class ExpensesService {
           data.invoiceId,
           data.vendor,
           invoiceDate,
-          data.amount,
+          originalAmount, // Use original amount for duplicate detection
           undefined, // No excludeExpenseId for new expenses
           user.companyId
         );
@@ -89,17 +96,27 @@ export class ExpensesService {
       }
     }
 
-    // Validate advance application
+    // Rule 2: Get company's selected currency (needed for advance validation)
+    const selectedCurrency = await this.getCompanySelectedCurrency(userId);
+
+    // Validate advance application (use original amount for validation before conversion)
     if ((data.advanceAppliedAmount ?? 0) > 0) {
       const adv = Number(data.advanceAppliedAmount);
       if (!isFinite(adv) || adv < 0) {
         throw new Error('Invalid advanceAppliedAmount');
       }
-      if (adv > data.amount) {
-        throw new Error('advanceAppliedAmount cannot exceed expense amount');
-      }
+      // Note: We'll validate against converted amount after conversion
     }
 
+    // Rule 3 & 4: Process currency conversion
+    const conversionMetadata = await this.processCurrencyConversion(
+      originalAmount,
+      originalCurrency,
+      selectedCurrency
+    );
+
+    // Rule 5: Store expense with converted amount and metadata
+    // ALWAYS store amount in selected currency (Rule 3: NEVER store in original currency if different)
     const expense = new Expense({
       reportId,
       userId: new mongoose.Types.ObjectId(userId),
@@ -107,8 +124,9 @@ export class ExpensesService {
       categoryId: data.categoryId ? new mongoose.Types.ObjectId(data.categoryId) : undefined,
       costCentreId: data.costCentreId ? new mongoose.Types.ObjectId(data.costCentreId) : undefined,
       projectId: data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined,
-      amount: data.amount,
-      currency: data.currency || 'INR',
+      // Store converted amount in selected currency (Rule 3)
+      amount: conversionMetadata.convertedAmount,
+      currency: selectedCurrency, // Always store in selected currency
       expenseDate: new Date(data.expenseDate),
       status: ExpenseStatus.DRAFT,
       source: data.source,
@@ -119,10 +137,23 @@ export class ExpensesService {
       invoiceId: data.invoiceId,
       invoiceDate,
       invoiceFingerprint,
-      // Advance cash
+      // Advance cash (use converted amount for advance validation)
       advanceAppliedAmount: data.advanceAppliedAmount ?? 0,
-      advanceCurrency: (data.currency || 'INR').toString().toUpperCase(),
+      advanceCurrency: selectedCurrency,
+      // Rule 5: Currency conversion metadata
+      conversionApplied: conversionMetadata.conversionApplied,
+      originalAmount: conversionMetadata.originalAmount,
+      originalCurrency: conversionMetadata.originalCurrency,
+      convertedAmount: conversionMetadata.convertedAmount,
+      selectedCurrency: conversionMetadata.selectedCurrency,
+      exchangeRateUsed: conversionMetadata.exchangeRateUsed,
+      exchangeRateDate: conversionMetadata.exchangeRateDate,
     });
+
+    // Validate advance against converted amount
+    if (expense.advanceAppliedAmount && expense.advanceAppliedAmount > expense.amount) {
+      throw new Error('advanceAppliedAmount cannot exceed expense amount');
+    }
 
     const saved = await expense.save();
 
@@ -215,12 +246,39 @@ export class ExpensesService {
       expense.projectId = data.projectId ? new mongoose.Types.ObjectId(data.projectId) : undefined;
     }
 
-    if (data.amount !== undefined) {
-      expense.amount = data.amount;
-    }
+    // Rule 8: Re-evaluate conversion if amount or currency changes
+    // Only process conversion if amount or currency is being updated
+    if (data.amount !== undefined || data.currency !== undefined) {
+      // Rule 1: Detect original currency (from updated data or existing expense)
+      const originalCurrency = data.currency 
+        ? data.currency.toUpperCase() 
+        : (expense.originalCurrency || expense.currency || 'INR').toUpperCase();
+      const originalAmount = data.amount !== undefined 
+        ? data.amount 
+        : (expense.originalAmount || expense.amount || 0);
 
-    if (data.currency !== undefined) {
-      expense.currency = data.currency;
+      // Rule 2: Get company's selected currency
+      const selectedCurrency = await this.getCompanySelectedCurrency(userId);
+
+      // Rule 3 & 4: Process currency conversion from scratch
+      const conversionMetadata = await this.processCurrencyConversion(
+        originalAmount,
+        originalCurrency,
+        selectedCurrency
+      );
+
+      // Rule 5: Update conversion metadata
+      expense.conversionApplied = conversionMetadata.conversionApplied;
+      expense.originalAmount = conversionMetadata.originalAmount;
+      expense.originalCurrency = conversionMetadata.originalCurrency;
+      expense.convertedAmount = conversionMetadata.convertedAmount;
+      expense.selectedCurrency = conversionMetadata.selectedCurrency;
+      expense.exchangeRateUsed = conversionMetadata.exchangeRateUsed;
+      expense.exchangeRateDate = conversionMetadata.exchangeRateDate;
+
+      // Rule 3: Always store amount in selected currency
+      expense.amount = conversionMetadata.convertedAmount;
+      expense.currency = selectedCurrency;
     }
 
     if (data.advanceAppliedAmount !== undefined) {
@@ -617,6 +675,108 @@ export class ExpensesService {
     await ReportsService.recalcTotals(reportId);
 
     await AuditService.log(userId, 'Expense', id, AuditAction.DELETE);
+  }
+
+  /**
+   * Get company's selected currency (Rule 2: Selected Account / Company Currency)
+   * @param userId - User ID to get company from
+   * @returns Company's selected currency (default: 'INR')
+   */
+  private static async getCompanySelectedCurrency(userId: string): Promise<string> {
+    try {
+      const user = await User.findById(userId).select('companyId').exec();
+      if (!user || !user.companyId) {
+        return 'INR'; // Default currency
+      }
+
+      const companyId = user.companyId.toString();
+      const settings = await CompanySettingsService.getSettingsByCompanyId(companyId);
+      return settings.general?.currency || 'INR';
+    } catch (error) {
+      logger.error({ error, userId }, 'Error getting company selected currency');
+      return 'INR'; // Default fallback
+    }
+  }
+
+  /**
+   * Process currency conversion (Rule 3 & 4: Currency Comparison & Conversion Logic)
+   * @param originalAmount - Original amount in original currency
+   * @param originalCurrency - Original currency detected
+   * @param selectedCurrency - Company's selected currency
+   * @returns Conversion metadata
+   */
+  private static async processCurrencyConversion(
+    originalAmount: number,
+    originalCurrency: string,
+    selectedCurrency: string
+  ): Promise<{
+    conversionApplied: boolean;
+    originalAmount: number;
+    originalCurrency: string;
+    convertedAmount: number;
+    selectedCurrency: string;
+    exchangeRateUsed: number;
+    exchangeRateDate: Date;
+  }> {
+    const original = originalCurrency.toUpperCase();
+    const selected = selectedCurrency.toUpperCase();
+
+    // Rule 3: If currencies match, no conversion needed
+    if (original === selected) {
+      return {
+        conversionApplied: false,
+        originalAmount,
+        originalCurrency: original,
+        convertedAmount: originalAmount,
+        selectedCurrency: selected,
+        exchangeRateUsed: 1,
+        exchangeRateDate: new Date(),
+      };
+    }
+
+    // Rule 4: Conversion is mandatory
+    try {
+      logger.info({
+        originalAmount,
+        originalCurrency: original,
+        selectedCurrency: selected,
+      }, 'Processing currency conversion');
+
+      const conversion = await currencyService.convertCurrency(
+        originalAmount,
+        original,
+        selected
+      );
+
+      logger.info({
+        originalAmount,
+        originalCurrency: original,
+        convertedAmount: conversion.convertedAmount,
+        selectedCurrency: selected,
+        rate: conversion.rate,
+      }, 'Currency conversion completed');
+
+      return {
+        conversionApplied: true,
+        originalAmount,
+        originalCurrency: original,
+        convertedAmount: conversion.convertedAmount,
+        selectedCurrency: selected,
+        exchangeRateUsed: conversion.rate,
+        exchangeRateDate: conversion.rateDate,
+      };
+    } catch (error: any) {
+      logger.error({
+        error: error.message,
+        stack: error.stack,
+        originalAmount,
+        originalCurrency,
+        selectedCurrency,
+      }, 'Error processing currency conversion');
+      
+      // Don't fail silently - throw the error so caller can handle it
+      throw new Error(`Currency conversion failed: ${error.message}`);
+    }
   }
 }
 

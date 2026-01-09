@@ -170,6 +170,25 @@ export class AuthService {
       throw error;
     }
 
+    // Check maintenance mode - block non-super-admin login
+    // CompanyAdmin doesn't have a role field - they are always COMPANY_ADMIN
+    const userRole = user?.role || (companyAdmin ? 'COMPANY_ADMIN' : 'EMPLOYEE');
+    if (userRole !== 'SUPER_ADMIN') {
+      const { SettingsService } = await import('./settings.service');
+      const settings = await SettingsService.getSettings();
+      
+      if (settings.features?.maintenanceMode === true) {
+        logger.warn(
+          { email: normalizedEmail, role: userRole },
+          'Login blocked - Maintenance mode active'
+        );
+        const error: any = new Error('System is under maintenance. Only super administrators can access the system at this time.');
+        error.statusCode = 503;
+        error.code = 'MAINTENANCE_MODE';
+        throw error;
+      }
+    }
+
     // Update last login and generate tokens
     if (user) {
       // Get all roles: primary role + additional roles from roles array (for approvals)

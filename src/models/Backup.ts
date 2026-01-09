@@ -1,33 +1,83 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+export enum BackupType {
+  FULL = 'FULL',
+  COMPANY = 'COMPANY',
+}
+
+export enum BackupStatus {
+  PENDING = 'pending',
+  PROCESSING = 'processing',
+  COMPLETED = 'completed',
+  FAILED = 'failed',
+}
+
+export interface IBackupManifest {
+  backupId: string;
+  backupType: BackupType;
+  companyId?: string;
+  companyName?: string;
+  createdAt: string;
+  createdBy?: string;
+  createdByEmail?: string;
+  recordCounts: {
+    companies?: number;
+    users?: number;
+    reports?: number;
+    expenses?: number;
+    ocrJobs?: number;
+    receipts?: number;
+    departments?: number;
+    projects?: number;
+    costCentres?: number;
+  };
+  appVersion: string;
+  databaseVersion?: string;
+}
+
 export interface IBackup extends Document {
-  type: 'automatic' | 'manual';
-  status: 'pending' | 'processing' | 'completed' | 'failed';
+  backupType: BackupType; // FULL or COMPANY
+  companyId?: mongoose.Types.ObjectId; // Only for COMPANY backups
+  backupName?: string; // Optional user-provided name
+  status: BackupStatus;
   size: number; // in bytes
-  storageKey?: string; // S3 key if stored in S3
-  storageUrl?: string; // S3 URL if stored in S3
+  storageKey?: string; // S3 key (e.g., full-backups/backup_2024-01-09_14-30-00.zip)
+  storageUrl?: string; // S3 URL
+  manifest?: IBackupManifest; // Backup manifest with metadata
   metadata?: {
     collections?: string[];
     recordCount?: number;
     version?: string;
   };
   error?: string;
-  createdBy?: mongoose.Types.ObjectId; // User who created (for manual backups)
+  createdBy?: mongoose.Types.ObjectId; // User who created
   createdAt: Date;
   completedAt?: Date;
 }
 
 const backupSchema = new Schema<IBackup>(
   {
-    type: {
+    backupType: {
       type: String,
-      enum: ['automatic', 'manual'],
+      enum: Object.values(BackupType),
       required: true,
+    },
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Company',
+      required: function(this: IBackup) {
+        return this.backupType === BackupType.COMPANY;
+      },
+    },
+    backupName: {
+      type: String,
+      trim: true,
+      maxlength: 200,
     },
     status: {
       type: String,
-      enum: ['pending', 'processing', 'completed', 'failed'],
-      default: 'pending',
+      enum: Object.values(BackupStatus),
+      default: BackupStatus.PENDING,
       required: true,
     },
     size: {
@@ -39,6 +89,9 @@ const backupSchema = new Schema<IBackup>(
     },
     storageUrl: {
       type: String,
+    },
+    manifest: {
+      type: Schema.Types.Mixed,
     },
     metadata: {
       type: Schema.Types.Mixed,
@@ -62,7 +115,9 @@ const backupSchema = new Schema<IBackup>(
 // Indexes
 backupSchema.index({ createdAt: -1 });
 backupSchema.index({ status: 1 });
-backupSchema.index({ type: 1 });
+backupSchema.index({ backupType: 1 });
+backupSchema.index({ companyId: 1 });
+backupSchema.index({ createdBy: 1 });
 
 export const Backup = mongoose.model<IBackup>('Backup', backupSchema);
 
