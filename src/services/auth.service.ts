@@ -48,13 +48,19 @@ export class AuthService {
     const passwordHash = await this.hashPassword(password);
 
     // Create user with EMPLOYEE role by default unless provided
+    const finalRole = role ?? 'EMPLOYEE';
     const user = new User({
       email: email.toLowerCase(),
       passwordHash,
       name,
-      role: role ?? 'EMPLOYEE',
+      role: finalRole,
       status: 'ACTIVE',
     });
+
+    // Note: Employee ID generation is skipped at signup since company/department
+    // are not available. ID will be auto-generated later when company/department
+    // is assigned via profile update or user creation endpoint.
+    // SUPER_ADMIN users will never get an employee ID.
 
     await user.save();
 

@@ -25,6 +25,7 @@
     "setup:s3-cors": "tsx scripts/setup-s3-cors.ts",
     "init:companies": "tsx scripts/init-companies-collection.ts",
     "generate-employee-ids": "tsx scripts/generate-employee-ids.ts",
+    "assign-unique-ids": "tsx scripts/assign-unique-ids-to-existing-users.ts",
     "test": "vitest run"
   },
   "keywords": [

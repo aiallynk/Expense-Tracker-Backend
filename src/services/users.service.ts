@@ -4,15 +4,14 @@ import mongoose from 'mongoose';
 import { CompanyAdmin, ICompanyAdmin } from '../models/CompanyAdmin';
 import { User, IUser } from '../models/User';
 import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated, emitToUser } from '../socket/realtimeEvents';
-import { SystemAnalyticsService } from './systemAnalytics.service';
 import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
+import { UserRole, UserStatus, AuditAction } from '../utils/enums';
 
 // import { AuthRequest } from '../middleware/auth.middleware'; // Unused
 
-import { UserRole, UserStatus, AuditAction } from '../utils/enums';
-
 import { AuditService } from './audit.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
+import { SystemAnalyticsService } from './systemAnalytics.service';
 
 import { logger } from '@/config/logger';
 
@@ -330,13 +329,16 @@ export class UsersService {
     // Use provided name or default
     const name = data.name?.trim() || email.split('@')[0] || 'Imported User';
 
+    // Determine role
+    const role = data.role || UserRole.EMPLOYEE;
+
     // Create user
     const user = new User({
       email,
       passwordHash,
       name,
       phone: data.phone?.trim() || undefined,
-      role: data.role || UserRole.EMPLOYEE,
+      role,
       roles: data.roles ? data.roles.filter(r => r && r !== data.role) : [], // Additional roles (excluding primary role)
       status: data.status || UserStatus.ACTIVE,
       companyId: data.companyId ? new mongoose.Types.ObjectId(data.companyId) : undefined,
@@ -344,6 +346,30 @@ export class UsersService {
       departmentId: data.departmentId ? new mongoose.Types.ObjectId(data.departmentId) : undefined,
       employeeId: data.employeeId?.trim() || undefined,
     });
+
+    // Auto-generate unique employee ID if:
+    // 1. User is not SUPER_ADMIN
+    // 2. employeeId is not already provided
+    // 3. User has a companyId
+    if (
+      role !== UserRole.SUPER_ADMIN &&
+      !data.employeeId &&
+      data.companyId
+    ) {
+      try {
+        const { EmployeeIdService } = await import('./employeeId.service');
+        const generatedId = await EmployeeIdService.generateUniqueEmployeeId(
+          data.companyId,
+          data.departmentId || null,
+          undefined
+        );
+        user.employeeId = generatedId;
+        logger.info(`Auto-generated employee ID ${generatedId} for new user ${email}`);
+      } catch (error: any) {
+        // Log error but don't fail user creation
+        logger.error({ error }, 'Failed to auto-generate employee ID, continuing without it');
+      }
+    }
 
     await user.save();
 
