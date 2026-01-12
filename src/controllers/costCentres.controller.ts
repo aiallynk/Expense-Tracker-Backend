@@ -56,7 +56,8 @@ export class CostCentresController {
   });
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const costCentre = await CostCentresService.getCostCentreById(req.params.id);
+    const costCentreId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const costCentre = await CostCentresService.getCostCentreById(costCentreId);
 
     if (!costCentre) {
       res.status(404).json({
@@ -101,7 +102,8 @@ export class CostCentresController {
 
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = updateCostCentreSchema.parse(req.body);
-    const costCentre = await CostCentresService.updateCostCentre(req.params.id, {
+    const costCentreId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const costCentre = await CostCentresService.updateCostCentre(costCentreId, {
       ...data,
       description: req.body.description,
       status: req.body.status,
@@ -114,7 +116,8 @@ export class CostCentresController {
   });
 
   static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
-    await CostCentresService.deleteCostCentre(req.params.id);
+    const costCentreId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    await CostCentresService.deleteCostCentre(costCentreId);
 
     res.status(200).json({
       success: true,
@@ -124,7 +127,7 @@ export class CostCentresController {
 
   // Get or create cost centre by name (allows users to auto-create cost centres)
   static getOrCreateByName = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const name = req.params.name;
+    const name = Array.isArray(req.params.name) ? req.params.name[0] : req.params.name;
     if (!name || name.trim() === '') {
       res.status(400).json({
         success: false,

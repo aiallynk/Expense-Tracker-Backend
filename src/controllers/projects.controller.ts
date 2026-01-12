@@ -71,7 +71,8 @@ export class ProjectsController {
   });
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const project = await ProjectsService.getProjectById(req.params.id);
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const project = await ProjectsService.getProjectById(projectId);
 
     if (!project) {
       res.status(404).json({
@@ -121,7 +122,8 @@ export class ProjectsController {
   });
 
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const project = await ProjectsService.updateProject(req.params.id, {
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const project = await ProjectsService.updateProject(projectId, {
       name: req.body.name,
       code: req.body.code,
       description: req.body.description,
@@ -141,7 +143,8 @@ export class ProjectsController {
   });
 
   static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
-    await ProjectsService.deleteProject(req.params.id);
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    await ProjectsService.deleteProject(projectId);
 
     res.status(200).json({
       success: true,

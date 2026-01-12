@@ -142,7 +142,7 @@ export class ApprovalMatrixController {
     // ================= ACTIONS =================
 
     static approveRequest = asyncHandler(async (req: AuthRequest, res: Response) => {
-        const { instanceId } = req.params;
+        const instanceId = Array.isArray(req.params.instanceId) ? req.params.instanceId[0] : req.params.instanceId;
         const { comment } = req.body;
         const userId = req.user!.id;
 
@@ -151,7 +151,7 @@ export class ApprovalMatrixController {
     });
 
     static rejectRequest = asyncHandler(async (req: AuthRequest, res: Response) => {
-        const { instanceId } = req.params;
+        const instanceId = Array.isArray(req.params.instanceId) ? req.params.instanceId[0] : req.params.instanceId;
         const { comment } = req.body;
         const userId = req.user!.id;
 
@@ -160,7 +160,7 @@ export class ApprovalMatrixController {
     });
 
     static requestChanges = asyncHandler(async (req: AuthRequest, res: Response) => {
-        const { instanceId } = req.params;
+        const instanceId = Array.isArray(req.params.instanceId) ? req.params.instanceId[0] : req.params.instanceId;
         const { comment } = req.body;
         const userId = req.user!.id;
 

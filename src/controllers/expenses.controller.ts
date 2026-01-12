@@ -12,8 +12,9 @@ import {
 export class ExpensesController {
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = createExpenseSchema.parse(req.body);
+    const reportId = Array.isArray(req.params.reportId) ? req.params.reportId[0] : req.params.reportId;
     const expense = await ExpensesService.createExpense(
-      req.params.reportId,
+      reportId,
       req.user!.id,
       data
     );
@@ -26,8 +27,9 @@ export class ExpensesController {
 
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = updateExpenseSchema.parse(req.body);
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ExpensesService.updateExpense(
-      req.params.id,
+      expenseId,
       req.user!.id,
       data
     );
@@ -39,8 +41,9 @@ export class ExpensesController {
   });
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ExpensesService.getExpenseById(
-      req.params.id,
+      expenseId,
       req.user!.id,
       req.user!.role
     );
@@ -71,7 +74,8 @@ export class ExpensesController {
   });
 
   static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
-    await ExpensesService.deleteExpense(req.params.id, req.user!.id, req.user!.role);
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    await ExpensesService.deleteExpense(expenseId, req.user!.id, req.user!.role);
 
     res.status(200).json({
       success: true,

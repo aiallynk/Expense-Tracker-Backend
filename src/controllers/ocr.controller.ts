@@ -6,7 +6,8 @@ import { OcrService } from '../services/ocr.service';
 
 export class OcrController {
   static getJobStatus = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const job = await OcrService.getOcrJobStatus(req.params.id);
+    const jobId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const job = await OcrService.getOcrJobStatus(jobId);
 
     if (!job) {
       res.status(404).json({

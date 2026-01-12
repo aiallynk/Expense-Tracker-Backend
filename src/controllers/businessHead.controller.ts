@@ -98,8 +98,9 @@ export class BusinessHeadController {
    */
   static getReportDetails = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { ReportsService } = await import('../services/reports.service');
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ReportsService.getReportById(
-      req.params.id,
+      reportId,
       req.user!.id,
       req.user!.role
     );
@@ -126,8 +127,9 @@ export class BusinessHeadController {
   static approveReport = asyncHandler(async (req: AuthRequest, res: Response) => {
     const businessHeadId = req.user!.id;
     const { comment } = req.body;
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await BusinessHeadService.approveReport(
-      req.params.id,
+      reportId,
       businessHeadId,
       comment
     );
@@ -146,8 +148,9 @@ export class BusinessHeadController {
   static rejectReport = asyncHandler(async (req: AuthRequest, res: Response) => {
     const businessHeadId = req.user!.id;
     const { comment } = req.body;
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await BusinessHeadService.rejectReport(
-      req.params.id,
+      reportId,
       businessHeadId,
       comment
     );
@@ -184,8 +187,9 @@ export class BusinessHeadController {
     }
 
     // Use the proper requestReportChanges method which handles approval chain reset
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await BusinessHeadService.requestReportChanges(
-      req.params.id,
+      reportId,
       businessHeadId,
       comment
     );

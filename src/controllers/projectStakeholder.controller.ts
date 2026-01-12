@@ -78,7 +78,8 @@ export class ProjectStakeholderController {
       return;
     }
 
-    const { projectId, userId } = req.params;
+    const projectId = Array.isArray(req.params.projectId) ? req.params.projectId[0] : req.params.projectId;
+    const userId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
 
     if (!projectId || !userId) {
       res.status(400).json({
@@ -112,7 +113,7 @@ export class ProjectStakeholderController {
       return;
     }
 
-    const { projectId } = req.params;
+    const projectId = Array.isArray(req.params.projectId) ? req.params.projectId[0] : req.params.projectId;
 
     if (!projectId) {
       res.status(400).json({

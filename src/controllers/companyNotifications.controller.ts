@@ -42,7 +42,7 @@ export class CompanyNotificationsController {
    * PUT /api/v1/company-admin/notifications/:id/read
    */
   static markAsRead = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const notificationId = req.params.id;
+    const notificationId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const userId = req.user!.id;
 
     const notification = await NotificationDataService.markAsRead(notificationId, userId);

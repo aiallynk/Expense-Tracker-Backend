@@ -44,8 +44,9 @@ export class AdminController {
   });
 
   static approveReport = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ReportsService.adminChangeStatus(
-      req.params.id,
+      reportId,
       ExpenseReportStatus.APPROVED,
       req.user!.id
     );
@@ -58,8 +59,9 @@ export class AdminController {
   });
 
   static rejectReport = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ReportsService.adminChangeStatus(
-      req.params.id,
+      reportId,
       ExpenseReportStatus.REJECTED,
       req.user!.id
     );
@@ -74,8 +76,9 @@ export class AdminController {
   static exportReport = asyncHandler(async (req: AuthRequest, res: Response) => {
     const query = exportQuerySchema.parse(req.query);
     const format = (query.format || ExportFormat.XLSX) as ExportFormat;
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
-    const result = await ExportService.generateExport(req.params.id, format);
+    const result = await ExportService.generateExport(reportId, format);
 
     res.status(200).json({
       success: true,
@@ -180,8 +183,9 @@ export class AdminController {
   });
 
   static approveExpense = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ExpensesService.adminChangeExpenseStatus(
-      req.params.id,
+      expenseId,
       ExpenseStatus.APPROVED,
       req.user!.id
     );
@@ -194,8 +198,9 @@ export class AdminController {
   });
 
   static rejectExpense = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ExpensesService.adminChangeExpenseStatus(
-      req.params.id,
+      expenseId,
       ExpenseStatus.REJECTED,
       req.user!.id
     );
@@ -351,7 +356,7 @@ export class AdminController {
     const { User } = await import('../models/User');
     const { CompanyAdmin } = await import('../models/CompanyAdmin');
 
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const cacheKey = cacheKeys.companyAnalytics(companyId, req.query);
 
     // Get company admin to verify access
@@ -592,7 +597,7 @@ export class AdminController {
     const { Receipt } = await import('../models/Receipt');
     const { User } = await import('../models/User');
 
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const cacheKey = cacheKeys.miniStats(companyId);
 
     // Get all user IDs in this company

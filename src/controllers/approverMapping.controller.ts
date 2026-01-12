@@ -48,7 +48,7 @@ export class ApproverMappingController {
     }
 
     const companyId = companyAdmin.companyId.toString();
-    const userId = req.params.userId;
+    const userId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
     const mapping = await ApproverMappingService.getMappingByUserId(userId, companyId);
 
     if (!mapping) {
@@ -131,7 +131,7 @@ export class ApproverMappingController {
     }
 
     const companyId = companyAdmin.companyId.toString();
-    const userId = req.params.userId;
+    const userId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
 
     await ApproverMappingService.deleteMapping(userId, companyId);
 

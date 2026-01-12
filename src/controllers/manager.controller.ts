@@ -121,9 +121,10 @@ export class ManagerController {
       return;
     }
 
+    const teamId = Array.isArray(req.params.teamId) ? req.params.teamId[0] : req.params.teamId;
     const details = await ManagerService.getTeamSpendingDetails(
       req.user!.id,
-      req.params.teamId
+      teamId
     );
 
     res.status(200).json({
@@ -144,7 +145,8 @@ export class ManagerController {
       return;
     }
 
-    const report = await ManagerService.getReportForReview(req.params.id, req.user!.id);
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const report = await ManagerService.getReportForReview(reportId, req.user!.id);
 
     if (!report) {
       res.status(404).json({
@@ -174,8 +176,9 @@ export class ManagerController {
     }
 
     const { comment } = approveRejectSchema.parse(req.body);
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ManagerService.approveReport(
-      req.params.id,
+      reportId,
       req.user!.id,
       comment
     );
@@ -200,8 +203,9 @@ export class ManagerController {
     }
 
     const { comment } = approveRejectSchema.parse(req.body);
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ManagerService.rejectReport(
-      req.params.id,
+      reportId,
       req.user!.id,
       comment
     );
@@ -226,8 +230,9 @@ export class ManagerController {
     }
 
     const { comment } = approveRejectSchema.parse(req.body);
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ManagerService.approveExpense(
-      req.params.id,
+      expenseId,
       req.user!.id,
       comment
     );
@@ -261,8 +266,9 @@ export class ManagerController {
       return;
     }
 
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ManagerService.rejectExpense(
-      req.params.id,
+      expenseId,
       req.user!.id,
       comment
     );
@@ -296,8 +302,9 @@ export class ManagerController {
       return;
     }
 
+    const expenseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const expense = await ManagerService.requestExpenseChanges(
-      req.params.id,
+      expenseId,
       req.user!.id,
       comment
     );

@@ -509,7 +509,7 @@ export class SuperAdminController {
 
   // Get Company by ID
   static getCompanyById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     
     // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
@@ -792,7 +792,7 @@ export class SuperAdminController {
 
   // Get Company Analytics
   static getCompanyAnalytics = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const { timeRange = '30d' } = req.query;
 
     // Validate ObjectId format
@@ -1221,7 +1221,7 @@ export class SuperAdminController {
 
   // Get Company Mini Stats (lightweight real-time stats for table display)
   static getCompanyMiniStats = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
     // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
@@ -1455,7 +1455,7 @@ export class SuperAdminController {
 
   // Delete Company
   static deleteCompany = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
     const company = await Company.findById(companyId);
 
@@ -1468,7 +1468,8 @@ export class SuperAdminController {
     }
 
     // Check if company has users
-    const userCount = await User.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId) });
+    const companyObjectId = new mongoose.Types.ObjectId(companyId);
+    const userCount = await User.countDocuments({ companyId: companyObjectId });
     if (userCount > 0) {
       res.status(400).json({
         success: false,
@@ -2724,7 +2725,7 @@ export class SuperAdminController {
    */
   static createCompanyBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
-    const companyId = req.params.companyId;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
     const { backupName } = req.body;
     
     const backup = await BackupService.createCompanyBackup(companyId, req.user!.id, backupName);
@@ -2816,7 +2817,7 @@ export class SuperAdminController {
 
   static restoreBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
-    const backupId = req.params.id;
+    const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const { confirmText, restoreToCompanyId } = req.body;
     
     // Safety check: require confirmation
@@ -2837,7 +2838,7 @@ export class SuperAdminController {
 
   static downloadBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
-    const backupId = req.params.id;
+    const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     
     const downloadUrl = await BackupService.getBackupDownloadUrl(backupId);
     
@@ -2855,7 +2856,7 @@ export class SuperAdminController {
    */
   static deleteBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
-    const backupId = req.params.id;
+    const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     
     await BackupService.deleteBackup(backupId, req.user!.id);
     

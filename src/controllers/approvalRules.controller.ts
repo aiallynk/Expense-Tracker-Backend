@@ -74,8 +74,9 @@ export class ApprovalRulesController {
       return;
     }
 
+    const ruleId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const rule = await ApprovalRulesService.updateApprovalRule(
-      req.params.id,
+      ruleId,
       companyAdmin.companyId.toString(),
       req.body
     );
@@ -103,8 +104,9 @@ export class ApprovalRulesController {
       return;
     }
 
+    const ruleId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     await ApprovalRulesService.deleteApprovalRule(
-      req.params.id,
+      ruleId,
       companyAdmin.companyId.toString()
     );
 

@@ -88,7 +88,7 @@ export class TeamsController {
   static async getTeam(req: AuthRequest, res: Response, next: NextFunction) {
     try {
       const managerId = req.user!.id; // Use id, not _id
-      const { id } = req.params;
+      const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const team = await TeamsService.getTeamById(id, managerId);
 
       res.json({
@@ -107,7 +107,7 @@ export class TeamsController {
   static async addMembers(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
     try {
       const managerId = req.user!.id; // Use id, not _id
-      const { id } = req.params;
+      const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const { memberIds } = req.body;
 
       if (!Array.isArray(memberIds) || memberIds.length === 0) {
@@ -138,7 +138,8 @@ export class TeamsController {
   static async removeMember(req: AuthRequest, res: Response, next: NextFunction) {
     try {
       const managerId = req.user!.id; // Use id, not _id
-      const { id, userId } = req.params;
+      const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const userId = Array.isArray(req.params.userId) ? req.params.userId[0] : req.params.userId;
       const team = await TeamsService.removeTeamMember(id, managerId, userId);
 
       res.json({

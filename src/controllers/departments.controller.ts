@@ -74,7 +74,8 @@ export class DepartmentsController {
       return;
     }
 
-    const department = await DepartmentsService.getDepartmentById(req.params.id, companyId);
+    const departmentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const department = await DepartmentsService.getDepartmentById(departmentId, companyId);
 
     if (!department) {
       res.status(404).json({
@@ -231,7 +232,8 @@ export class DepartmentsController {
       return;
     }
 
-    const deleted = await DepartmentsService.deleteDepartment(req.params.id, companyId);
+    const departmentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const deleted = await DepartmentsService.deleteDepartment(departmentId, companyId);
 
     if (!deleted) {
       res.status(404).json({

@@ -59,8 +59,9 @@ export class ReportsController {
   });
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ReportsService.getReportById(
-      req.params.id,
+      reportId,
       req.user!.id,
       req.user!.role
     );
@@ -82,8 +83,9 @@ export class ReportsController {
 
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = updateReportSchema.parse(req.body);
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ReportsService.updateReport(
-      req.params.id,
+      reportId,
       req.user!.id,
       data
     );
@@ -95,7 +97,8 @@ export class ReportsController {
   });
 
   static submit = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const report = await ReportsService.submitReport(req.params.id, req.user!.id);
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const report = await ReportsService.submitReport(reportId, req.user!.id);
 
     res.status(200).json({
       success: true,
@@ -109,8 +112,9 @@ export class ReportsController {
 
   static action = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = reportActionSchema.parse(req.body);
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const report = await ReportsService.handleReportAction(
-      req.params.id,
+      reportId,
       req.user!.id,
       data.action,
       data.comment
@@ -127,8 +131,9 @@ export class ReportsController {
   });
 
   static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     await ReportsService.deleteReport(
-      req.params.id,
+      reportId,
       req.user!.id,
       req.user!.role
     );
@@ -144,7 +149,7 @@ export class ReportsController {
    * GET /api/v1/reports/:id/export/excel
    */
   static exportExcel = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const reportId = req.params.id;
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const buffer = await ExportService.generateStructuredExport(
       reportId,
       req.user!.id,
@@ -169,19 +174,20 @@ export class ReportsController {
    * GET /api/v1/reports/:id/export/pdf
    */
   static exportPDF = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const buffer = await ExportService.generateExport(
-      req.params.id,
+      reportId,
       ExportFormat.PDF,
       true // return buffer directly
     ) as Buffer;
 
     const report = await ReportsService.getReportById(
-      req.params.id,
+      reportId,
       req.user!.id,
       req.user!.role
     );
 
-    const filename = `Expense_Reimbursement_${report?.name || req.params.id}_${new Date().toISOString().split('T')[0]}.pdf`;
+    const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.pdf`;
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);

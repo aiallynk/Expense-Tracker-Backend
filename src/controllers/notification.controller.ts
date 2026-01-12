@@ -104,7 +104,7 @@ export class NotificationController {
    */
   static markAsRead = asyncHandler(async (req: AuthRequest, res: Response): Promise<void> => {
     const userId = req.user!.id;
-    const notificationId = req.params.id;
+    const notificationId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
     const notification = await NotificationDataService.markAsRead(notificationId, userId);
 

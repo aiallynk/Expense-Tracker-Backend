@@ -9,8 +9,9 @@ export class ReceiptsController {
   static createUploadIntent = asyncHandler(
     async (req: AuthRequest, res: Response) => {
       const data = uploadIntentSchema.parse(req.body);
+      const expenseId = Array.isArray(req.params.expenseId) ? req.params.expenseId[0] : req.params.expenseId;
       const result = await ReceiptsService.createUploadIntent(
-        req.params.expenseId,
+        expenseId,
         req.user!.id,
         data
       );
@@ -28,8 +29,9 @@ export class ReceiptsController {
   );
 
   static confirmUpload = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const receiptId = Array.isArray(req.params.receiptId) ? req.params.receiptId[0] : req.params.receiptId;
     const result = await ReceiptsService.confirmUpload(
-      req.params.receiptId,
+      receiptId,
       req.user!.id
     );
 
@@ -49,8 +51,9 @@ export class ReceiptsController {
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
+      const receiptId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const receipt = await ReceiptsService.getReceipt(
-        req.params.id,
+        receiptId,
         req.user!.id,
         req.user!.role
       );
@@ -82,7 +85,7 @@ export class ReceiptsController {
   });
 
   static uploadFile = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const receiptId = req.params.receiptId;
+    const receiptId = Array.isArray(req.params.receiptId) ? req.params.receiptId[0] : req.params.receiptId;
     
     // Handle both raw binary and FormData
     let fileBuffer: Buffer;

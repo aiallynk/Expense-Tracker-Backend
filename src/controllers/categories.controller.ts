@@ -56,7 +56,8 @@ export class CategoriesController {
   });
 
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const category = await CategoriesService.getCategoryById(req.params.id);
+    const categoryId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const category = await CategoriesService.getCategoryById(categoryId);
 
     if (!category) {
       res.status(404).json({
@@ -101,7 +102,8 @@ export class CategoriesController {
 
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
     const data = updateCategorySchema.parse(req.body);
-    const category = await CategoriesService.updateCategory(req.params.id, {
+    const categoryId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const category = await CategoriesService.updateCategory(categoryId, {
       ...data,
       description: req.body.description,
       status: req.body.status,
@@ -114,7 +116,8 @@ export class CategoriesController {
   });
 
   static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
-    await CategoriesService.deleteCategory(req.params.id);
+    const categoryId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    await CategoriesService.deleteCategory(categoryId);
 
     res.status(200).json({
       success: true,
@@ -124,7 +127,7 @@ export class CategoriesController {
 
   // Get or create category by name (allows users to auto-create categories)
   static getOrCreateByName = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const name = req.params.name;
+    const name = Array.isArray(req.params.name) ? req.params.name[0] : req.params.name;
     if (!name || name.trim() === '') {
       res.status(400).json({
         success: false,

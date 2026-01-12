@@ -112,7 +112,7 @@ export class ServiceAccountController {
    * GET /api/v1/service-accounts/:id
    */
   static getById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { id } = req.params;
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const userId = req.user!.id;
     let companyId: string | undefined;
 
@@ -131,8 +131,9 @@ export class ServiceAccountController {
       }
     }
 
+    const serviceAccountId = id;
     const serviceAccount = await ServiceAccountService.getServiceAccountById(
-      id,
+      serviceAccountId,
       companyId
     );
 
@@ -156,7 +157,7 @@ export class ServiceAccountController {
    * PATCH /api/v1/service-accounts/:id
    */
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { id } = req.params;
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const data = updateServiceAccountSchema.parse(req.body);
     const userId = req.user!.id;
     let companyId: string | undefined;
@@ -195,7 +196,7 @@ export class ServiceAccountController {
    * POST /api/v1/service-accounts/:id/regenerate-key
    */
   static regenerateKey = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { id } = req.params;
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const userId = req.user!.id;
     let companyId: string | undefined;
 
@@ -236,7 +237,7 @@ export class ServiceAccountController {
    * DELETE /api/v1/service-accounts/:id
    */
   static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { id } = req.params;
+    const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const userId = req.user!.id;
     let companyId: string | undefined;
 

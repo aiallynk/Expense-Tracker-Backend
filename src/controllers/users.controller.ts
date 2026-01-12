@@ -157,7 +157,7 @@ export class UsersController {
 
   static updateUser = asyncHandler(async (req: AuthRequest, res: Response) => {
     const requestingUser = req.user!;
-    const userId = req.params.id;
+    const userId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const data = updateUserSchema.parse(req.body);
 
     const user = await UsersService.updateUser(
@@ -176,7 +176,7 @@ export class UsersController {
 
   static getUserById = asyncHandler(async (req: AuthRequest, res: Response) => {
     const requestingUser = req.user!;
-    const userId = req.params.id;
+    const userId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     
     let companyId: string | undefined;
     

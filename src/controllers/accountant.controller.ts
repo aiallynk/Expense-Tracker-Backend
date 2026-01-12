@@ -53,7 +53,7 @@ export class AccountantController {
    */
   static getReportDetails = asyncHandler(async (req: AuthRequest, res: Response) => {
     const accountantId = req.user!.id;
-    const reportId = req.params.id;
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     
     const result = await AccountantService.getReportDetails(accountantId, reportId);
 

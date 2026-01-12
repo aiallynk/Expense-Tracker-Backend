@@ -15,7 +15,7 @@ export class CompanyAdminController {
    * POST /api/v1/companies/:companyId/admins
    */
   static createCompanyAdmin = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { companyId } = req.params;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
     const { email, name, password } = req.body;
 
     // Validate company ID
@@ -112,7 +112,7 @@ export class CompanyAdminController {
    * GET /api/v1/companies/:companyId/admins
    */
   static getCompanyAdmins = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { companyId } = req.params;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
 
     // Validate company ID
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
@@ -166,7 +166,8 @@ export class CompanyAdminController {
    * GET /api/v1/companies/:companyId/admins/:adminId
    */
   static getCompanyAdminById = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { companyId, adminId } = req.params;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
+    const adminId = Array.isArray(req.params.adminId) ? req.params.adminId[0] : req.params.adminId;
 
     // Validate IDs
     if (!mongoose.Types.ObjectId.isValid(companyId) || !mongoose.Types.ObjectId.isValid(adminId)) {
@@ -225,7 +226,8 @@ export class CompanyAdminController {
    * PUT /api/v1/companies/:companyId/admins/:adminId
    */
   static updateCompanyAdmin = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { companyId, adminId } = req.params;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
+    const adminId = Array.isArray(req.params.adminId) ? req.params.adminId[0] : req.params.adminId;
     const { name, status } = req.body;
 
     // Validate IDs
@@ -310,7 +312,8 @@ export class CompanyAdminController {
    * DELETE /api/v1/companies/:companyId/admins/:adminId
    */
   static deleteCompanyAdmin = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { companyId, adminId } = req.params;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
+    const adminId = Array.isArray(req.params.adminId) ? req.params.adminId[0] : req.params.adminId;
 
     // Validate IDs
     if (!mongoose.Types.ObjectId.isValid(companyId) || !mongoose.Types.ObjectId.isValid(adminId)) {
@@ -368,7 +371,8 @@ export class CompanyAdminController {
    * POST /api/v1/companies/:companyId/admins/:adminId/reset-password
    */
   static resetCompanyAdminPassword = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { companyId, adminId } = req.params;
+    const companyId = Array.isArray(req.params.companyId) ? req.params.companyId[0] : req.params.companyId;
+    const adminId = Array.isArray(req.params.adminId) ? req.params.adminId[0] : req.params.adminId;
     const { newPassword } = req.body;
 
     // Validate IDs
