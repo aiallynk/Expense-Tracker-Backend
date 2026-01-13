@@ -535,5 +535,84 @@ export class AuthService {
     const saltRounds = 10;
     return bcrypt.hash(password, saltRounds);
   }
+
+  /**
+   * Request password reset - generates reset token
+   */
+  static async forgotPassword(email: string): Promise<{ success: boolean; message: string; resetToken?: string }> {
+    const normalizedEmail = email.toLowerCase().trim();
+    
+    // Find user by email
+    const user = await User.findOne({ email: normalizedEmail }).exec();
+    
+    // Always return success message (security: don't reveal if email exists)
+    if (!user) {
+      return {
+        success: true,
+        message: 'If an account with that email exists, a password reset link has been sent.',
+      };
+    }
+
+    // Generate reset token (using crypto for secure random token)
+    const crypto = await import('crypto');
+    const resetToken = crypto.randomBytes(32).toString('hex');
+    const resetExpires = new Date();
+    resetExpires.setHours(resetExpires.getHours() + 1); // Token expires in 1 hour
+
+    // Save reset token to user
+    user.passwordResetToken = resetToken;
+    user.passwordResetExpires = resetExpires;
+    await user.save();
+
+    // In production, send email with reset link
+    // For now, return the token (remove in production and send via email)
+    return {
+      success: true,
+      message: 'Password reset token generated. Please use this token to reset your password.',
+      resetToken, // Remove this in production - send via email instead
+    };
+  }
+
+  /**
+   * Reset password using reset token
+   */
+  static async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
+    // Find user with valid reset token
+    const user = await User.findOne({
+      passwordResetToken: token,
+      passwordResetExpires: { $gt: new Date() }, // Token not expired
+    }).exec();
+
+    if (!user) {
+      const error: any = new Error('Invalid or expired reset token');
+      error.statusCode = 400;
+      error.code = 'INVALID_RESET_TOKEN';
+      throw error;
+    }
+
+    // Hash new password
+    const passwordHash = await this.hashPassword(newPassword);
+
+    // Update password and clear reset token
+    user.passwordHash = passwordHash;
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    await user.save();
+
+    // Audit log
+    const userId = (user._id as mongoose.Types.ObjectId).toString();
+    await AuditService.log(
+      userId,
+      'User',
+      userId,
+      AuditAction.UPDATE,
+      { action: 'password_reset' }
+    );
+
+    return {
+      success: true,
+      message: 'Password reset successfully',
+    };
+  }
 }
 

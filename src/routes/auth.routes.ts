@@ -44,5 +44,17 @@ router.post(
 
 router.post('/logout', AuthController.logout);
 
+router.post(
+  '/forgot-password',
+  loginRateLimiter,
+  AuthController.forgotPassword
+);
+
+router.post(
+  '/reset-password',
+  loginRateLimiter,
+  AuthController.resetPassword
+);
+
 export default router;
 

@@ -70,5 +70,33 @@ export class AuthController {
       message: 'Logged out successfully',
     });
   });
+
+  static forgotPassword = asyncHandler(async (req: Request, res: Response) => {
+    const emailSchema = z.object({
+      email: z.string().email('Invalid email address'),
+    });
+    const data = emailSchema.parse(req.body);
+    const result = await AuthService.forgotPassword(data.email);
+
+    res.status(200).json({
+      success: result.success,
+      message: result.message,
+      data: result.resetToken ? { resetToken: result.resetToken } : undefined, // Remove in production
+    });
+  });
+
+  static resetPassword = asyncHandler(async (req: Request, res: Response) => {
+    const resetPasswordSchema = z.object({
+      token: z.string().min(1, 'Reset token is required'),
+      password: z.string().min(6, 'Password must be at least 6 characters'),
+    });
+    const data = resetPasswordSchema.parse(req.body);
+    const result = await AuthService.resetPassword(data.token, data.password);
+
+    res.status(200).json({
+      success: result.success,
+      message: result.message,
+    });
+  });
 }
 

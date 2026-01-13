@@ -16,6 +16,8 @@ export interface IUser extends Document {
   roles?: mongoose.Types.ObjectId[];
   status: UserStatus;
   lastLoginAt?: Date;
+  passwordResetToken?: string;
+  passwordResetExpires?: Date;
   receiptUrls?: Array<{
     receiptId: mongoose.Types.ObjectId;
     storageUrl: string;
@@ -86,6 +88,12 @@ const userSchema = new Schema<IUser>(
       required: true,
     },
     lastLoginAt: {
+      type: Date,
+    },
+    passwordResetToken: {
+      type: String,
+    },
+    passwordResetExpires: {
       type: Date,
     },
     receiptUrls: [
