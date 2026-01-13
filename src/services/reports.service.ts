@@ -160,6 +160,10 @@ export class ReportsService {
     filters: ReportFiltersDto
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
+    
+    // Debug logging for pagination
+    console.log(`[ReportsService] Pagination: page=${page}, pageSize=${pageSize}, skip=${(page - 1) * pageSize}`);
+    
     // Ensure userId is converted to ObjectId for proper matching
     const query: any = { userId: new mongoose.Types.ObjectId(userId) };
 
@@ -191,6 +195,8 @@ export class ReportsService {
         .exec(),
       ExpenseReport.countDocuments(query).exec(),
     ]);
+
+    console.log(`[ReportsService] Query result: ${reports.length} reports returned (total: ${total}, requested: ${pageSize})`);
 
     // Get expenses count for each report
     let reportsWithExpenses: any[] = reports.map((r) => r.toObject());

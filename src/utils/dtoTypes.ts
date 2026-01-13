@@ -264,21 +264,44 @@ export const bulkDocumentConfirmSchema = z.object({
   receiptId: z.string().optional(), // Receipt ID for linking document to expenses
 });
 
-// Query DTOs
-export const paginationSchema = z.object({
+// Query DTOs - Base schema with both limit and pageSize support
+const paginationBaseSchema = z.object({
   page: z.string().optional().transform((val) => (val ? parseInt(val, 10) : 1)),
-  pageSize: z.string().optional().transform((val) => (val ? parseInt(val, 10) : 20)),
+  pageSize: z.string().optional().transform((val) => (val ? parseInt(val, 10) : undefined)),
+  limit: z.string().optional().transform((val) => (val ? parseInt(val, 10) : undefined)),
 });
 
-export const reportFiltersSchema = paginationSchema.extend({
+// Apply transformation to normalize limit/pageSize
+export const paginationSchema = paginationBaseSchema.transform((data) => {
+  // Use limit if provided, otherwise use pageSize, default to 20 if neither provided
+  const pageSize = data.limit ?? data.pageSize ?? 20;
+  return {
+    page: data.page,
+    pageSize: pageSize,
+  };
+});
+
+export const reportFiltersSchema = paginationBaseSchema.extend({
   status: z.nativeEnum(ExpenseReportStatus).optional(),
   from: z.string().datetime().optional(),
   to: z.string().datetime().optional(),
   projectId: z.string().optional(),
   userId: z.string().optional(),
+}).transform((data) => {
+  // Use limit if provided, otherwise use pageSize, default to 20 if neither provided
+  const pageSize = data.limit ?? data.pageSize ?? 20;
+  return {
+    page: data.page,
+    pageSize: pageSize,
+    status: data.status,
+    from: data.from,
+    to: data.to,
+    projectId: data.projectId,
+    userId: data.userId,
+  };
 });
 
-export const expenseFiltersSchema = paginationSchema.extend({
+export const expenseFiltersSchema = paginationBaseSchema.extend({
   status: z.nativeEnum(ExpenseStatus).optional(),
   categoryId: z.string().optional(),
   costCentreId: z.string().optional(), // Filter by cost centre
@@ -286,6 +309,20 @@ export const expenseFiltersSchema = paginationSchema.extend({
   to: z.string().datetime().optional(),
   q: z.string().optional(),
   reportId: z.string().optional(),
+}).transform((data) => {
+  // Use limit if provided, otherwise use pageSize, default to 20 if neither provided
+  const pageSize = data.limit ?? data.pageSize ?? 20;
+  return {
+    page: data.page,
+    pageSize: pageSize,
+    status: data.status,
+    categoryId: data.categoryId,
+    costCentreId: data.costCentreId,
+    from: data.from,
+    to: data.to,
+    q: data.q,
+    reportId: data.reportId,
+  };
 });
 
 export const exportQuerySchema = z.object({

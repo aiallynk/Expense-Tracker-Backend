@@ -425,6 +425,9 @@ export class ExpensesService {
     filters: ExpenseFiltersDto
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
+    
+    // Debug logging for pagination
+    console.log(`[ExpensesService] Pagination: page=${page}, pageSize=${pageSize}, skip=${(page - 1) * pageSize}`);
 
     // Build base query - expenses must belong to the user
     // Since expenses have a userId field, we can directly query by userId
@@ -501,6 +504,8 @@ export class ExpensesService {
         .exec(),
       Expense.countDocuments(query).exec(),
     ]);
+
+    console.log(`[ExpensesService] Query result: ${expenses.length} expenses returned (total: ${total}, requested: ${pageSize})`);
 
     return createPaginatedResult(expenses, total, page, pageSize);
   }
