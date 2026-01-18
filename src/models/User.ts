@@ -8,6 +8,7 @@ export interface IUser extends Document {
   passwordHash: string;
   name?: string;
   phone?: string;
+  profileImage?: string; // S3 URL for profile image
   employeeId?: string; // Unique employee ID (e.g., ABC001)
   role: UserRole;
   companyId?: mongoose.Types.ObjectId;
@@ -50,6 +51,10 @@ const userSchema = new Schema<IUser>(
     phone: {
       type: String,
       trim: true,
+    },
+    profileImage: {
+      type: String,
+      default: null,
     },
     employeeId: {
       type: String,

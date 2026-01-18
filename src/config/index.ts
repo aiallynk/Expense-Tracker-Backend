@@ -55,7 +55,9 @@ export const config = {
   ocr: {
     disableOcr: process.env.DISABLE_OCR === 'true',
     queueName: 'ocr-jobs',
-    concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '3', 10),
+    // Increased default concurrency for high-volume processing
+    // Supports 100K+ users with multiple OCR workers
+    concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '20', 10), // Increased from 3 to 20
   },
   analytics: {
     // Trim whitespace and newlines from API key

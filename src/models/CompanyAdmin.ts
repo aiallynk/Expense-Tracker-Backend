@@ -12,6 +12,7 @@ export interface ICompanyAdmin extends Document {
   passwordHash: string;
   name: string;
   phone?: string;
+  profileImage?: string; // S3 URL for profile image
   companyId: mongoose.Types.ObjectId;
   status: CompanyAdminStatus;
   lastLoginAt?: Date;
@@ -42,6 +43,10 @@ const companyAdminSchema = new Schema<ICompanyAdmin>(
     phone: {
       type: String,
       trim: true,
+    },
+    profileImage: {
+      type: String,
+      default: null,
     },
     companyId: {
       type: Schema.Types.ObjectId,

@@ -2,8 +2,8 @@ import mongoose from 'mongoose';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { ApprovalRule, ApprovalRuleTriggerType, ApprovalRuleApproverRole } from '../models/ApprovalRule';
-import { ApproverMapping } from '../models/ApproverMapping';
-import { CompanySettings } from '../models/CompanySettings';
+import { ApproverMapping, IApproverMapping } from '../models/ApproverMapping';
+import { CompanySettings, ICompanySettings } from '../models/CompanySettings';
 import { CostCentre } from '../models/CostCentre';
 import { Expense } from '../models/Expense';
 import {
@@ -468,9 +468,9 @@ export class ReportsService {
     }
 
     // Get company settings to determine approval levels
-    let companySettings = null;
+    let companySettings: ICompanySettings | null = null;
     let approvalLevels = 2; // Default to 2 levels (L1 and L2 are always required)
-    let approvalMatrix = null;
+    let approvalMatrix: ICompanySettings['approvalMatrix'] | null = null;
     if (reportUser.companyId) {
       companySettings = await CompanySettings.findOne({ companyId: reportUser.companyId }).exec();
       if (companySettings) {
@@ -491,7 +491,7 @@ export class ReportsService {
     }
 
     // STEP 1: Check for custom approver mapping first
-    let customMapping = null;
+    let customMapping: IApproverMapping | null = null;
     if (reportUser.companyId) {
       customMapping = await ApproverMapping.findOne({
         userId: reportUser._id,
@@ -652,7 +652,7 @@ export class ReportsService {
       // If approvalMatrix is configured, use next enabled level
       if (approvalMatrix) {
         const nextLevel = maxLevel + 1;
-        let nextLevelConfig = null;
+        let nextLevelConfig: { enabled: boolean; approverRoles: string[] } | null = null;
 
         if (nextLevel === 3 && approvalMatrix.level3?.enabled) {
           nextLevelConfig = approvalMatrix.level3;

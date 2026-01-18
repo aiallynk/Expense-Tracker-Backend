@@ -55,6 +55,10 @@ export class UsersService {
         admin.phone = data.phone ? data.phone.trim() : undefined;
       }
 
+      if (data.profileImage !== undefined) {
+        (admin as any).profileImage = data.profileImage || undefined;
+      }
+
       await admin.save();
 
       // Return admin without passwordHash (similar to getCurrentUser)
@@ -78,6 +82,10 @@ export class UsersService {
 
     if (data.phone !== undefined) {
       user.phone = data.phone ? data.phone.trim() : undefined;
+    }
+
+    if (data.profileImage !== undefined) {
+      user.profileImage = data.profileImage || undefined;
     }
 
     // Track if company or department changed
@@ -577,6 +585,111 @@ export class UsersService {
     }
 
     return updatedUser;
+  }
+
+  static async bulkAction(
+    userIds: string[],
+    action: 'activate' | 'deactivate' | 'delete',
+    requestingUserId: string,
+    companyId?: string
+  ): Promise<{ success: boolean; updated: number; failed: number; errors: string[] }> {
+    if (!userIds || userIds.length === 0) {
+      throw new Error('No user IDs provided');
+    }
+
+    let updated = 0;
+    let failed = 0;
+    const errors: string[] = [];
+
+    for (const userId of userIds) {
+      try {
+        const user = await User.findById(userId);
+        
+        if (!user) {
+          failed++;
+          errors.push(`User ${userId} not found`);
+          continue;
+        }
+
+        // Verify user belongs to same company if companyId is provided
+        if (companyId && user.companyId?.toString() !== companyId) {
+          failed++;
+          errors.push(`User ${userId} does not belong to your company`);
+          continue;
+        }
+
+        // Perform action
+        switch (action) {
+          case 'activate':
+            user.status = UserStatus.ACTIVE;
+            await user.save();
+            await AuditService.log(requestingUserId, 'User', userId, AuditAction.UPDATE);
+            updated++;
+            break;
+          
+          case 'deactivate':
+            user.status = UserStatus.INACTIVE;
+            await user.save();
+            await AuditService.log(requestingUserId, 'User', userId, AuditAction.UPDATE);
+            updated++;
+            break;
+          
+          case 'delete':
+            // Soft delete: set status to INACTIVE
+            user.status = UserStatus.INACTIVE;
+            await user.save();
+            await AuditService.log(requestingUserId, 'User', userId, AuditAction.DELETE);
+            updated++;
+            break;
+          
+          default:
+            failed++;
+            errors.push(`Invalid action: ${action}`);
+        }
+
+        // Emit real-time updates if user has a company
+        if (user.companyId) {
+          try {
+            const userCompanyId = user.companyId.toString();
+            const formattedUser = {
+              id: user._id?.toString(),
+              _id: user._id?.toString(),
+              name: user.name,
+              email: user.email,
+              phone: user.phone,
+              role: user.role,
+              status: user.status,
+              companyId: user.companyId,
+            };
+            emitUserUpdated(userCompanyId, formattedUser);
+          } catch (error) {
+            // Don't fail bulk action if real-time updates fail
+            logger.error({ error, userId }, 'Error emitting real-time update for bulk action');
+          }
+        }
+      } catch (error: any) {
+        failed++;
+        errors.push(`Error processing user ${userId}: ${error.message || 'Unknown error'}`);
+        logger.error({ error, userId, action }, 'Error in bulk action');
+      }
+    }
+
+    // Emit dashboard stats update for company if applicable
+    if (companyId && updated > 0) {
+      try {
+        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+        emitCompanyAdminDashboardUpdate(companyId, stats);
+      } catch (error) {
+        logger.error({ error, companyId }, 'Error emitting dashboard update after bulk action');
+      }
+    }
+
+    return {
+      success: failed === 0,
+      updated,
+      failed,
+      errors,
+    };
   }
 }
 

@@ -12,10 +12,20 @@ export const connectDB = async (): Promise<void> => {
       ? `${config.mongodb.uri}${config.mongodb.dbName}`
       : `${config.mongodb.uri}/${config.mongodb.dbName}`;
 
-    // Set connection options for better error handling
+    // Set connection options for better error handling and scalability
+    // Optimized for 100K+ concurrent users
     const options = {
+      // Connection pool settings for high concurrency
+      maxPoolSize: parseInt(process.env.MONGODB_MAX_POOL_SIZE || '500', 10), // 500 connections for 100K users
+      minPoolSize: parseInt(process.env.MONGODB_MIN_POOL_SIZE || '10', 10), // Minimum 10 connections
+      // Timeout settings
       serverSelectionTimeoutMS: 5000, // Timeout after 5s instead of 30s
       socketTimeoutMS: 45000,
+      // Connection management
+      maxIdleTimeMS: 30000, // Close idle connections after 30s
+      // Retry settings for better resilience
+      retryWrites: true,
+      retryReads: true,
     };
 
     await mongoose.connect(uri, options);

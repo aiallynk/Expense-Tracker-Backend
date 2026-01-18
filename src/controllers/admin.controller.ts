@@ -991,7 +991,7 @@ export class AdminController {
 
     // Calculate cumulative storage - get total storage up to each month
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-    const formattedStorageGrowth = [];
+    const formattedStorageGrowth: Array<{ name: string; value: number; month: number; year: number }> = [];
     
     // Create a map of monthly data for the selected year
     const dataMap = new Map();
@@ -1215,7 +1215,7 @@ export class AdminController {
       }
     ]);
 
-    const alerts = [];
+    const alerts: Array<{ companyId: any; usagePercent: number; usedGB: number; allocatedGB: number; severity: string }> = [];
 
     for (const company of storageUsage) {
       const companyId = company._id?.toString();

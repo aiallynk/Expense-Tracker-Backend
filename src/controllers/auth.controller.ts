@@ -3,7 +3,8 @@ import { z } from 'zod';
 
 import { asyncHandler } from '../middleware/error.middleware';
 import { AuthService } from '../services/auth.service';
-import { loginSchema, refreshTokenSchema } from '../utils/dtoTypes';
+import { loginSchema, refreshTokenSchema, changePasswordSchema } from '../utils/dtoTypes';
+import { AuthRequest } from '../middleware/auth.middleware';
 import { UserRole } from '../utils/enums';
 
 const signupSchema = z.object({
@@ -92,6 +93,21 @@ export class AuthController {
     });
     const data = resetPasswordSchema.parse(req.body);
     const result = await AuthService.resetPassword(data.token, data.password);
+
+    res.status(200).json({
+      success: result.success,
+      message: result.message,
+    });
+  });
+
+  static changePassword = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const data = changePasswordSchema.parse(req.body);
+    const result = await AuthService.changePassword(
+      req.user!.id,
+      data.currentPassword,
+      data.newPassword,
+      req.user!.role
+    );
 
     res.status(200).json({
       success: result.success,

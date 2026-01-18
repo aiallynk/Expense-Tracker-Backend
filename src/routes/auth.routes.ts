@@ -4,8 +4,9 @@ import { z } from 'zod';
 import { AuthController } from '../controllers/auth.controller';
 import { loginRateLimiter } from '../middleware/rateLimit.middleware';
 import { validate } from '../middleware/validate.middleware';
-import { loginSchema, refreshTokenSchema } from '../utils/dtoTypes';
+import { loginSchema, refreshTokenSchema, changePasswordSchema } from '../utils/dtoTypes';
 import { UserRole } from '../utils/enums';
+import { authMiddleware } from '../middleware/auth.middleware';
 
 const router = Router();
 
@@ -54,6 +55,14 @@ router.post(
   '/reset-password',
   loginRateLimiter,
   AuthController.resetPassword
+);
+
+router.post(
+  '/change-password',
+  authMiddleware,
+  loginRateLimiter,
+  validate(changePasswordSchema),
+  AuthController.changePassword
 );
 
 export default router;

@@ -35,9 +35,14 @@ Thumbs.db
 # Testing
 coverage/
 .nyc_output/
+*.test.js
+*.spec.js
+
+# Note: Test directories (tests/, security-tests/, __tests__/) ARE tracked in Git
+# They are only excluded from production builds via tsconfig.json and build process
+# DO NOT add them to .gitignore - they should be version controlled!
 
 # Temporary files
 tmp/
 temp/
 *.tmp
-

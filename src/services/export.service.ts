@@ -59,11 +59,30 @@ export class ExportService {
       throw new Error('Report not found');
     }
 
+    // Recalculate totals from DB before export
+    const { ReportsService } = await import('./reports.service');
+    await ReportsService.recalcTotals(reportId);
+    
+    // Refresh report to get updated totals
+    const updatedReport = await ExpenseReport.findById(reportId)
+      .populate('userId', 'name email')
+      .populate('projectId', 'name code')
+      .exec();
+    
+    if (!updatedReport) {
+      throw new Error('Report not found after recalculation');
+    }
+
     const expenses = await Expense.find({ reportId })
       .populate('categoryId', 'name')
       .populate('receiptPrimaryId', 'storageUrl storageKey mimeType')
       .sort({ expenseDate: 1 })
       .exec();
+
+    // Handle empty data case
+    if (!expenses || expenses.length === 0) {
+      throw new Error('No data available for selected filters');
+    }
 
     let buffer: Buffer;
     let mimeType: string;
@@ -158,7 +177,9 @@ export class ExportService {
 
     // Currency and amount with proper symbol
     const currencySymbol = this.getCurrencySymbol(report.currency || 'INR');
-    summarySheet.addRow(['Total Amount', `${currencySymbol}${report.totalAmount}`]);
+    // Recalculate total from expenses to ensure accuracy
+    const calculatedTotal = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
+    summarySheet.addRow(['Total Amount', `${currencySymbol}${calculatedTotal.toFixed(2)}`]);
 
     // Add approver information
     if (approvalInstance?.history && approvalInstance.history.length > 0) {
@@ -631,7 +652,9 @@ export class ExportService {
 
         // Currency and amount with proper symbol
         const currencySymbol = this.getCurrencySymbol(report.currency || 'INR');
-        doc.text(`Total Amount: ${currencySymbol}${report.totalAmount}`);
+        // Recalculate total from expenses to ensure accuracy
+        const calculatedTotal = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
+        doc.text(`Total Amount: ${currencySymbol}${calculatedTotal.toFixed(2)}`);
         doc.moveDown();
 
         // Add approver information

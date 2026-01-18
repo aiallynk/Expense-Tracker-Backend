@@ -1,0 +1,17 @@
+[
+  {
+    "email": "loadtest0@test.nexpense.com",
+    "password": "TestPassword0!",
+    "name": "Load Test User 0"
+  },
+  {
+    "email": "loadtest1@test.nexpense.com",
+    "password": "TestPassword1!",
+    "name": "Load Test User 1"
+  },
+  {
+    "email": "loadtest2@test.nexpense.com",
+    "password": "TestPassword2!",
+    "name": "Load Test User 2"
+  }
+]

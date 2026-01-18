@@ -52,7 +52,18 @@ const envSchema = z.object({
 
   // OCR Worker
   DISABLE_OCR: z.string().optional(),
-  OCR_WORKER_CONCURRENCY: z.string().default('3'),
+  OCR_WORKER_CONCURRENCY: z.string().default('20'), // Increased default for scalability
+  OCR_RATE_LIMIT: z.string().optional(), // OCR rate limit (requests per hour)
+
+  // MongoDB Connection Pool (for high concurrency)
+  MONGODB_MAX_POOL_SIZE: z.string().optional(), // Max connection pool size
+  MONGODB_MIN_POOL_SIZE: z.string().optional(), // Min connection pool size
+
+  // Rate Limiting (for high concurrency - 100K+ users)
+  LOGIN_RATE_LIMIT_DEV: z.string().optional(), // Login rate limit for development
+  LOGIN_RATE_LIMIT_PROD: z.string().optional(), // Login rate limit for production
+  API_RATE_LIMIT_DEV: z.string().optional(), // API rate limit for development
+  API_RATE_LIMIT_PROD: z.string().optional(), // API rate limit for production
 
   // Logging
   LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error', 'fatal']).default('info'),

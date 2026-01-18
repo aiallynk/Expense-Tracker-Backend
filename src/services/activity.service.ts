@@ -85,7 +85,7 @@ export class ActivityService {
       // Generate description based on action and entity type
       let description = '';
       let eventType = '';
-      let link = null;
+      let link: string | null = null;
 
       if (entityType === 'ExpenseReport') {
         if (action === 'CREATE') {

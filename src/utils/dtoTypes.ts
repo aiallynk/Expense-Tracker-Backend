@@ -20,10 +20,27 @@ export const refreshTokenSchema = z.object({
   refreshToken: z.string(),
 });
 
+export const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, 'Current password is required'),
+  newPassword: z.string().min(6, 'New password must be at least 6 characters'),
+});
+
 // User DTOs
+export const bulkUserActionSchema = z.object({
+  userIds: z.array(z.string().min(1)).min(1, 'At least one user ID is required'),
+  action: z.enum(['activate', 'deactivate', 'delete'], {
+    errorMap: () => ({ message: 'Action must be activate, deactivate, or delete' })
+  }),
+});
+
+export const uploadProfileImageSchema = z.object({
+  // File validation will be done in controller using multer
+});
+
 export const updateProfileSchema = z.object({
   name: z.string().optional(),
   phone: z.string().optional(),
+  profileImage: z.string().url().optional().nullable(),
   companyId: z.string().optional(),
   departmentId: z.string().optional(),
 });
@@ -57,7 +74,15 @@ export const createUserSchema = z.object({
     },
     z.string().min(6, 'Password must be at least 6 characters').optional()
   ),
-  phone: emptyStringToUndefined,
+  phone: z.preprocess(
+    (val) => {
+      if (val === '' || val === null || val === undefined) return undefined;
+      return String(val).trim();
+    },
+    z.string()
+      .regex(/^(\+91)?[6-9]\d{9}$/, 'Invalid Indian mobile number. Must be +91XXXXXXXXXX or 10 digits starting with 6-9')
+      .optional()
+  ),
   role: z.enum(['EMPLOYEE', 'MANAGER', 'BUSINESS_HEAD', 'ACCOUNTANT'], {
     errorMap: () => ({ message: 'Role must be EMPLOYEE, MANAGER, BUSINESS_HEAD, or ACCOUNTANT' })
   }).optional().default('EMPLOYEE'),
@@ -91,7 +116,10 @@ export const updateUserSchema = z.object({
   managerId: z.string().optional().nullable(),
   departmentId: z.string().optional().nullable(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
-  phone: z.string().optional().nullable(),
+  phone: z.string()
+    .regex(/^(\+91)?[6-9]\d{9}$/, 'Invalid Indian mobile number. Must be +91XXXXXXXXXX or 10 digits starting with 6-9')
+    .optional()
+    .nullable(),
 });
 
 // Project DTOs
@@ -161,7 +189,8 @@ export const createReportSchema = z.object({
     { message: 'Invalid datetime format for toDate' }
   ),
 }).refine((data) => new Date(data.fromDate) <= new Date(data.toDate), {
-  message: 'fromDate must be before or equal to toDate',
+  message: 'End date cannot be earlier than start date',
+  path: ['toDate'],
 });
 
 export const updateReportSchema = z.object({
@@ -172,6 +201,14 @@ export const updateReportSchema = z.object({
   notes: z.string().optional(),
   fromDate: z.string().datetime().optional(),
   toDate: z.string().datetime().optional(),
+}).refine((data) => {
+  if (data.fromDate && data.toDate) {
+    return new Date(data.fromDate) <= new Date(data.toDate);
+  }
+  return true;
+}, {
+  message: 'End date cannot be earlier than start date',
+  path: ['toDate'],
 });
 
 export const reportActionSchema = z.object({

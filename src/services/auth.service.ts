@@ -146,7 +146,7 @@ export class AuthService {
     // Check status
     if (user && user.status !== 'ACTIVE') {
       logger.debug({ email: normalizedEmail }, 'Login attempt failed - Account inactive');
-      const error: any = new Error('Account is inactive');
+      const error: any = new Error('Your account is deactivated. Contact admin.');
       error.statusCode = 403;
       error.code = 'ACCOUNT_INACTIVE';
       throw error;
@@ -154,7 +154,7 @@ export class AuthService {
 
     if (companyAdmin && companyAdmin.status !== CompanyAdminStatus.ACTIVE) {
       logger.debug({ email: normalizedEmail }, 'Login attempt failed - Company admin account inactive');
-      const error: any = new Error('Account is inactive');
+      const error: any = new Error('Your account is deactivated. Contact admin.');
       error.statusCode = 403;
       error.code = 'ACCOUNT_INACTIVE';
       throw error;
@@ -286,7 +286,10 @@ export class AuthService {
       if (decoded.role === UserRole.COMPANY_ADMIN) {
         const companyAdmin = await CompanyAdmin.findById(decoded.id);
         if (!companyAdmin || companyAdmin.status !== CompanyAdminStatus.ACTIVE) {
-          throw new Error('Company admin not found or inactive');
+          const err: any = new Error('Company admin not found or inactive');
+          err.statusCode = 401;
+          err.code = 'INVALID_REFRESH_TOKEN';
+          throw err;
         }
         const accessToken = this.generateAccessTokenForCompanyAdmin(companyAdmin);
         return { accessToken };
@@ -294,7 +297,10 @@ export class AuthService {
         // Regular user - preserve the role from the refresh token (selected role)
         const user = await User.findById(decoded.id);
         if (!user || user.status !== 'ACTIVE') {
-          throw new Error('User not found or inactive');
+          const err: any = new Error('User not found or inactive');
+          err.statusCode = 401;
+          err.code = 'INVALID_REFRESH_TOKEN';
+          throw err;
         }
 
         // Validate that the role from token is valid for this user
@@ -315,9 +321,28 @@ export class AuthService {
       }
     } catch (error) {
       if (error instanceof jwt.TokenExpiredError) {
-        throw new Error('Refresh token expired');
+        const err: any = new Error('Refresh token expired');
+        err.statusCode = 401;
+        err.code = 'REFRESH_TOKEN_EXPIRED';
+        throw err;
       }
-      throw new Error('Invalid refresh token');
+      if (error instanceof jwt.JsonWebTokenError) {
+        const err: any = new Error('Invalid refresh token');
+        err.statusCode = 401;
+        err.code = 'INVALID_REFRESH_TOKEN';
+        throw err;
+      }
+      // Handle user not found or inactive errors
+      if (error instanceof Error && (error.message.includes('not found') || error.message.includes('inactive'))) {
+        const err: any = new Error(error.message);
+        err.statusCode = 401;
+        err.code = 'INVALID_REFRESH_TOKEN';
+        throw err;
+      }
+      const err: any = new Error('Invalid refresh token');
+      err.statusCode = 401;
+      err.code = 'INVALID_REFRESH_TOKEN';
+      throw err;
     }
   }
 
@@ -612,6 +637,61 @@ export class AuthService {
     return {
       success: true,
       message: 'Password reset successfully',
+    };
+  }
+
+  static async changePassword(
+    userId: string,
+    oldPassword: string,
+    newPassword: string,
+    userRole?: string
+  ): Promise<{ success: boolean; message: string }> {
+    let user: IUser | ICompanyAdmin | null = null;
+
+    // Get user based on role
+    if (userRole === UserRole.COMPANY_ADMIN) {
+      user = await CompanyAdmin.findById(userId);
+    } else {
+      user = await User.findById(userId);
+    }
+
+    if (!user) {
+      const error: any = new Error('User not found');
+      error.statusCode = 404;
+      error.code = 'USER_NOT_FOUND';
+      throw error;
+    }
+
+    // Verify old password
+    const isOldPasswordValid = await user.comparePassword(oldPassword);
+    if (!isOldPasswordValid) {
+      const error: any = new Error('Current password is incorrect');
+      error.statusCode = 401;
+      error.code = 'INVALID_PASSWORD';
+      throw error;
+    }
+
+    // Hash new password
+    const newPasswordHash = await this.hashPassword(newPassword);
+
+    // Update password
+    user.passwordHash = newPasswordHash;
+    await user.save();
+
+    // Audit log
+    await AuditService.log(
+      userId,
+      userRole === UserRole.COMPANY_ADMIN ? 'CompanyAdmin' : 'User',
+      userId,
+      AuditAction.UPDATE,
+      { action: 'password_change' }
+    );
+
+    logger.info({ userId, userRole }, 'User changed password');
+
+    return {
+      success: true,
+      message: 'Password changed successfully',
     };
   }
 }

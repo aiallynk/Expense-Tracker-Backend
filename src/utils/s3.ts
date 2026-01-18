@@ -52,6 +52,13 @@ export const getObjectUrl = (bucketType: 'receipts' | 'exports', key: string): s
 };
 
 /**
+ * Get profile image S3 key
+ */
+export const getProfileImageKey = (companyId: string, userId: string, extension: string = 'jpg'): string => {
+  return `profiles/${companyId}/${userId}.${extension}`;
+};
+
+/**
  * Upload file buffer directly to S3 (server-side upload, bypasses CORS)
  */
 export const uploadToS3 = async (

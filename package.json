@@ -26,7 +26,21 @@
     "init:companies": "tsx scripts/init-companies-collection.ts",
     "generate-employee-ids": "tsx scripts/generate-employee-ids.ts",
     "assign-unique-ids": "tsx scripts/assign-unique-ids-to-existing-users.ts",
-    "test": "vitest run"
+    "test": "jest --testPathPattern=tests --testPathIgnorePatterns=security-tests",
+    "test:unit": "jest --testPathPattern=__tests__",
+    "test:integration": "jest --testPathPattern=tests --testPathIgnorePatterns=security-tests",
+    "test:security": "jest --testPathPattern=security-tests --testTimeout=60000",
+    "test:all": "npm run test && npm run test:security",
+    "test:watch": "jest --watch --testPathPattern=tests",
+    "test:coverage": "jest --coverage --testPathPattern=tests --testPathIgnorePatterns=security-tests",
+    "test:auth": "jest tests/auth.test.ts",
+    "test:expenses": "jest tests/expenses.test.ts",
+    "test:concurrency": "jest tests/concurrency.test.ts --testTimeout=120000",
+    "test:authorization": "jest tests/authorization.test.ts",
+    "test:profile-image": "jest tests/profileImage.test.ts",
+    "test:security:jwt": "jest --testPathPattern=security-tests/jwtAttacks.test.ts --testTimeout=60000",
+    "test:security:api": "jest --testPathPattern=security-tests/apiAttacks.test.ts --testTimeout=60000",
+    "test:security:rate": "jest --testPathPattern=security-tests/rateLimiting.test.ts --testTimeout=120000"
   },
   "keywords": [
     "expense-tracker",
@@ -78,6 +92,7 @@
     "@types/bcrypt": "^5.0.2",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
+    "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.7",
     "@types/node": "^22.10.2",
     "@types/node-cron": "^3.0.11",
@@ -89,9 +104,11 @@
     "eslint-plugin-import": "^2.32.0",
     "eslint-plugin-security": "^3.0.1",
     "eslint-plugin-unused-imports": "^4.3.0",
+    "jest": "^29.7.0",
     "mongodb-memory-server": "^10.2.0",
     "prettier": "^3.6.2",
     "supertest": "^7.1.4",
+    "ts-jest": "^29.1.2",
     "tsc-alias": "^1.8.16",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
@@ -100,5 +117,8 @@
   },
   "engines": {
     "node": ">=18.0.0"
+  },
+  "overrides": {
+    "tar": "^7.5.3"
   }
 }

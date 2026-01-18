@@ -1,0 +1,22 @@
+{
+  "name": "nexpense-load-tests",
+  "version": "1.0.0",
+  "description": "k6 load testing suite for Nexpense Backend",
+  "scripts": {
+    "generate-users": "node scripts/generate-test-users.js",
+    "test:login": "k6 run --env BASE_URL=http://localhost:4000 scenarios/01-concurrent-logins.js",
+    "test:expense": "k6 run --env BASE_URL=http://localhost:4000 scenarios/02-expense-creation.js",
+    "test:report": "k6 run --env BASE_URL=http://localhost:4000 scenarios/03-report-fetch.js",
+    "test:spike": "k6 run --env BASE_URL=http://localhost:4000 scenarios/04-spike-test.js",
+    "test:soak": "k6 run --env BASE_URL=http://localhost:4000 scenarios/05-soak-test.js",
+    "test:all": "npm run test:login && npm run test:expense && npm run test:report && npm run test:spike"
+  },
+  "keywords": [
+    "k6",
+    "load-testing",
+    "performance",
+    "nexpense"
+  ],
+  "author": "",
+  "license": "ISC"
+}

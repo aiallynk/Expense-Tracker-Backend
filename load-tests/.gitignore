@@ -1,0 +1,14 @@
+# Test data files (may contain sensitive information)
+data/test-users.json
+
+# k6 output files
+*.json.gz
+*.csv
+*.html
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

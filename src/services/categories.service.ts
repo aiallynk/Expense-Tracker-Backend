@@ -115,6 +115,14 @@ export class CategoriesService {
       throw new Error('Cannot delete system default categories');
     }
 
+    // Check if category is used in any expenses
+    const { Expense } = await import('../models/Expense');
+    const expenseCount = await Expense.countDocuments({ categoryId: id });
+    
+    if (expenseCount > 0) {
+      throw new Error('Category is already in use and cannot be deleted');
+    }
+
     await Category.findByIdAndDelete(id);
   }
 
