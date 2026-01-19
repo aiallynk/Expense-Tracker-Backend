@@ -1,0 +1,421 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/* =========================
+   ENUMS (CORE)
+========================= */
+
+enum CompanyStatus {
+  ACTIVE
+  TRIAL
+  SUSPENDED
+  INACTIVE
+}
+
+enum CompanyPlan {
+  FREE
+  BASIC
+  PROFESSIONAL
+  ENTERPRISE
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  ADMIN
+  BUSINESS_HEAD
+  MANAGER
+  EMPLOYEE
+  ACCOUNTANT
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum DepartmentStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum RoleType {
+  SYSTEM
+  CUSTOM
+}
+
+enum CategoryStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum CostCentreStatus {
+  ACTIVE
+  INACTIVE
+}
+
+enum ProjectStatus {
+  ACTIVE
+  INACTIVE
+  COMPLETED
+}
+
+enum ExpenseStatus {
+  DRAFT
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+enum ExpenseSource {
+  SCANNED
+  MANUAL
+}
+
+enum ExpenseReportStatus {
+  DRAFT
+  SUBMITTED
+  CHANGES_REQUESTED
+  PENDING_APPROVAL_L1
+  PENDING_APPROVAL_L2
+  PENDING_APPROVAL_L3
+  PENDING_APPROVAL_L4
+  PENDING_APPROVAL_L5
+  APPROVED
+  REJECTED
+}
+
+enum OcrJobStatus {
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum AdvanceCashStatus {
+  ACTIVE
+  SETTLED
+}
+
+
+/* =========================
+   MODELS
+========================= */
+
+model Company {
+  id        String        @id @default(uuid()) @db.Uuid
+  name      String
+  status    CompanyStatus @default(ACTIVE)
+  plan      CompanyPlan   @default(BASIC)
+
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  users       User[]
+  departments Department[]
+  roles       Role[]
+  settings    CompanySettings?
+
+  categories   Category[]
+  costCentres CostCentre[]
+  projects    Project[]
+
+advanceCashes AdvanceCash[]
+
+  @@index([status])
+  @@index([plan])
+}
+
+model User {
+  id           String     @id @default(uuid()) @db.Uuid
+  email        String     @unique
+  passwordHash String
+  name         String?
+  phone        String?
+
+  role         UserRole
+  status       UserStatus
+
+  companyId    String?    @db.Uuid
+  company      Company?   @relation(fields: [companyId], references: [id])
+
+  managerId    String?    @db.Uuid
+  manager      User?      @relation("UserManager", fields: [managerId], references: [id])
+  employees    User[]     @relation("UserManager")
+
+  departmentId String?    @db.Uuid
+  department   Department? @relation("DepartmentUsers", fields: [departmentId], references: [id])
+
+  headedDepartments Department[] @relation("DepartmentHead")
+
+  managedProjects Project[] @relation("ProjectManager")
+  expenseReports  ExpenseReport[]
+  expenses        Expense[]
+
+employeeAdvanceCashes AdvanceCash[] @relation("AdvanceCashEmployee")
+createdAdvanceCashes  AdvanceCash[] @relation("AdvanceCashCreator")
+advanceCashTransactions AdvanceCashTransaction[] @relation("UserAdvanceCashTransactions")
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+}
+
+
+model Department {
+  id        String           @id @default(uuid()) @db.Uuid
+  name      String
+  status    DepartmentStatus @default(ACTIVE)
+
+  companyId String           @db.Uuid
+  company   Company          @relation(fields: [companyId], references: [id])
+
+  headId    String?          @db.Uuid
+  head      User?            @relation("DepartmentHead", fields: [headId], references: [id])
+
+  users     User[]           @relation("DepartmentUsers")
+
+  createdAt DateTime         @default(now())
+  updatedAt DateTime         @updatedAt
+
+  @@unique([companyId, name])
+}
+
+
+model Role {
+  id        String   @id @default(uuid()) @db.Uuid
+  name      String
+  type      RoleType @default(CUSTOM)
+  isActive  Boolean  @default(true)
+
+  companyId String   @db.Uuid
+  company   Company  @relation(fields: [companyId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+model CompanySettings {
+  id        String   @id @default(uuid()) @db.Uuid
+
+  companyId String   @unique @db.Uuid
+  company   Company  @relation(fields: [companyId], references: [id])
+
+  timezone  String   @default("Asia/Kolkata")
+  currency  String   @default("INR")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Category {
+  id        String         @id @default(uuid()) @db.Uuid
+  name      String
+  status    CategoryStatus @default(ACTIVE)
+  isCustom  Boolean        @default(true)
+
+  companyId String?        @db.Uuid
+  company   Company?       @relation(fields: [companyId], references: [id])
+
+  expenses  Expense[]
+
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  @@unique([companyId, name])
+}
+
+model CostCentre {
+  id        String            @id @default(uuid()) @db.Uuid
+  name      String
+  status    CostCentreStatus  @default(ACTIVE)
+
+  budget    Float?
+  spentAmount Float           @default(0)
+
+  companyId String            @db.Uuid
+  company   Company           @relation(fields: [companyId], references: [id])
+
+  projects  Project[]
+  expenses  Expense[]
+
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@unique([companyId, name])
+}
+
+model Project {
+  id        String        @id @default(uuid()) @db.Uuid
+  name      String
+  status    ProjectStatus @default(ACTIVE)
+
+  budget    Float?
+  spentAmount Float       @default(0)
+
+  companyId String        @db.Uuid
+  company   Company       @relation(fields: [companyId], references: [id])
+
+  costCentreId String?    @db.Uuid
+  costCentre   CostCentre? @relation(fields: [costCentreId], references: [id])
+
+  managerId String?       @db.Uuid
+manager   User? @relation("ProjectManager", fields: [managerId], references: [id])
+  reports   ExpenseReport[]
+  expenses  Expense[]
+
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@unique([companyId, name])
+}
+
+model ExpenseReport {
+  id        String               @id @default(uuid()) @db.Uuid
+  name      String
+  status    ExpenseReportStatus  @default(DRAFT)
+
+  fromDate  DateTime
+  toDate    DateTime
+  totalAmount Float              @default(0)
+  currency  String               @default("INR")
+
+  userId    String               @db.Uuid
+  user      User                 @relation(fields: [userId], references: [id])
+
+  projectId String?              @db.Uuid
+  project   Project?             @relation(fields: [projectId], references: [id])
+
+  expenses  Expense[]
+
+  createdAt DateTime             @default(now())
+  updatedAt DateTime             @updatedAt
+
+  @@index([userId, status])
+}
+
+model Expense {
+  id        String        @id @default(uuid()) @db.Uuid
+  vendor    String
+  amount    Float
+  currency  String        @default("INR")
+
+  expenseDate DateTime
+
+  status    ExpenseStatus @default(DRAFT)
+  source    ExpenseSource
+
+  userId    String        @db.Uuid
+  user      User          @relation(fields: [userId], references: [id])
+
+  reportId  String?       @db.Uuid
+  report    ExpenseReport? @relation(fields: [reportId], references: [id])
+
+  categoryId String?      @db.Uuid
+  category   Category?    @relation(fields: [categoryId], references: [id])
+
+  costCentreId String?    @db.Uuid
+  costCentre   CostCentre? @relation(fields: [costCentreId], references: [id])
+
+  projectId String?       @db.Uuid
+  project   Project?      @relation(fields: [projectId], references: [id])
+
+receipts Receipt[]
+
+advanceCashTransaction AdvanceCashTransaction?
+
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([userId])
+  @@index([status])
+  @@index([expenseDate])
+}
+
+model Receipt {
+  id          String   @id @default(uuid()) @db.Uuid
+  expenseId   String?  @db.Uuid
+  expense     Expense? @relation(fields: [expenseId], references: [id])
+
+  storageKey  String
+  storageUrl  String
+  mimeType    String
+  sizeBytes   Int
+  thumbnailUrl String?
+
+  uploadConfirmed Boolean @default(false)
+
+  ocrJob      OcrJob?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([expenseId])
+}
+
+model OcrJob {
+  id          String       @id @default(uuid()) @db.Uuid
+  receiptId  String       @unique @db.Uuid
+  receipt    Receipt      @relation(fields: [receiptId], references: [id])
+
+  status      OcrJobStatus @default(QUEUED)
+  resultJson  Json?
+  error       String?
+  attempts    Int          @default(0)
+
+  completedAt DateTime?
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([status, createdAt])
+}
+
+model AdvanceCash {
+  id        String            @id @default(uuid()) @db.Uuid
+  companyId String            @db.Uuid
+  company   Company           @relation(fields: [companyId], references: [id])
+
+  employeeId String           @db.Uuid
+employee   User @relation("AdvanceCashEmployee", fields: [employeeId], references: [id])
+  amount    Float
+  balance   Float
+  currency  String            @default("INR")
+  status    AdvanceCashStatus @default(ACTIVE)
+
+  createdBy String            @db.Uuid
+  creator   User              @relation("AdvanceCashCreator", fields: [createdBy], references: [id])
+
+  transactions AdvanceCashTransaction[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([companyId, employeeId, status])
+}
+
+model AdvanceCashTransaction {
+  id            String      @id @default(uuid()) @db.Uuid
+employeeId String @db.Uuid
+employee   User   @relation("UserAdvanceCashTransactions", fields: [employeeId], references: [id])
+
+  advanceCashId String      @db.Uuid
+  advanceCash   AdvanceCash @relation(fields: [advanceCashId], references: [id])
+
+  expenseId     String      @unique @db.Uuid
+  expense       Expense     @relation(fields: [expenseId], references: [id])
+
+  amount        Float
+  currency      String      @default("INR")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
