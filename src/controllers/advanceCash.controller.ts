@@ -5,6 +5,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { User } from '../models/User';
 import { AdvanceCashService } from '../services/advanceCash.service';
+import { CompanySettingsService } from '../services/companySettings.service';
 import { getUserCompanyId } from '../utils/companyAccess';
 import { UserRole } from '../utils/enums';
 
@@ -55,23 +56,65 @@ export class AdvanceCashController {
       return;
     }
 
+    // Get company settings to check advance cash policy
+    const companySettings = await CompanySettingsService.getSettingsByCompanyId(companyId);
+    const advanceCashSettings = companySettings.advanceCash || {
+      allowSelfCreation: true,
+      allowOthersCreation: true,
+      requireAdminApproval: false,
+    };
+
     // Employees can create advances only for themselves.
     // COMPANY_ADMIN / ADMIN can create for any employee in their company.
     const requestedEmployeeId = req.body.employeeId as string | undefined;
     let employeeId = actorId;
+    const isCreatingForSelf = !requestedEmployeeId || requestedEmployeeId === actorId;
+    const isCreatingForOthers = requestedEmployeeId && requestedEmployeeId !== actorId;
 
     const actorRole = req.user?.role;
     const canCreateForOthers = actorRole === UserRole.COMPANY_ADMIN || actorRole === UserRole.ADMIN;
-    if (requestedEmployeeId && canCreateForOthers) {
+
+    // Policy enforcement: Check if self-creation is allowed
+    if (isCreatingForSelf && !advanceCashSettings.allowSelfCreation) {
+      res.status(403).json({
+        success: false,
+        message: 'Creating advance cash for yourself is not allowed by company policy',
+        code: 'SELF_CREATION_NOT_ALLOWED',
+      });
+      return;
+    }
+
+    // Policy enforcement: Check if creating for others is allowed
+    if (isCreatingForOthers) {
+      if (!canCreateForOthers) {
+        res.status(403).json({
+          success: false,
+          message: 'You do not have permission to create advance cash for other employees',
+          code: 'INSUFFICIENT_PERMISSIONS',
+        });
+        return;
+      }
+
+      if (!advanceCashSettings.allowOthersCreation) {
+        res.status(403).json({
+          success: false,
+          message: 'Creating advance cash for other employees is not allowed by company policy',
+          code: 'OTHERS_CREATION_NOT_ALLOWED',
+        });
+        return;
+      }
+
       if (!mongoose.Types.ObjectId.isValid(requestedEmployeeId)) {
         res.status(400).json({ success: false, message: 'Invalid employeeId', code: 'INVALID_EMPLOYEE' });
         return;
       }
+
       const employee = await User.findById(requestedEmployeeId).select('companyId').exec();
       if (!employee?.companyId || employee.companyId.toString() !== companyId) {
         res.status(403).json({ success: false, message: 'Employee not in your company', code: 'EMPLOYEE_NOT_IN_COMPANY' });
         return;
       }
+
       employeeId = requestedEmployeeId;
     }
 

@@ -1,28 +1,28 @@
 [
-  {
-    "AllowedHeaders": [
-      "*"
-    ],
-    "AllowedMethods": [
-      "GET",
-      "PUT",
-      "POST",
-      "HEAD",
-      "OPTIONS"
-    ],
-    "AllowedOrigins": [
-      "https://nexpense.aially.in",
-      "https://nexpense-aially.vercel.app",
-      "http://localhost:5173",
-      "http://localhost:3000",
-      "http://localhost:5174"
-    ],
-    "ExposeHeaders": [
-      "ETag",
-      "x-amz-server-side-encryption",
-      "x-amz-request-id",
-      "x-amz-id-2"
-    ],
-    "MaxAgeSeconds": 3600
-  }
+    {
+        "AllowedHeaders": [
+            "*"
+        ],
+        "AllowedMethods": [
+            "GET",
+            "PUT",
+            "POST",
+            "HEAD",
+            "OPTIONS"
+        ],
+        "AllowedOrigins": [
+            "https://nexpense.aially.in",
+            "https://nexpense-aially.vercel.app",
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://localhost:5174"
+        ],
+        "ExposeHeaders": [
+            "ETag",
+            "x-amz-server-side-encryption",
+            "x-amz-request-id",
+            "x-amz-id-2"
+        ],
+        "MaxAgeSeconds": 3600
+    }
 ]

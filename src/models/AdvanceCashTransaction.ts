@@ -3,8 +3,8 @@ import mongoose, { Document, Schema } from 'mongoose';
 export interface IAdvanceCashTransaction extends Document {
   companyId: mongoose.Types.ObjectId;
   employeeId: mongoose.Types.ObjectId;
-  expenseId: mongoose.Types.ObjectId;
-  reportId?: mongoose.Types.ObjectId;
+  expenseId?: mongoose.Types.ObjectId; // Optional for backward compatibility (expense-level)
+  reportId: mongoose.Types.ObjectId; // Required for report-level transactions
   amount: number;
   currency: string;
   allocations: Array<{ advanceCashId: mongoose.Types.ObjectId; amount: number }>;
@@ -29,13 +29,15 @@ const advanceCashTransactionSchema = new Schema<IAdvanceCashTransaction>(
     expenseId: {
       type: Schema.Types.ObjectId,
       ref: 'Expense',
-      required: true,
       index: true,
-      unique: true, // idempotency: only one deduction per expense
+      // Removed unique constraint to support report-level transactions
+      // unique: true was for expense-level idempotency
     },
     reportId: {
       type: Schema.Types.ObjectId,
       ref: 'ExpenseReport',
+      required: true,
+      index: true,
     },
     amount: {
       type: Number,
@@ -67,6 +69,9 @@ const advanceCashTransactionSchema = new Schema<IAdvanceCashTransaction>(
 
 advanceCashTransactionSchema.index({ companyId: 1, employeeId: 1, createdAt: -1 });
 advanceCashTransactionSchema.index({ 'allocations.advanceCashId': 1 });
+advanceCashTransactionSchema.index({ reportId: 1 }); // Index for report-level queries
+// Compound index for idempotency: one transaction per report (report-level)
+advanceCashTransactionSchema.index({ reportId: 1 }, { unique: true, partialFilterExpression: { expenseId: { $exists: false } } });
 
 export const AdvanceCashTransaction = mongoose.model<IAdvanceCashTransaction>(
   'AdvanceCashTransaction',

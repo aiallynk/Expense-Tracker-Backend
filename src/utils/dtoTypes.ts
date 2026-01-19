@@ -173,6 +173,9 @@ export const createReportSchema = z.object({
   costCentreId: z.string().optional().or(z.literal('')),
   projectName: z.string().optional(),
   notes: z.string().optional(),
+  // Advance cash (report-level)
+  advanceAppliedAmount: z.number().min(0).optional(),
+  advanceCurrency: z.string().optional(),
   // Use coerce to handle various datetime formats, then validate
   fromDate: z.string().refine(
     (val) => {
@@ -199,6 +202,9 @@ export const updateReportSchema = z.object({
   projectName: z.string().optional(),
   costCentreId: z.string().optional().or(z.literal('')).nullable(),
   notes: z.string().optional(),
+  // Advance cash (report-level)
+  advanceAppliedAmount: z.number().min(0).optional(),
+  advanceCurrency: z.string().optional(),
   fromDate: z.string().datetime().optional(),
   toDate: z.string().datetime().optional(),
 }).refine((data) => {

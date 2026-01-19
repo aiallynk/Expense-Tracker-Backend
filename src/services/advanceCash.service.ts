@@ -113,41 +113,103 @@ export class AdvanceCashService {
 
   /**
    * Apply (deduct) advances for a report. Called only when report is finally APPROVED.
-   * Idempotent per expense via AdvanceCashTransaction unique expenseId.
+   * 
+   * NEW: Report-level deduction (preferred)
+   * - Checks report.advanceAppliedAmount and applies to entire report
+   * - Creates single AdvanceCashTransaction for the report
+   * 
+   * LEGACY: Expense-level deduction (backward compatibility)
+   * - Falls back to expense-level if report-level not set
+   * - Processes individual expenses with advanceAppliedAmount
+   * 
+   * Idempotent: Checks for existing transaction before applying
    */
   static async applyAdvanceForReport(reportId: string): Promise<{
     appliedExpenses: number;
     skippedExpenses: number;
+    appliedAtReportLevel: boolean;
   }> {
     if (!mongoose.Types.ObjectId.isValid(reportId)) {
       throw new Error('Invalid reportId');
     }
 
-    const report = await ExpenseReport.findById(reportId).select('userId status').exec();
+    const report = await ExpenseReport.findById(reportId)
+      .select('userId status advanceAppliedAmount advanceCurrency advanceAppliedAt projectId costCentreId currency totalAmount')
+      .exec();
     if (!report) {
       throw new Error('Report not found');
     }
 
     if (report.status !== ExpenseReportStatus.APPROVED) {
       // We only apply on final approved. No-op otherwise.
-      return { appliedExpenses: 0, skippedExpenses: 0 };
+      return { appliedExpenses: 0, skippedExpenses: 0, appliedAtReportLevel: false };
     }
 
     const owner = await User.findById(report.userId).select('companyId').exec();
     const companyId = owner?.companyId;
     if (!companyId) {
-      return { appliedExpenses: 0, skippedExpenses: 0 };
+      return { appliedExpenses: 0, skippedExpenses: 0, appliedAtReportLevel: false };
     }
 
+    const reportObjectId = new mongoose.Types.ObjectId(reportId);
+    const employeeId = report.userId as mongoose.Types.ObjectId;
+
+    // Check for existing report-level transaction (idempotency)
+    const existingReportTx = await AdvanceCashTransaction.findOne({
+      reportId: reportObjectId,
+      expenseId: { $exists: false }, // Report-level transactions don't have expenseId
+    }).exec();
+
+    // NEW: Report-level deduction (preferred approach)
+    if (report.advanceAppliedAmount && report.advanceAppliedAmount > 0) {
+      if (existingReportTx) {
+        // Already applied, skip
+        logger.info({ reportId }, 'Advance already applied at report level');
+        return { appliedExpenses: 0, skippedExpenses: 0, appliedAtReportLevel: true };
+      }
+
+      const desired = Math.min(
+        Number(report.advanceAppliedAmount || 0),
+        Number(report.totalAmount || 0)
+      );
+
+      if (!isFinite(desired) || desired <= 0) {
+        return { appliedExpenses: 0, skippedExpenses: 0, appliedAtReportLevel: true };
+      }
+
+      const currency = String(report.advanceCurrency || report.currency || 'INR').toUpperCase();
+
+      // Apply report-level advance
+      const result = await this._applyAdvanceToReport({
+        reportId: reportObjectId,
+        companyId,
+        employeeId,
+        amount: desired,
+        currency,
+        projectId: report.projectId,
+        costCentreId: report.costCentreId,
+      });
+
+      if (result.applied) {
+        // Update report with applied timestamp
+        report.advanceAppliedAt = new Date();
+        await report.save();
+        return { appliedExpenses: 1, skippedExpenses: 0, appliedAtReportLevel: true };
+      }
+
+      return { appliedExpenses: 0, skippedExpenses: 1, appliedAtReportLevel: true };
+    }
+
+    // LEGACY: Expense-level deduction (backward compatibility)
     const expenses = await Expense.find({
-      reportId: new mongoose.Types.ObjectId(reportId),
+      reportId: reportObjectId,
       advanceAppliedAmount: { $gt: 0 },
     })
       .select('amount currency projectId costCentreId advanceAppliedAmount advanceAppliedAt')
       .exec();
 
     if (expenses.length === 0) {
-      return { appliedExpenses: 0, skippedExpenses: 0 };
+      return { appliedExpenses: 0, skippedExpenses: 0, appliedAtReportLevel: false };
     }
 
     let appliedExpenses = 0;
@@ -182,7 +244,6 @@ export class AdvanceCashService {
           const currency = String(expense.currency || 'INR').toUpperCase();
 
           const tiers: Array<any> = [];
-          const employeeId = report.userId as mongoose.Types.ObjectId;
 
           // Tier 1: project-scoped advances (if expense has projectId)
           if (expense.projectId) {
@@ -258,8 +319,8 @@ export class AdvanceCashService {
                 {
                   companyId,
                   employeeId: report.userId,
-                  expenseId,
-                  reportId: new mongoose.Types.ObjectId(reportId),
+                  expenseId, // Legacy: expense-level transaction
+                  reportId: reportObjectId,
                   amount: totalApplied,
                   currency,
                   allocations,
@@ -292,7 +353,110 @@ export class AdvanceCashService {
       }
     }
 
-    return { appliedExpenses, skippedExpenses };
+    return { appliedExpenses, skippedExpenses, appliedAtReportLevel: false };
+  }
+
+  /**
+   * Internal helper: Apply advance cash to a report (report-level)
+   * Handles advance allocation across multiple advance cash records
+   */
+  private static async _applyAdvanceToReport(params: {
+    reportId: mongoose.Types.ObjectId;
+    companyId: mongoose.Types.ObjectId;
+    employeeId: mongoose.Types.ObjectId;
+    amount: number;
+    currency: string;
+    projectId?: mongoose.Types.ObjectId;
+    costCentreId?: mongoose.Types.ObjectId;
+  }): Promise<{ applied: boolean; amountApplied: number }> {
+    const { reportId, companyId, employeeId, amount, currency, projectId, costCentreId } = params;
+
+    const tiers: Array<any> = [];
+
+    // Tier 1: project-scoped advances (if report has projectId)
+    if (projectId) {
+      tiers.push({
+        companyId,
+        employeeId,
+        currency,
+        status: AdvanceCashStatus.ACTIVE,
+        balance: { $gt: 0 },
+        projectId,
+      });
+    }
+
+    // Tier 2: cost-centre-scoped advances (if report has costCentreId)
+    if (costCentreId) {
+      tiers.push({
+        companyId,
+        employeeId,
+        currency,
+        status: AdvanceCashStatus.ACTIVE,
+        balance: { $gt: 0 },
+        costCentreId,
+        projectId: { $in: [null, undefined] },
+      });
+    }
+
+    // Tier 3: unscoped advances
+    tiers.push({
+      companyId,
+      employeeId,
+      currency,
+      status: AdvanceCashStatus.ACTIVE,
+      balance: { $gt: 0 },
+      projectId: { $in: [null, undefined] },
+      costCentreId: { $in: [null, undefined] },
+    });
+
+    let remaining = amount;
+    const allocations: Array<{ advanceCashId: mongoose.Types.ObjectId; amount: number }> = [];
+
+    // Allocate advance across tiers
+    for (const q of tiers) {
+      if (remaining <= 0) break;
+      const advances = await AdvanceCash.find(q).sort({ createdAt: 1 }).exec();
+      for (const adv of advances) {
+        if (remaining <= 0) break;
+        const available = Number(adv.balance || 0);
+        if (available <= 0) continue;
+
+        const use = Math.min(remaining, available);
+        if (use <= 0) continue;
+
+        adv.balance = Number(adv.balance) - use;
+        if (adv.balance <= 0) {
+          adv.balance = 0;
+          adv.status = AdvanceCashStatus.SETTLED;
+        }
+        await adv.save();
+
+        allocations.push({
+          advanceCashId: adv._id as mongoose.Types.ObjectId,
+          amount: use,
+        });
+        remaining -= use;
+      }
+    }
+
+    const totalApplied = allocations.reduce((sum, a) => sum + a.amount, 0);
+
+    if (totalApplied > 0) {
+      // Create report-level transaction (no expenseId)
+      await AdvanceCashTransaction.create({
+        companyId,
+        employeeId,
+        reportId,
+        amount: totalApplied,
+        currency,
+        allocations,
+        // expenseId is not set for report-level transactions
+      });
+
+      return { applied: true, amountApplied: totalApplied };
+    }
+
+    return { applied: false, amountApplied: 0 };
   }
 }
 

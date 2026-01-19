@@ -85,6 +85,18 @@ export class ReportsService {
         finalName = this.buildDefaultReportName(fromDate, employeeName);
       }
 
+      // Handle advance cash (report-level)
+      let advanceAppliedAmount: number | undefined = undefined;
+      let advanceCurrency: string | undefined = undefined;
+      
+      if (data.advanceAppliedAmount !== undefined && data.advanceAppliedAmount > 0) {
+        advanceAppliedAmount = Number(data.advanceAppliedAmount);
+        if (!isFinite(advanceAppliedAmount) || advanceAppliedAmount < 0) {
+          throw new Error('Invalid advanceAppliedAmount');
+        }
+        advanceCurrency = data.advanceCurrency?.toUpperCase() || 'INR';
+      }
+
       const report = new ExpenseReport({
         userId,
         projectId,
@@ -95,6 +107,8 @@ export class ReportsService {
         fromDate,
         toDate,
         status: ExpenseReportStatus.DRAFT,
+        advanceAppliedAmount,
+        advanceCurrency,
       });
 
       logger.info('ExpenseReport model instance created');
@@ -442,6 +456,22 @@ export class ReportsService {
 
     if (data.toDate !== undefined) {
       report.toDate = new Date(data.toDate);
+    }
+
+    // Handle advance cash (report-level)
+    if (data.advanceAppliedAmount !== undefined) {
+      const advanceAmount = Number(data.advanceAppliedAmount);
+      if (!isFinite(advanceAmount) || advanceAmount < 0) {
+        throw new Error('Invalid advanceAppliedAmount');
+      }
+      // Validate advance doesn't exceed report total (if report has expenses)
+      if (advanceAmount > 0 && report.totalAmount > 0 && advanceAmount > report.totalAmount) {
+        throw new Error('Advance amount cannot exceed report total amount');
+      }
+      report.advanceAppliedAmount = advanceAmount > 0 ? advanceAmount : undefined;
+      report.advanceCurrency = advanceAmount > 0 
+        ? (data.advanceCurrency?.toUpperCase() || report.currency || 'INR')
+        : undefined;
     }
 
     report.updatedBy = new mongoose.Types.ObjectId(userId);

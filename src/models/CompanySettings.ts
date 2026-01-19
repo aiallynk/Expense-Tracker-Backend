@@ -63,6 +63,13 @@ export interface ICompanySettings extends Document {
     notifyOnRejection: boolean;
   };
 
+  // Advance Cash Settings
+  advanceCash: {
+    allowSelfCreation: boolean; // Employees can create advance for themselves
+    allowOthersCreation: boolean; // Admins can create advance for others
+    requireAdminApproval: boolean; // Whether advance creation needs approval (future use)
+  };
+
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -125,6 +132,11 @@ const companySettingsSchema = new Schema<ICompanySettings>(
       dailySummary: { type: Boolean, default: false },
       notifyOnApproval: { type: Boolean, default: true },
       notifyOnRejection: { type: Boolean, default: true },
+    },
+    advanceCash: {
+      allowSelfCreation: { type: Boolean, default: true },
+      allowOthersCreation: { type: Boolean, default: true },
+      requireAdminApproval: { type: Boolean, default: false },
     },
     updatedBy: {
       type: Schema.Types.ObjectId,
