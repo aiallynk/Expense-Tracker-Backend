@@ -32,6 +32,7 @@ router.use(authMiddleware);
 
 router.get('/me', UsersController.getMe);
 router.patch('/me', validate(updateProfileSchema), UsersController.updateProfile);
+router.get('/profile/image-url', UsersController.getProfileImageUrl);
 router.post(
   '/profile/upload-image',
   loginRateLimiter,

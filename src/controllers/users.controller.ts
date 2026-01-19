@@ -5,7 +5,7 @@ import { asyncHandler } from '../middleware/error.middleware';
 import { UsersService } from '../services/users.service';
 import { updateProfileSchema, createUserSchema, updateUserSchema, bulkUserActionSchema } from '../utils/dtoTypes';
 import { UserRole, UserStatus } from '../utils/enums';
-import { uploadToS3, getProfileImageKey, getObjectUrl } from '../utils/s3';
+import { uploadToS3, getProfileImageKey, getPresignedDownloadUrl } from '../utils/s3';
 import { AuditService } from '../services/audit.service';
 import { AuditAction } from '../utils/enums';
 import { logger } from '@/config/logger';
@@ -25,8 +25,36 @@ export class UsersController {
 
     // Return user data with the role from the token (selected role), not the primary role
     const userData = user.toObject ? user.toObject() : user;
+    
+    // Generate signed URL for profile image if it exists
+    let profileImageUrl = (userData as any).profileImage;
+    if (profileImageUrl && typeof profileImageUrl === 'string') {
+      try {
+        // Check if it's already a full URL or just a storage key
+        if (profileImageUrl.startsWith('profiles/') || !profileImageUrl.includes('http')) {
+          // It's a storage key, generate signed URL
+          const signedUrl = await getPresignedDownloadUrl('receipts', profileImageUrl, 7 * 24 * 60 * 60); // 7 days
+          profileImageUrl = signedUrl;
+        } else if (profileImageUrl.includes('s3.amazonaws.com') && !profileImageUrl.includes('X-Amz-Signature')) {
+          // It's a direct S3 URL without signature, convert to signed URL
+          // Extract key from URL: https://bucket.s3.region.amazonaws.com/key
+          const keyMatch = profileImageUrl.match(/\.com\/(.+)$/);
+          if (keyMatch && keyMatch[1]) {
+            const storageKey = decodeURIComponent(keyMatch[1]);
+            const signedUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60);
+            profileImageUrl = signedUrl;
+          }
+        }
+        // If it already has a signature, use it as-is
+      } catch (error) {
+        logger.warn({ error, userId: req.user!.id }, 'Failed to generate signed URL for profile image');
+        // Continue without signed URL - frontend will handle gracefully
+      }
+    }
+    
     const responseData = {
       ...userData,
+      profileImage: profileImageUrl,
       role: req.user!.role, // Use role from token (selected role)
       id: req.user!.id,
       email: req.user!.email,
@@ -247,6 +275,62 @@ export class UsersController {
     });
   });
 
+  static getProfileImageUrl = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const userId = req.user!.id;
+    const user = await UsersService.getCurrentUser(userId, req.user!.role);
+    
+    if (!user) {
+      res.status(404).json({
+        success: false,
+        message: 'User not found',
+        code: 'USER_NOT_FOUND',
+      });
+      return;
+    }
+
+    const userObj = user.toObject ? user.toObject() : user;
+    const profileImage = (userObj as any).profileImage;
+    
+    if (!profileImage) {
+      res.status(404).json({
+        success: false,
+        message: 'Profile image not found',
+        code: 'PROFILE_IMAGE_NOT_FOUND',
+      });
+      return;
+    }
+
+    try {
+      // Extract storage key from URL or use as-is if it's already a key
+      let storageKey = profileImage;
+      if (profileImage.includes('s3.amazonaws.com')) {
+        // Extract key from URL: https://bucket.s3.region.amazonaws.com/key
+        const keyMatch = profileImage.match(/\.com\/(.+)$/);
+        if (keyMatch && keyMatch[1]) {
+          storageKey = decodeURIComponent(keyMatch[1]);
+        }
+      }
+
+      // Generate signed URL (valid for 7 days)
+      const signedUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60);
+      
+      res.status(200).json({
+        success: true,
+        data: {
+          profileImage: signedUrl,
+          expiresIn: 7 * 24 * 60 * 60, // seconds
+        },
+      });
+    } catch (error) {
+      logger.error({ error, userId, profileImage }, 'Failed to generate signed URL for profile image');
+      res.status(500).json({
+        success: false,
+        message: 'Failed to generate profile image URL',
+        code: 'SIGNED_URL_GENERATION_FAILED',
+      });
+    }
+  });
+
   static uploadProfileImage = asyncHandler(async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const userRole = req.user!.role;
@@ -334,10 +418,12 @@ export class UsersController {
     // Upload to S3
     await uploadToS3('receipts', storageKey, fileBuffer, mimeType);
 
-    // Get S3 URL
-    const profileImageUrl = getObjectUrl('receipts', storageKey);
+    // Generate signed URL for profile image (valid for 7 days)
+    // Store the storage key in the database, not the signed URL (signed URLs expire)
+    // We'll generate signed URLs when serving user data
+    const profileImageUrl = `profiles/${companyId}/${userId}.${extension}`;
 
-    // Update user record
+    // Update user record with storage key (we'll generate signed URLs on-demand)
     const updatedUser = await UsersService.updateProfile(
       userId,
       { profileImage: profileImageUrl } as any,
@@ -355,11 +441,24 @@ export class UsersController {
 
     logger.info({ userId, storageKey }, 'User updated profile image');
 
+    // Generate signed URL for the response
+    let signedProfileImageUrl = profileImageUrl;
+    try {
+      signedProfileImageUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60); // 7 days
+    } catch (error) {
+      logger.warn({ error, userId, storageKey }, 'Failed to generate signed URL for profile image response');
+      // Continue with storage key - frontend can request signed URL separately
+    }
+
+    // Update the user object in response with signed URL
+    const updatedUserObj = updatedUser.toObject ? updatedUser.toObject() : updatedUser;
+    (updatedUserObj as any).profileImage = signedProfileImageUrl;
+
     res.status(200).json({
       success: true,
       data: {
-        profileImage: profileImageUrl,
-        user: updatedUser,
+        profileImage: signedProfileImageUrl,
+        user: updatedUserObj,
       },
       message: 'Profile image uploaded successfully',
     });
