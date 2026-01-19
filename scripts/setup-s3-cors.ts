@@ -17,10 +17,11 @@ async function setupS3CORS() {
     CORSRules: [
       {
         AllowedHeaders: ['*'],
-        AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD'],
+        AllowedMethods: ['GET', 'PUT', 'POST', 'HEAD', 'OPTIONS'],
         AllowedOrigins: [
           config.app.frontendUrlApp,
           config.app.frontendUrlAdmin,
+          'https://nexpense.aially.in', // Production web deployment
           'https://nexpense-aially.vercel.app', // Production Vercel deployment
           'http://localhost:5173', // Vite dev server
           'http://localhost:3000', // Common React dev port
