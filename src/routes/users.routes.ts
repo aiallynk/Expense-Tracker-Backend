@@ -18,11 +18,36 @@ const upload = multer({
     fileSize: 5 * 1024 * 1024, // 5MB
   },
   fileFilter: (_req, file, cb) => {
-    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png'];
-    if (allowedTypes.includes(file.mimetype)) {
+    // Normalize MIME type (handle variations)
+    const normalizedMimeType = file.mimetype.toLowerCase().trim();
+    
+    // Check MIME type
+    const allowedMimeTypes = [
+      'image/jpeg',
+      'image/jpg', // Some clients send this (non-standard but common)
+      'image/png',
+      'image/x-png', // Alternative PNG MIME type
+    ];
+    
+    // Also check file extension as fallback
+    const fileName = file.originalname.toLowerCase();
+    const hasValidExtension = 
+      fileName.endsWith('.jpg') || 
+      fileName.endsWith('.jpeg') || 
+      fileName.endsWith('.png');
+    
+    // Accept if MIME type matches OR if extension matches (for cases where MIME type is wrong/missing)
+    if (allowedMimeTypes.includes(normalizedMimeType) || hasValidExtension) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Allowed types: jpg, jpeg, png'));
+      // Log the actual MIME type received for debugging
+      const { logger } = require('../config/logger');
+      logger.warn({ 
+        mimetype: file.mimetype, 
+        originalname: file.originalname,
+        fieldname: file.fieldname 
+      }, 'Profile image upload rejected - invalid file type');
+      cb(new Error(`Invalid file type. Received: ${file.mimetype || 'unknown'}, Allowed types: jpg, jpeg, png`));
     }
   },
 });
