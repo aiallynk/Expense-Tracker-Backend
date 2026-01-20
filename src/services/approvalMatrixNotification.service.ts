@@ -180,9 +180,13 @@ export class ApprovalMatrixNotificationService {
         approvalInstance: any,
         requestData: any,
         status: 'APPROVED' | 'REJECTED' | 'CHANGES_REQUESTED',
-        comments?: string
+        comments?: string,
+        approvedLevel?: number
     ): Promise<void> {
         try {
+            const { User } = await import('../models/User');
+            const { Role } = await import('../models/Role');
+            
             const isApproved = status === 'APPROVED';
             const isChangesRequested = status === 'CHANGES_REQUESTED';
             const requestType = requestData.name ? 'Expense Report' : 'Request';
@@ -193,16 +197,141 @@ export class ApprovalMatrixNotificationService {
             if (status === 'REJECTED') displayStatus = 'Rejected';
             if (isChangesRequested) displayStatus = 'Changes Requested';
 
+            // Extract approver information from approval instance history
+            let approverName: string | undefined;
+            let approverRole: string | undefined;
+            
+            if (approvalInstance.history && approvalInstance.history.length > 0) {
+                // Get the most recent history entry for the current status
+                const relevantHistory = approvalInstance.history
+                    .filter((h: any) => {
+                        if (isApproved) return h.status === 'APPROVED';
+                        if (status === 'REJECTED') return h.status === 'REJECTED';
+                        if (isChangesRequested) return h.status === 'CHANGES_REQUESTED';
+                        return false;
+                    })
+                    .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+                
+                if (relevantHistory.length > 0) {
+                    const latestEntry = relevantHistory[0];
+                    
+                    // Fetch approver user details
+                    if (latestEntry.approverId) {
+                        try {
+                            const approver = await User.findById(latestEntry.approverId)
+                                .select('name')
+                                .lean()
+                                .exec();
+                            if (approver) {
+                                approverName = approver.name;
+                            }
+                        } catch (error) {
+                            logger.warn({ error, approverId: latestEntry.approverId }, 'Failed to fetch approver name');
+                        }
+                    }
+                    
+                    // Fetch approver role details
+                    if (latestEntry.roleId) {
+                        try {
+                            const role = await Role.findById(latestEntry.roleId)
+                                .select('name')
+                                .lean()
+                                .exec();
+                            if (role) {
+                                approverRole = role.name;
+                            }
+                        } catch (error) {
+                            logger.warn({ error, roleId: latestEntry.roleId }, 'Failed to fetch approver role');
+                        }
+                    }
+                }
+            }
+
+            // Build notification message with level information
+            let notificationTitle = `${requestType} ${displayStatus}`;
+            let notificationBody = `Your ${requestType.toLowerCase()} "${requestName}" has been ${displayStatus.toLowerCase()}`;
+            
+            // Add approver information to body
+            if (approverName) {
+                if (approverRole) {
+                    notificationBody += ` by ${approverName} (${approverRole})`;
+                } else {
+                    notificationBody += ` by ${approverName}`;
+                }
+            }
+            
+            // Add level information for intermediate approvals
+            if (isApproved && approvedLevel !== undefined && approvalInstance.status === 'PENDING') {
+                const levelName = approvedLevel === 1 ? 'L1' : approvedLevel === 2 ? 'L2' : `L${approvedLevel}`;
+                notificationTitle = `Report Approved at ${levelName}`;
+                notificationBody = `Your expense report "${requestName}" has been approved at Level ${approvedLevel}`;
+                if (approverName) {
+                    if (approverRole) {
+                        notificationBody += ` by ${approverName} (${approverRole})`;
+                    } else {
+                        notificationBody += ` by ${approverName}`;
+                    }
+                }
+                notificationBody += `. It is now pending approval at the next level.`;
+            } else if (isApproved && approvedLevel !== undefined) {
+                const levelName = approvedLevel === 1 ? 'L1' : approvedLevel === 2 ? 'L2' : `L${approvedLevel}`;
+                notificationTitle = `Report Approved at ${levelName}`;
+                notificationBody = `Your expense report "${requestName}" has been approved at Level ${approvedLevel}`;
+                if (approverName) {
+                    if (approverRole) {
+                        notificationBody += ` by ${approverName} (${approverRole})`;
+                    } else {
+                        notificationBody += ` by ${approverName}`;
+                    }
+                }
+                notificationBody += `.`;
+            } else if (isApproved && approvalInstance.status === 'APPROVED') {
+                // Final approval - determine level from history
+                const approvedHistory = approvalInstance.history
+                    ?.filter((h: any) => h.status === 'APPROVED')
+                    .sort((a: any, b: any) => b.levelNumber - a.levelNumber);
+                
+                if (approvedHistory && approvedHistory.length > 0) {
+                    const finalLevel = approvedHistory[0].levelNumber;
+                    const levelName = finalLevel === 1 ? 'L1' : finalLevel === 2 ? 'L2' : `L${finalLevel}`;
+                    notificationTitle = `Report Approved at ${levelName}`;
+                    notificationBody = `Your expense report "${requestName}" has been fully approved`;
+                    if (approverName) {
+                        if (approverRole) {
+                            notificationBody += ` by ${approverName} (${approverRole})`;
+                        } else {
+                            notificationBody += ` by ${approverName}`;
+                        }
+                    }
+                    notificationBody += `.`;
+                } else {
+                    notificationTitle = `Report Approved`;
+                    notificationBody = `Your expense report "${requestName}" has been fully approved`;
+                    if (approverName) {
+                        if (approverRole) {
+                            notificationBody += ` by ${approverName} (${approverRole})`;
+                        } else {
+                            notificationBody += ` by ${approverName}`;
+                        }
+                    }
+                    notificationBody += `.`;
+                }
+            }
+
             // Send push notification to requester
             await NotificationService.sendPushToUser(requestData.userId.toString(), {
-                title: `${requestType} ${displayStatus}`,
-                body: `Your ${requestType.toLowerCase()} "${requestName}" has been ${displayStatus.toLowerCase()}`,
+                title: notificationTitle,
+                body: notificationBody,
                 data: {
                     type: isApproved ? 'REQUEST_APPROVED' : isChangesRequested ? 'CHANGES_REQUESTED' : 'REQUEST_REJECTED',
                     instanceId: approvalInstance._id.toString(),
                     requestId: approvalInstance.requestId.toString(),
                     requestType: approvalInstance.requestType,
                     action: isApproved ? 'REQUEST_APPROVED' : isChangesRequested ? 'CHANGES_REQUESTED' : 'REQUEST_REJECTED',
+                    level: approvedLevel,
+                    approverName: approverName,
+                    approverRole: approverRole,
+                    comments: comments || '',
                 },
             });
 
@@ -231,10 +360,86 @@ export class ApprovalMatrixNotificationService {
                 });
             }
 
+            // Create database notification record
+            try {
+                const { NotificationDataService } = await import('./notificationData.service');
+                const { NotificationType } = await import('../models/Notification');
+                
+                let notificationType = NotificationType.REPORT_REJECTED;
+                if (isApproved) {
+                    notificationType = NotificationType.REPORT_APPROVED;
+                } else if (isChangesRequested) {
+                    notificationType = NotificationType.REPORT_CHANGES_REQUESTED;
+                }
+                
+                let notificationTitle = `${requestType} ${displayStatus}`;
+                let notificationDescription = `Your ${requestType.toLowerCase()} "${requestName}" has been ${displayStatus.toLowerCase()}`;
+                
+                // Add approver information
+                if (approverName) {
+                    if (approverRole) {
+                        notificationDescription += ` by ${approverName} (${approverRole})`;
+                    } else {
+                        notificationDescription += ` by ${approverName}`;
+                    }
+                }
+                
+                // Add level information for intermediate approvals
+                if (isApproved && approvedLevel !== undefined && approvalInstance.status === 'PENDING') {
+                    notificationTitle = `Report Approved at L${approvedLevel}`;
+                    notificationDescription = `Your expense report "${requestName}" has been approved at Level ${approvedLevel}`;
+                    if (approverName) {
+                        if (approverRole) {
+                            notificationDescription += ` by ${approverName} (${approverRole})`;
+                        } else {
+                            notificationDescription += ` by ${approverName}`;
+                        }
+                    }
+                    notificationDescription += `. It is now pending approval at the next level.`;
+                } else if (isApproved && approvedLevel !== undefined) {
+                    notificationTitle = `Report Approved at L${approvedLevel}`;
+                    notificationDescription = `Your expense report "${requestName}" has been approved at Level ${approvedLevel}`;
+                    if (approverName) {
+                        if (approverRole) {
+                            notificationDescription += ` by ${approverName} (${approverRole})`;
+                        } else {
+                            notificationDescription += ` by ${approverName}`;
+                        }
+                    }
+                    notificationDescription += `.`;
+                }
+                
+                // Add comments if available
+                if (comments && comments.trim()) {
+                    notificationDescription += ` Comments: ${comments.trim()}`;
+                }
+                
+                await NotificationDataService.createNotification({
+                    userId: requestData.userId.toString(),
+                    type: notificationType,
+                    title: notificationTitle,
+                    description: notificationDescription,
+                    link: `/reports/${approvalInstance.requestId.toString()}`,
+                    companyId: requestData.companyId?.toString() || (requestData.userId?.companyId?.toString()),
+                    metadata: {
+                        instanceId: approvalInstance._id.toString(),
+                        reportId: approvalInstance.requestId.toString(),
+                        level: approvedLevel,
+                        status: status,
+                        approverName: approverName,
+                        approverRole: approverRole,
+                        comments: comments || '',
+                    }
+                });
+            } catch (notifError: any) {
+                logger.error({ error: notifError?.message || notifError }, 'Error creating database notification');
+            }
+
             logger.info({
                 instanceId: approvalInstance._id.toString(),
                 requesterId: requestData.userId.toString(),
                 status,
+                level: approvedLevel,
             }, `✅ Status change notification sent to requester`);
 
         } catch (error: any) {

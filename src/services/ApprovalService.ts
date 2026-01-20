@@ -70,8 +70,25 @@ export class ApprovalService {
   static async getPendingApprovalsForUser(userId: string, options: { page?: number; limit?: number; startDate?: string; endDate?: string } = {}): Promise<{ data: any[]; total: number }> {
     try {
         const user = await User.findById(userId).populate('roles').exec();
-      if (!user || !user.roles || user.roles.length === 0) return { data: [], total: 0 };
-      const userRoleIds: string[] = user.roles.map((r: any) => r._id?.toString() || r.toString());
+      if (!user) {
+        logger.warn({ userId }, 'User not found in getPendingApprovalsForUser');
+        return { data: [], total: 0 };
+      }
+      
+      if (!user.roles || user.roles.length === 0) {
+        logger.warn({ userId, companyId: user.companyId }, 'User has no roles assigned in getPendingApprovalsForUser');
+        return { data: [], total: 0 };
+      }
+      
+      const userRoleIds: string[] = user.roles.map((r: any) => {
+        const roleId = r._id?.toString() || r.toString();
+        return roleId;
+      }).filter(Boolean);
+
+      if (userRoleIds.length === 0) {
+        logger.warn({ userId }, 'User has no valid role IDs after mapping');
+        return { data: [], total: 0 };
+      }
 
       // Build query for pending instances with date filters
       const query: any = {
@@ -85,9 +102,6 @@ export class ApprovalService {
         if (options.endDate) query.createdAt.$lte = new Date(options.endDate);
       }
 
-      // Get total count first
-      const totalCount = await ApprovalInstance.countDocuments(query);
-
       // Apply pagination
       const page = options.page || 1;
       const limit = options.limit || 10;
@@ -97,31 +111,73 @@ export class ApprovalService {
       const pendingInstances = await ApprovalInstance.find(query)
         .populate('matrixId')
         .sort({ createdAt: -1 }) // Most recent first
-        .skip(skip)
-        .limit(limit)
         .exec();
 
-      logger.info({ userId, userRolesCount: userRoleIds.length, pendingInstancesCount: pendingInstances.length, page, limit }, 'getPendingApprovalsForUser - Start');
+      logger.info({ 
+        userId, 
+        userRolesCount: userRoleIds.length, 
+        userRoleIds: userRoleIds.slice(0, 5), // Log first 5 for debugging
+        pendingInstancesCount: pendingInstances.length, 
+        page, 
+        limit,
+        companyId: user.companyId?.toString()
+      }, 'getPendingApprovalsForUser - Start');
 
       const pendingForUser: any[] = [];
       for (const instance of pendingInstances) {
         try {
           // Defensive: Ensure matrix and level config present
           const matrix = instance.matrixId as any;
-          if (!matrix) { logger.warn({ instanceId: instance._id }, 'Matrix not found for instance'); continue; }
+          if (!matrix) { 
+            logger.warn({ instanceId: instance._id }, 'Matrix not found for instance'); 
+            continue; 
+          }
+          
           const currentLevel = matrix.levels?.find((l: any) => l.levelNumber === instance.currentLevel);
-          if (!currentLevel) { logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'Level config not found for instance'); continue; }
-          const approverRoleIds = (currentLevel.approverRoleIds || []).map((id: any) => id.toString());
-          const matchingRoleId = approverRoleIds.find((rId: string) => userRoleIds.includes(rId));
+          if (!currentLevel) { 
+            logger.warn({ instanceId: instance._id, level: instance.currentLevel, matrixLevels: matrix.levels?.length }, 'Level config not found for instance'); 
+            continue; 
+          }
+          
+          const approverRoleIds = (currentLevel.approverRoleIds || []).map((id: any) => {
+            const roleId = id._id?.toString() || id.toString();
+            return roleId;
+          }).filter(Boolean);
+          
+          if (approverRoleIds.length === 0) {
+            logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'No approver role IDs found for current level');
+            continue;
+          }
+          
+          // Normalize both arrays for comparison (ensure consistent string format)
+          const normalizedUserRoleIds = userRoleIds.map(id => id.toLowerCase().trim());
+          const normalizedApproverRoleIds = approverRoleIds.map((id: string) => id.toLowerCase().trim());
+          
+          const matchingRoleId = normalizedApproverRoleIds.find((rId: string) => 
+            normalizedUserRoleIds.includes(rId)
+          );
+          
           // Only actionable for *current* level approvers:
-          if (!matchingRoleId) continue;
+          if (!matchingRoleId) {
+            logger.debug({ 
+              instanceId: instance._id, 
+              userRoleIds: normalizedUserRoleIds.slice(0, 3), 
+              approverRoleIds: normalizedApproverRoleIds.slice(0, 3),
+              level: instance.currentLevel
+            }, 'User does not have matching role for this approval level');
+            continue;
+          }
+          
           // Parallel ALL/ANY: if this user already acted at this level, don't show it again
           const alreadyActed = instance.history?.some(
             (h: any) =>
               h.levelNumber === instance.currentLevel &&
               h.approverId?.toString?.() === userId
           );
-          if (alreadyActed) continue;
+          if (alreadyActed) {
+            logger.debug({ instanceId: instance._id, userId }, 'User already acted on this approval');
+            continue;
+          }
           // Fetch details for this report
           let requestDetails: any = null;
             if (instance.requestType === 'EXPENSE_REPORT') {
@@ -135,7 +191,8 @@ export class ApprovalService {
           if (!requestDetails) continue;
           const expenses = await Expense.find({ reportId: instance.requestId })
             .populate('categoryId', 'name')
-            .populate('receiptPrimaryId', 'storageUrl')
+            .populate('receiptPrimaryId', '_id storageUrl mimeType filename')
+            .populate('receiptIds', '_id storageUrl mimeType filename')
             .lean().exec();
           const mappedExpenses = expenses.map((exp: any) => ({ ...exp, receiptUrl: exp.receiptPrimaryId?.storageUrl || null }));
           pendingForUser.push({
@@ -164,7 +221,19 @@ export class ApprovalService {
           continue; // Defensive: keep going
         }
       }
-      return { data: pendingForUser, total: totalCount };
+      
+      // Apply pagination to filtered results
+      const paginatedResults = pendingForUser.slice(skip, skip + limit);
+      
+      logger.info({ 
+        userId, 
+        totalFiltered: pendingForUser.length, 
+        paginatedCount: paginatedResults.length,
+        page,
+        limit
+      }, 'getPendingApprovalsForUser - Complete');
+      
+      return { data: paginatedResults, total: pendingForUser.length };
     } catch (err) {
       logger.error({ err, userId }, 'getPendingApprovalsForUser: Fatal error');
       return { data: [], total: 0 };
@@ -286,7 +355,8 @@ export class ApprovalService {
     private static async notifyStatusChange(
         instance: IApprovalInstance,
         status: 'APPROVED' | 'REJECTED' | 'CHANGES_REQUESTED',
-        comments?: string
+        comments?: string,
+        approvedLevel?: number
     ): Promise<void> {
         try {
       let requestData: any = null;
@@ -296,7 +366,7 @@ export class ApprovalService {
             if (!requestData) return;
 
             const { ApprovalMatrixNotificationService } = await import('./approvalMatrixNotification.service');
-            await ApprovalMatrixNotificationService.notifyRequestStatusChanged(instance, requestData, status, comments);
+            await ApprovalMatrixNotificationService.notifyRequestStatusChanged(instance, requestData, status, comments, approvedLevel);
         } catch (error: any) {
       logger.error({ error: error?.message || error }, 'Error notifying status change');
     }
@@ -386,10 +456,16 @@ export class ApprovalService {
         await instance.save();
         if (instance.status === ApprovalStatus.PENDING) {
           await ApprovalService.syncRequestStatus(instance);
+          // Notify requester that their report was approved at the previous level
+          const completedLevel = instance.currentLevel > 1 ? instance.currentLevel - 1 : 1;
+          await ApprovalService.notifyStatusChange(instance, 'APPROVED', comments, completedLevel);
+          // Notify next level approvers
           await ApprovalService.notifyApprovers(instance, matrix as any);
         } else if (instance.status === ApprovalStatus.APPROVED) {
           await ApprovalService.finalizeApproval(instance);
-          await ApprovalService.notifyStatusChange(instance, 'APPROVED', comments);
+          // Determine the level that was just completed (currentLevel - 1, or the last level if no more levels)
+          const completedLevel = instance.currentLevel > 1 ? instance.currentLevel - 1 : instance.currentLevel;
+          await ApprovalService.notifyStatusChange(instance, 'APPROVED', comments, completedLevel);
         }
         return instance;
       } else {
@@ -494,6 +570,45 @@ export class ApprovalService {
           as: 'costCentre',
         },
       },
+      // Lookup user (employee) details
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'requestData.userId',
+          foreignField: '_id',
+          as: 'employee',
+        },
+      },
+      // Lookup expenses for the report with category lookup
+      {
+        $lookup: {
+          from: 'expenses',
+          let: { reportId: '$requestData._id' },
+          pipeline: [
+            { $match: { $expr: { $eq: ['$reportId', '$$reportId'] } } },
+            {
+              $lookup: {
+                from: 'categories',
+                localField: 'categoryId',
+                foreignField: '_id',
+                as: 'category',
+              },
+            },
+            {
+              $project: {
+                _id: 1,
+                vendor: 1,
+                notes: 1,
+                amount: 1,
+                currency: 1,
+                category: { $arrayElemAt: ['$category.name', 0] },
+                categoryId: 1,
+              },
+            },
+          ],
+          as: 'expenses',
+        },
+      },
       // Project and format results
       {
         $project: {
@@ -504,10 +619,48 @@ export class ApprovalService {
           comments: '$history.comments',
           requestData: {
             id: '$requestData._id',
-            name: '$requestData.reportName',
+            name: '$requestData.name',
+            reportName: '$requestData.name',
             totalAmount: '$requestData.totalAmount',
-            employeeName: '$requestData.employeeName',
-            submittedAt: '$requestData.createdAt',
+            employeeName: {
+              $ifNull: [
+                { $arrayElemAt: ['$employee.name', 0] },
+                'Unknown'
+              ]
+            },
+            projectName: '$requestData.projectName',
+            submittedAt: '$requestData.submittedAt',
+            createdAt: '$requestData.createdAt',
+            expenses: {
+              $map: {
+                input: '$expenses',
+                as: 'exp',
+                in: {
+                  id: '$$exp._id',
+                  vendor: '$$exp.vendor',
+                  description: '$$exp.notes',
+                  amount: '$$exp.amount',
+                  category: '$$exp.category',
+                  categoryId: '$$exp.categoryId',
+                  currency: '$$exp.currency',
+                }
+              }
+            },
+            items: {
+              $map: {
+                input: '$expenses',
+                as: 'exp',
+                in: {
+                  id: '$$exp._id',
+                  vendor: '$$exp.vendor',
+                  description: '$$exp.notes',
+                  amount: '$$exp.amount',
+                  category: '$$exp.category',
+                  categoryId: '$$exp.categoryId',
+                  currency: '$$exp.currency',
+                }
+              }
+            },
           },
           project: {
             $arrayElemAt: ['$project', 0],

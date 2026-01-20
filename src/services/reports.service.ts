@@ -399,11 +399,99 @@ export class ReportsService {
       })
     );
 
-    // Convert to plain object and add expenses
+    // Fetch approval instance to get approval chain details
+    let approvalChain = [];
+    try {
+      const { ApprovalInstance } = await import('../models/ApprovalInstance');
+      const { Role } = await import('../models/Role');
+      const { User } = await import('../models/User');
+      
+      const approvalInstance = await ApprovalInstance.findOne({
+        requestId: id,
+        requestType: 'EXPENSE_REPORT'
+      })
+        .populate('matrixId')
+        .exec();
+
+      if (approvalInstance) {
+        const matrix = approvalInstance.matrixId as any;
+        
+        // Build approval chain from history and matrix levels
+        if (matrix && matrix.levels) {
+          const sortedLevels = [...matrix.levels].sort((a: any, b: any) => a.levelNumber - b.levelNumber);
+          
+          for (const level of sortedLevels) {
+            if (!level.enabled) continue;
+            
+            // Get history entries for this level
+            const levelHistory = (approvalInstance.history || []).filter(
+              (h: any) => h.levelNumber === level.levelNumber
+            );
+            
+            // Get role names for this level
+            const roleIds = level.approverRoleIds || [];
+            const roles = await Role.find({ _id: { $in: roleIds } }).select('name').exec();
+            const roleNames = roles.map(r => r.name);
+            
+            // Get approver details from history
+            const approverHistory = levelHistory.find((h: any) => h.approverId);
+            let approverName = null;
+            let approverId = null;
+            let decidedAt = null;
+            let comment = null;
+            let action = null;
+            
+            if (approverHistory) {
+              const approver = await User.findById(approverHistory.approverId).select('name').exec();
+              approverName = approver?.name || null;
+              approverId = approverHistory.approverId;
+              decidedAt = approverHistory.timestamp;
+              comment = approverHistory.comments;
+              action = approverHistory.status?.toLowerCase();
+            }
+            
+            // Determine step name
+            let stepName = `Level ${level.levelNumber} Approval`;
+            if (level.levelNumber === 1) {
+              stepName = 'Manager Approval';
+            } else if (level.levelNumber === 2) {
+              stepName = 'Business Head Approval';
+            }
+            
+            // Map action to frontend expected format
+            let mappedAction = null;
+            if (action === 'approved') mappedAction = 'approve';
+            else if (action === 'rejected') mappedAction = 'reject';
+            else if (action === 'changes_requested') mappedAction = 'request_changes';
+            
+            approvalChain.push({
+              level: level.levelNumber,
+              step: stepName,
+              role: roleNames.join(', ') || 'Approver',
+              roleIds: roleIds,
+              name: approverName, // Frontend expects 'name'
+              approverName: approverName, // Also include for compatibility
+              approverId: approverId,
+              userId: approverId ? { name: approverName } : null, // Frontend may check userId.name
+              decidedAt: decidedAt,
+              comment: comment, // Frontend expects 'comment'
+              action: mappedAction, // Frontend expects 'approve', 'reject', 'request_changes'
+              isAdditionalApproval: false
+            });
+          }
+        }
+      }
+    } catch (error) {
+      logger.error({ error, reportId: id }, 'Error fetching approval chain');
+      // Continue without approval chain if there's an error
+    }
+
+    // Convert to plain object and add expenses and approval chain
     const reportObj = report.toObject();
     return {
       ...reportObj,
       expenses: expensesWithSignedUrls,
+      approvers: approvalChain.length > 0 ? approvalChain : reportObj.approvers || [],
     };
   }
 

@@ -27,6 +27,7 @@ import departmentsRoutes from './routes/departments.routes';
 import employeeApprovalProfilesRoutes from './routes/employeeApprovalProfiles.routes';
 import expensesRoutes from './routes/expenses.routes';
 import managerRoutes from './routes/manager.routes';
+import metaRoutes from './routes/meta.routes';
 import notificationsRoutes from './routes/notifications.routes';
 import ocrRoutes from './routes/ocr.routes';
 import projectsRoutes from './routes/projects.routes';
@@ -215,6 +216,9 @@ export const createApp = (): Express => {
 
   // Employee Approval Profiles (AI-generated + manual override chains)
   app.use('/api/v1/employee-approval-profiles', employeeApprovalProfilesRoutes);
+
+  // Meta routes (version info, etc.) - public endpoints
+  app.use('/api/meta', metaRoutes);
 
   // 404 handler
   app.use((_req, res) => {
