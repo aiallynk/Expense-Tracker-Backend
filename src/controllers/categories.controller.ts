@@ -1,10 +1,12 @@
 import { Response } from 'express';
+import mongoose from 'mongoose';
 
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { CompanyAdmin } from '../models/CompanyAdmin';
 import { User } from '../models/User';
 import { CategoriesService } from '../services/categories.service';
+import { CategoryMatchingService } from '../services/categoryMatching.service';
 import {
   createCategorySchema,
   updateCategorySchema,
@@ -164,6 +166,39 @@ export class CategoriesController {
     res.status(200).json({
       success: true,
       message: `Initialized ${result.created} default categories`,
+      data: result,
+    });
+  });
+
+  // AI-powered category matching for OCR receipts
+  static matchCategory = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { vendor, lineItems, notes, extractedText } = req.body;
+
+    if (!vendor && !lineItems && !notes && !extractedText) {
+      res.status(400).json({
+        success: false,
+        message: 'At least one of vendor, lineItems, notes, or extractedText is required',
+        code: 'MISSING_CONTENT',
+      });
+      return;
+    }
+
+    const companyId = await getCompanyId(req);
+
+    const receiptContent = {
+      vendor: vendor?.trim(),
+      lineItems: Array.isArray(lineItems) ? lineItems : undefined,
+      notes: notes?.trim(),
+      extractedText: extractedText?.trim(),
+    };
+
+    const result = await CategoryMatchingService.findBestCategoryMatch(
+      receiptContent,
+      companyId ? new mongoose.Types.ObjectId(companyId) : undefined
+    );
+
+    res.status(200).json({
+      success: true,
       data: result,
     });
   });

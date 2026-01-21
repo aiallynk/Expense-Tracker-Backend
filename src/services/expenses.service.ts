@@ -18,6 +18,7 @@ import { CompanySettingsService } from './companySettings.service';
 import { currencyService } from './currency.service';
 
 import { logger } from '@/config/logger';
+import { DateUtils } from '@/utils/dateUtils';
 
 export class ExpensesService {
   static async createExpense(
@@ -46,7 +47,7 @@ export class ExpensesService {
       receiptIds.push(new mongoose.Types.ObjectId(data.receiptId));
     }
 
-    const invoiceDate = data.invoiceDate ? new Date(data.invoiceDate) : undefined;
+    const invoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
     let invoiceFingerprint: string | undefined = undefined;
 
     // Rule 1: Detect original currency (from OCR, manual input, or existing expense)
@@ -127,7 +128,7 @@ export class ExpensesService {
       // Store converted amount in selected currency (Rule 3)
       amount: conversionMetadata.convertedAmount,
       currency: selectedCurrency, // Always store in selected currency
-      expenseDate: new Date(data.expenseDate),
+      expenseDate: DateUtils.frontendDateToBackend(data.expenseDate),
       status: ExpenseStatus.DRAFT,
       source: data.source,
       notes: data.notes,
@@ -295,7 +296,7 @@ export class ExpensesService {
     }
 
     if (data.expenseDate !== undefined) {
-      expense.expenseDate = new Date(data.expenseDate);
+      expense.expenseDate = DateUtils.frontendDateToBackend(data.expenseDate);
     }
 
     if (data.notes !== undefined) {
@@ -307,7 +308,7 @@ export class ExpensesService {
       expense.invoiceId = data.invoiceId || undefined;
     }
     if (data.invoiceDate !== undefined) {
-      expense.invoiceDate = data.invoiceDate ? new Date(data.invoiceDate) : undefined;
+      expense.invoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
     }
     // Keep invoiceFingerprint consistent with invoice fields
     if (expense.invoiceId && expense.invoiceDate) {
@@ -460,13 +461,8 @@ export class ExpensesService {
 
     // Date range filters
     if (filters.from || filters.to) {
-      query.expenseDate = {};
-      if (filters.from) {
-        query.expenseDate.$gte = new Date(filters.from);
-      }
-      if (filters.to) {
-        query.expenseDate.$lte = new Date(filters.to);
-      }
+      const dateRange = DateUtils.createDateRangeQuery(filters.from || filters.to!, filters.to || filters.from!);
+      query.expenseDate = dateRange;
     }
 
     // Search query - add as $and condition to preserve existing $or
@@ -527,7 +523,8 @@ export class ExpensesService {
     }
 
     if (filters.from) {
-      baseQuery.expenseDate = { ...baseQuery.expenseDate, $gte: new Date(filters.from) };
+      const dateRange = DateUtils.createDateRangeQuery(filters.from, filters.to || filters.from);
+      baseQuery.expenseDate = dateRange;
     }
 
     if (filters.to) {

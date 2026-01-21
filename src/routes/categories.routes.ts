@@ -19,6 +19,9 @@ router.get('/', CategoriesController.getAll);
 router.get('/name/:name', CategoriesController.getOrCreateByName);
 router.get('/:id', CategoriesController.getById);
 
+// AI-powered category matching for OCR
+router.post('/match', CategoriesController.matchCategory);
+
 // Admin endpoints (company admin or super admin)
 router.get('/admin/list', requireCompanyAdmin, CategoriesController.getAdminCategories);
 router.post('/admin/initialize', requireCompanyAdmin, CategoriesController.initializeDefaults);

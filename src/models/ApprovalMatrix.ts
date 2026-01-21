@@ -41,7 +41,8 @@ export interface IApprovalLevel {
     enabled: boolean;
     approvalType: ApprovalType;
     parallelRule?: ParallelRule;
-    approverRoleIds: mongoose.Types.ObjectId[];
+    approverRoleIds?: mongoose.Types.ObjectId[]; // For backward compatibility
+    approverUserIds?: mongoose.Types.ObjectId[]; // New format: specific users
     conditions: IApprovalCondition[];
     skipAllowed: boolean;
 }
@@ -103,6 +104,12 @@ const ApprovalLevelSchema = new Schema<IApprovalLevel>({
         {
             type: Schema.Types.ObjectId,
             ref: 'Role',
+        },
+    ],
+    approverUserIds: [
+        {
+            type: Schema.Types.ObjectId,
+            ref: 'User',
         },
     ],
     conditions: [ApprovalConditionSchema],

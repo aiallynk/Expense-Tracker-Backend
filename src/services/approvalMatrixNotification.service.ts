@@ -1,4 +1,3 @@
-import { Role } from '../models/Role';
 import { User } from '../models/User';
 
 import { NotificationService } from './notification.service';
@@ -23,55 +22,70 @@ export class ApprovalMatrixNotificationService {
         requestData: any
     ): Promise<void> {
         try {
-            // Get all role IDs for the current level
-            const approverRoleIds = currentLevelConfig.approverRoleIds || [];
+            // Get approver IDs for the current level (handles both user and role based)
+            let approverIds = [];
+            let isUserBasedApproval = false;
 
-            if (approverRoleIds.length === 0) {
-                logger.warn({ instanceId: approvalInstance._id }, 'No approver roles found for current level');
+            if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
+                // New format: specific users
+                approverIds = currentLevelConfig.approverUserIds.map((id: any) => id.toString());
+                isUserBasedApproval = true;
+            } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
+                // Old format: roles
+                approverIds = currentLevelConfig.approverRoleIds.map((id: any) => id.toString());
+                isUserBasedApproval = false;
+            }
+
+            if (approverIds.length === 0) {
+                logger.warn({ instanceId: approvalInstance._id }, 'No approver IDs found for current level');
                 return;
             }
 
             logger.info({
                 instanceId: approvalInstance._id,
                 currentLevel: approvalInstance.currentLevel,
-                roleIds: approverRoleIds.map((r: any) => r.toString()),
-            }, 'Sending approval notifications to role holders');
+                approverIds: approverIds.map((id: any) => id.toString()),
+                isUserBasedApproval,
+            }, 'Sending approval notifications');
 
-            // Find all roles
-            const roles = await Role.find({ _id: { $in: approverRoleIds } })
-                .select('name type companyId')
-                .exec();
+            let usersToNotify = [];
 
-            if (roles.length === 0) {
-                logger.warn({ instanceId: approvalInstance._id, roleIds: approverRoleIds }, 'No roles found for approval notification');
-                return;
+            if (isUserBasedApproval) {
+                // New format: directly find the specific users
+                usersToNotify = await User.find({
+                    _id: { $in: approverIds },
+                    status: 'ACTIVE',
+                    companyId: approvalInstance.companyId,
+                })
+                    .select('_id email name roles')
+                    .exec();
+            } else {
+                // Old format: find users with the specified roles
+                usersToNotify = await User.find({
+                    roles: { $in: approverIds },
+                    status: 'ACTIVE',
+                    companyId: approvalInstance.companyId,
+                })
+                    .select('_id email name roles')
+                    .exec();
             }
 
-            // Find all users who have any of these roles
-            const usersWithRoles = await User.find({
-                roles: { $in: approverRoleIds },
-                status: 'ACTIVE',
-                companyId: approvalInstance.companyId,
-            })
-                .select('_id email name roles')
-                .exec();
-
-            if (usersWithRoles.length === 0) {
+            if (usersToNotify.length === 0) {
                 logger.warn({
                     instanceId: approvalInstance._id,
-                    roleIds: approverRoleIds.map((r: any) => r.toString()),
+                    approverIds: approverIds.map((r: any) => r.toString()),
                 }, 'No active users found with required approval roles');
                 return;
             }
 
             logger.info({
                 instanceId: approvalInstance._id,
-                usersCount: usersWithRoles.length,
-                users: usersWithRoles.map((u: any) => ({ id: u._id.toString(), email: u.email })),
-            }, `Found ${usersWithRoles.length} users with required approval roles`);
+                usersCount: usersToNotify.length,
+                users: usersToNotify.map((u: any) => ({ id: u._id.toString(), email: u.email })),
+            }, `Found ${usersToNotify.length} users with required approval roles`);
 
-            // Get role names for display
-            const roleNames = roles.map(r => r.name).join(', ');
+            // Get approver names for display
+            const approverNames = usersToNotify.map(u => u.name).join(', ');
 
             // Prepare notification payload
             const requestType = requestData.name ? 'Expense Report' : 'Request';
@@ -84,7 +98,7 @@ export class ApprovalMatrixNotificationService {
             const requesterName = requester?.name || requester?.email || 'An employee';
 
             // Send notifications to each user
-            for (const userObj of usersWithRoles) {
+            for (const userObj of usersToNotify) {
                 const user = userObj as any;
                 try {
                     // 1. Send Push Notification
@@ -112,7 +126,7 @@ export class ApprovalMatrixNotificationService {
                         companyId: approvalInstance.companyId.toString(),
                         type: NotificationType.REPORT_PENDING_APPROVAL,
                         title: 'New Approval Required',
-                        description: `${requestType} "${requestName}" submitted by ${requesterName} requires your approval (as ${roleNames})`,
+                        description: `${requestType} "${requestName}" submitted by ${requesterName} requires your approval (as ${approverNames})`,
                         link: `/approvals`, // Unified approval inbox
                         metadata: {
                             instanceId: approvalInstance._id.toString(),
@@ -122,7 +136,7 @@ export class ApprovalMatrixNotificationService {
                             requesterId: requestData.userId.toString(),
                             requesterName,
                             level: approvalInstance.currentLevel,
-                            roleNames,
+                            approverNames,
                         },
                     });
                     logger.debug({ userId: user._id.toString() }, '✅ Database notification created');
@@ -138,7 +152,7 @@ export class ApprovalMatrixNotificationService {
                                 requestName,
                                 requesterName,
                                 level: approvalInstance.currentLevel,
-                                roleNames,
+                                approverNames,
                                 instanceId: approvalInstance._id.toString(),
                             },
                         });
@@ -156,9 +170,9 @@ export class ApprovalMatrixNotificationService {
 
             logger.info({
                 instanceId: approvalInstance._id,
-                notifiedUsers: usersWithRoles.length,
-                roles: roleNames,
-            }, `✅ Approval notifications sent to ${usersWithRoles.length} users`);
+                notifiedUsers: usersToNotify.length,
+                roles: approverNames,
+            }, `✅ Approval notifications sent to ${usersToNotify.length} users`);
 
         } catch (error: any) {
             logger.error({

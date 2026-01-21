@@ -1467,17 +1467,30 @@ export class SuperAdminController {
       return;
     }
 
-    // Check if company has users
+    // Get user count for logging
     const companyObjectId = new mongoose.Types.ObjectId(companyId);
     const userCount = await User.countDocuments({ companyId: companyObjectId });
+
+    // Cascade delete: Delete all users associated with this company
     if (userCount > 0) {
-      res.status(400).json({
-        success: false,
-        message: `Cannot delete company. It has ${userCount} associated users. Please remove users first.`,
-      });
-      return;
+      const deleteResult = await User.deleteMany({ companyId: companyObjectId });
+      logger.info({ 
+        companyId, 
+        deletedUsers: deleteResult.deletedCount,
+        totalUsers: userCount 
+      }, 'Cascade deleted users when deleting company');
     }
 
+    // Delete company admins
+    const adminDeleteResult = await CompanyAdmin.deleteMany({ companyId: companyObjectId });
+    if (adminDeleteResult.deletedCount > 0) {
+      logger.info({ 
+        companyId, 
+        deletedAdmins: adminDeleteResult.deletedCount 
+      }, 'Cascade deleted company admins when deleting company');
+    }
+
+    // Delete the company
     await Company.deleteOne({ _id: companyId });
 
     // Log audit
@@ -1485,12 +1498,22 @@ export class SuperAdminController {
       req.user!.id,
       'Company',
       companyId,
-      AuditAction.DELETE
+      AuditAction.DELETE,
+      { 
+        cascadeDeletedUsers: userCount,
+        cascadeDeletedAdmins: adminDeleteResult.deletedCount 
+      }
     );
 
     res.status(200).json({
       success: true,
-      message: 'Company deleted successfully',
+      message: userCount > 0 
+        ? `Company and ${userCount} associated user(s) deleted successfully`
+        : 'Company deleted successfully',
+      data: {
+        deletedUsers: userCount,
+        deletedAdmins: adminDeleteResult.deletedCount,
+      },
     });
   });
 

@@ -635,9 +635,8 @@ export class UsersService {
             break;
           
           case 'delete':
-            // Soft delete: set status to INACTIVE
-            user.status = UserStatus.INACTIVE;
-            await user.save();
+            // Permanent delete: remove user from database
+            await user.deleteOne();
             await AuditService.log(requestingUserId, 'User', userId, AuditAction.DELETE);
             updated++;
             break;

@@ -27,6 +27,7 @@ import { DuplicateInvoiceService } from './duplicateInvoice.service';
 import { NotificationService } from './notification.service';
 
 import { logger } from '@/config/logger';
+import { DateUtils } from '@/utils/dateUtils';
 
 export class ReportsService {
   private static buildDefaultReportName(fromDate: Date, employeeName: string): string {
@@ -74,8 +75,8 @@ export class ReportsService {
         }
       }
 
-      const fromDate = new Date(data.fromDate);
-      const toDate = new Date(data.toDate);
+      const fromDate = DateUtils.frontendDateToBackend(data.fromDate);
+      const toDate = DateUtils.frontendDateToBackend(data.toDate);
       const requestedName = (data.name || '').trim();
       let finalName = requestedName;
 
@@ -189,12 +190,16 @@ export class ReportsService {
       query.projectId = filters.projectId;
     }
 
-    if (filters.from) {
-      query.fromDate = { $gte: new Date(filters.from) };
-    }
+    if (filters.from || filters.to) {
+      const dateRange = DateUtils.createDateRangeQuery(filters.from || filters.to!, filters.to || filters.from!);
 
-    if (filters.to) {
-      query.toDate = { $lte: new Date(filters.to) };
+      if (filters.from) {
+        query.fromDate = { $gte: dateRange.$gte };
+      }
+
+      if (filters.to) {
+        query.toDate = { $lte: dateRange.$lte };
+      }
     }
 
     const skip = (page - 1) * pageSize;
@@ -1200,8 +1205,9 @@ export class ReportsService {
           }))
         }, 'Report loaded for notification, approvers verified');
 
+        logger.info({ reportId: saved._id }, '🔔 Calling notification service for report submission');
         await NotificationService.notifyReportSubmitted(reportForNotification);
-        logger.info({ reportId: saved._id }, 'Notifications sent successfully');
+        logger.info({ reportId: saved._id }, '✅ Notifications sent successfully');
       }
     } catch (error) {
       logger.error({ error, reportId: saved._id, stack: (error as any)?.stack }, 'Error sending notifications to approvers');

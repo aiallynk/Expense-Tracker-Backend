@@ -139,32 +139,53 @@ export class ApprovalService {
             continue; 
           }
           
-          const approverRoleIds = (currentLevel.approverRoleIds || []).map((id: any) => {
-            const roleId = id._id?.toString() || id.toString();
-            return roleId;
-          }).filter(Boolean);
-          
-          if (approverRoleIds.length === 0) {
-            logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'No approver role IDs found for current level');
-            continue;
+          // Handle both old format (approverRoleIds) and new format (approverUserIds)
+          let approverIds = [];
+          let isUserBasedApproval = false;
+
+          if (currentLevel.approverUserIds && currentLevel.approverUserIds.length > 0) {
+            // New format: specific users
+            approverIds = currentLevel.approverUserIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
+            isUserBasedApproval = true;
+          } else if (currentLevel.approverRoleIds && currentLevel.approverRoleIds.length > 0) {
+            // Old format: roles (for backward compatibility)
+            approverIds = currentLevel.approverRoleIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
+            isUserBasedApproval = false;
           }
           
-          // Normalize both arrays for comparison (ensure consistent string format)
-          const normalizedUserRoleIds = userRoleIds.map(id => id.toLowerCase().trim());
-          const normalizedApproverRoleIds = approverRoleIds.map((id: string) => id.toLowerCase().trim());
-          
-          const matchingRoleId = normalizedApproverRoleIds.find((rId: string) => 
-            normalizedUserRoleIds.includes(rId)
-          );
-          
+          if (approverIds.length === 0) {
+            logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'No approver IDs found for current level');
+            continue;
+          }
+
+          // Check if user is authorized for this level
+          let isAuthorized = false;
+
+          if (isUserBasedApproval) {
+            // New format: check if user ID is directly in the approver list
+            const normalizedApproverIds = approverIds.map((id: string) => id.toLowerCase().trim());
+            const userId = (user._id as mongoose.Types.ObjectId).toString().toLowerCase().trim();
+            isAuthorized = normalizedApproverIds.includes(userId);
+          } else {
+            // Old format: check if user has matching role
+            const normalizedApproverRoleIds = approverIds.map((id: string) => id.toLowerCase().trim());
+            const normalizedUserRoleIds = userRoleIds.map((id: string) => id.toLowerCase().trim());
+
+            const matchingRoleId = normalizedApproverRoleIds.find((rId: string) =>
+              normalizedUserRoleIds.includes(rId)
+            );
+            isAuthorized = !!matchingRoleId;
+          }
+
           // Only actionable for *current* level approvers:
-          if (!matchingRoleId) {
-            logger.debug({ 
-              instanceId: instance._id, 
-              userRoleIds: normalizedUserRoleIds.slice(0, 3), 
-              approverRoleIds: normalizedApproverRoleIds.slice(0, 3),
+          if (!isAuthorized) {
+            logger.debug({
+              instanceId: instance._id,
+              userId: user._id,
+              isUserBasedApproval,
+              approverIds: approverIds.slice(0, 3),
               level: instance.currentLevel
-            }, 'User does not have matching role for this approval level');
+            }, 'User is not authorized for this approval level');
             continue;
           }
           
@@ -201,8 +222,8 @@ export class ApprovalService {
             currentLevel: instance.currentLevel,
             requestId: instance.requestId,
             requestType: instance.requestType,
-            roleName: (user.roles.find((r: any) => r._id?.toString() === matchingRoleId) as any)?.name || 'Approver',
-            roleId: matchingRoleId,
+            roleName: 'Approver',
+            roleId: null,
             data: {
               ...requestDetails,
               id: requestDetails._id,
@@ -247,14 +268,18 @@ export class ApprovalService {
         if (levelConfig.approvalType === ApprovalType.PARALLEL) {
             if (levelConfig.parallelRule === ParallelRule.ANY) return true;
             if (levelConfig.parallelRule === ParallelRule.ALL) {
-        // Require unique ROLE approvals (not multiple approvals by same user/role)
-        const approvedRoleIds = new Set(
+        // For parallel ALL, check if all required approvers have approved
+        const requiredApprovers = levelConfig.approverUserIds || levelConfig.approverRoleIds || [];
+        if (requiredApprovers.length === 0) return true;
+
+        const approvedApproverIds = new Set(
           instance.history
             .filter((h) => h.levelNumber === instance.currentLevel && h.status === ApprovalStatus.APPROVED)
-            .map((h) => h.roleId?.toString())
+            .map((h) => levelConfig.approverUserIds ? h.approverId?.toString() : h.roleId?.toString())
             .filter(Boolean) as string[]
         );
-        return approvedRoleIds.size >= levelConfig.approverRoleIds.length;
+
+        return approvedApproverIds.size >= requiredApprovers.length;
             }
         }
 
@@ -396,9 +421,21 @@ export class ApprovalService {
       const user = await User.findById(userId).populate('roles').exec();
       if (!user) throw new Error('User not found');
       const userRoleIds = (user.roles || []).map(r => r._id ? r._id.toString() : r.toString());
-      // Check if user has any of the approver roles for this level
-      const authorizedRole = (currentLevelConfig.approverRoleIds || []).find(rId => userRoleIds.includes(rId?.toString()));
-      if (!authorizedRole) {
+      // Check if user is authorized for this level
+      let isAuthorized = false;
+      let authorizedRole = null;
+
+      if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
+        // New format: check if user ID is directly in the approver list
+        const approverUserIds = currentLevelConfig.approverUserIds.map(id => id.toString());
+        isAuthorized = approverUserIds.includes(userId);
+      } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
+        // Old format: check if user has matching role
+        authorizedRole = (currentLevelConfig.approverRoleIds || []).find(rId => userRoleIds.includes(rId?.toString()));
+        isAuthorized = !!authorizedRole;
+      }
+
+      if (!isAuthorized) {
         throw new Error('You are not authorized to approve at this level');
       }
       // Prevent duplicate actions by same user at the same level (important for PARALLEL ALL)
@@ -418,7 +455,7 @@ export class ApprovalService {
         levelNumber: instance.currentLevel,
         status: historyStatus,
         approverId: new mongoose.Types.ObjectId(userId),
-        roleId: authorizedRole,
+        roleId: authorizedRole ? new mongoose.Types.ObjectId(authorizedRole) : undefined,
         timestamp: new Date(),
         comments
       });

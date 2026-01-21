@@ -62,6 +62,9 @@ export const config = {
     // Supports 100K+ users with multiple OCR workers
     concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '20', 10), // Increased from 3 to 20
   },
+  ai: {
+    disableCategoryMatching: process.env.DISABLE_AI_CATEGORY_MATCHING === 'true',
+  },
   analytics: {
     // Trim whitespace and newlines from API key
     // This prevents issues with .env files that may have trailing newlines

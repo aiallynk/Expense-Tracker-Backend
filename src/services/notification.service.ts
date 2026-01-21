@@ -11,15 +11,56 @@ import { getAllUsersTopic, getCompanyTopic, getRoleTopic } from '../utils/topicU
 
 import { logger } from '@/config/logger';
 
+// In-memory cache for notification deduplication (simple approach)
+const notificationCache = new Map<string, number>();
+
 
 export class NotificationService {
+  /**
+   * Check if a notification with the given key was sent recently
+   * @param key Unique notification key
+   * @param timeWindowMs Time window in milliseconds
+   * @returns true if notification was sent recently
+   */
+  static checkRecentNotification(key: string, timeWindowMs: number = 30000): boolean {
+    const lastSent = notificationCache.get(key);
+    if (!lastSent) return false;
+
+    const now = Date.now();
+    return (now - lastSent) < timeWindowMs;
+  }
+
+  /**
+   * Mark a notification as sent (for deduplication)
+   * @param key Unique notification key
+   */
+  static markNotificationSent(key: string): void {
+    notificationCache.set(key, Date.now());
+
+    // Clean up old entries (keep cache small)
+    if (notificationCache.size > 1000) {
+      const cutoff = Date.now() - (5 * 60 * 1000); // 5 minutes ago
+      for (const [k, timestamp] of notificationCache.entries()) {
+        if (timestamp < cutoff) {
+          notificationCache.delete(k);
+        }
+      }
+    }
+  }
+
   static async registerFcmToken(
     userId: string,
     token: string,
     platform: NotificationPlatform
   ): Promise<void> {
-    // Remove existing token if exists (by fcmToken or token field)
-    await NotificationToken.findOneAndDelete({
+    // Remove existing tokens for this user-platform combination
+    await NotificationToken.deleteMany({
+      userId: new mongoose.Types.ObjectId(userId),
+      platform
+    });
+
+    // Also remove any other registrations of this token (cleanup duplicates)
+    await NotificationToken.deleteMany({
       $or: [
         { fcmToken: token },
         { token }
@@ -254,6 +295,8 @@ export class NotificationService {
             defaultSound: true,
             defaultVibrateTimings: true,
             defaultLightSettings: true,
+            // Add tag for notification deduplication
+            tag: payload.data?.reportId ? `report_${payload.data.reportId}` : topic,
           },
         },
         // APNS (iOS) configuration (optional, but good practice)
@@ -351,6 +394,8 @@ export class NotificationService {
             defaultSound: true,
             defaultVibrateTimings: true,
             defaultLightSettings: true,
+            // Add tag for notification deduplication
+            tag: payload.data?.reportId ? `report_${payload.data.reportId}` : `user_${userId}`,
           },
         },
         // APNS (iOS) configuration (optional, but good practice)
@@ -409,7 +454,7 @@ export class NotificationService {
         role: a.role,
         decidedAt: a.decidedAt
       }))
-    }, 'Processing notifications for report submission');
+    }, '🔔 STARTING NOTIFICATIONS FOR REPORT SUBMISSION');
 
     // Get Level 1 approvers (managers) for DB records and emails
     const level1Approvers = report.approvers.filter(
@@ -429,22 +474,33 @@ export class NotificationService {
     }
 
     // Send broadcast notification to role_MANAGER topic (Firebase FCM)
+    // Add deduplication check to prevent duplicate notifications
+    const notificationKey = `report_submitted_${report._id}_managers`;
     try {
-      const managerTopic = getRoleTopic('MANAGER');
-      const messageId = await this.sendBroadcastToTopic(
-        {
-          title: 'New Expense Report Submitted',
-          body: `Report "${report.name}" has been submitted for your approval`,
-          data: {
-            type: 'REPORT_SUBMITTED',
-            reportId: report._id.toString(),
-            action: 'REPORT_SUBMITTED',
-            companyId: reportOwner.companyId?.toString() || '',
+      // Check if we've already sent this notification recently (last 10 seconds for stricter deduplication)
+      const recentNotification = this.checkRecentNotification(notificationKey, 10000);
+      if (recentNotification) {
+        logger.info({ reportId: report._id }, '⚠️ Skipping duplicate manager notification (sent recently within 10 seconds)');
+      } else {
+        const managerTopic = getRoleTopic('MANAGER');
+        const messageId = await this.sendBroadcastToTopic(
+          {
+            title: 'New Expense Report Submitted',
+            body: `Report "${report.name}" has been submitted for your approval`,
+            data: {
+              type: 'REPORT_SUBMITTED',
+              reportId: report._id.toString(),
+              action: 'REPORT_SUBMITTED',
+              companyId: reportOwner.companyId?.toString() || '',
+            },
           },
-        },
-        managerTopic
-      );
-      logger.info({ reportId: report._id, topic: managerTopic, messageId }, '✅ Broadcast notification sent to role_MANAGER topic');
+          managerTopic
+        );
+        logger.info({ reportId: report._id, topic: managerTopic, messageId }, '✅ Broadcast notification sent to role_MANAGER topic');
+
+        // Mark this notification as sent
+        this.markNotificationSent(notificationKey);
+      }
     } catch (error: any) {
       logger.error({ error: error.message || error, reportId: report._id }, '❌ Failed to send broadcast notification to role_MANAGER topic');
       // Continue to create DB records even if FCM fails
@@ -799,11 +855,21 @@ export class NotificationService {
           `;
           break;
         case 'password_reset':
-          const resetLink = (data as any).resetLink || '';
-          
+          const resetLink = (data as any).data?.resetLink || '';
+
+          // Debug logging
+          logger.info({
+            resetLink,
+            dataKeys: Object.keys(data),
+            dataDataKeys: data.data ? Object.keys(data.data) : [],
+            dataType: typeof data,
+            hasResetLink: data.data ? 'resetLink' in data.data : false,
+            dataString: JSON.stringify(data, null, 2).substring(0, 200) + '...'
+          }, 'Debug: password_reset template data');
+
           // Validate resetLink before using it
           if (!resetLink || resetLink.trim() === '') {
-            logger.error({ resetLink }, 'Reset link is empty or undefined in password_reset template');
+            logger.error({ resetLink, fullData: data }, 'Reset link is empty or undefined in password_reset template');
             throw new Error('Reset link is required for password reset email');
           }
           

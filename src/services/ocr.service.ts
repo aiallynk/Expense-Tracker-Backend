@@ -10,6 +10,8 @@ import { Receipt } from '../models/Receipt';
 import { OcrJobStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
+import { DateUtils } from '@/utils/dateUtils';
+import { CategoryMatchingService } from './categoryMatching.service';
 
 export interface OcrResult {
   vendor?: string;
@@ -17,7 +19,6 @@ export interface OcrResult {
   totalAmount?: number;
   currency?: string;
   tax?: number;
-  categorySuggestion?: string;
   lineItems?: Array<{ description: string; amount: number }>;
   notes?: string;
   confidence?: number;
@@ -223,10 +224,15 @@ export class OcrService {
           
           if (result.date) {
             try {
-              expense.expenseDate = new Date(result.date);
-              updated = true;
+              if (DateUtils.isValidDateString(result.date)) {
+                expense.expenseDate = DateUtils.parseISTDate(result.date);
+                updated = true;
+                logger.info({ receiptId: receiptDoc?._id, date: result.date }, 'OCR date parsed successfully as IST date');
+              } else {
+                logger.warn({ receiptId: receiptDoc?._id, date: result.date }, 'Invalid date format from OCR, skipping expense date update');
+              }
             } catch (e) {
-              // Invalid date, skip
+              logger.warn({ receiptId: receiptDoc?._id, date: result.date, error: (e as Error).message }, 'Error parsing OCR date');
             }
           }
           
@@ -235,18 +241,37 @@ export class OcrService {
             updated = true;
           }
           
-          if (result.categorySuggestion && result.categorySuggestion.trim()) {
-            // Try to find matching category
-            const { Category } = await import('../models/Category');
-            const categoryName = result.categorySuggestion.trim();
-            const category = await Category.findOne({
-              name: { $regex: new RegExp(`^${categoryName}$`, 'i') }
-            });
-            
-            if (category) {
-              expense.categoryId = category._id as mongoose.Types.ObjectId;
+          // Use AI-powered category matching
+          try {
+            const categoryMatch = await CategoryMatchingService.findBestCategoryMatch({
+              vendor: result.vendor,
+              lineItems: result.lineItems,
+              notes: result.notes,
+              extractedText: result.notes || '' // Use notes as extracted text fallback
+            }, (expense as any).companyId);
+
+            if (categoryMatch.bestMatch && categoryMatch.bestMatch.confidence >= 50) {
+              expense.categoryId = categoryMatch.bestMatch.categoryId;
               updated = true;
-            }
+              logger.info({
+                receiptId: receiptDoc?._id,
+                matchedCategory: categoryMatch.bestMatch?.categoryName,
+                confidence: categoryMatch.bestMatch?.confidence
+              }, 'AI category matching successful');
+        } else if (categoryMatch.fallbackCategory) {
+          // Use fallback category if no good match
+          expense.categoryId = categoryMatch.fallbackCategory.categoryId;
+          updated = true;
+          logger.info({
+            receiptId: receiptDoc?._id,
+            fallbackCategory: categoryMatch.fallbackCategory.categoryName
+          }, 'Using fallback category due to low AI confidence');
+        }
+          } catch (error: any) {
+            logger.warn({
+              receiptId: receiptDoc?._id,
+              error: (error as Error).message
+            }, 'AI category matching failed, skipping category assignment');
           }
           
           if (result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
@@ -312,7 +337,7 @@ export class OcrService {
   ): Promise<OcrResult> {
     const model = getVisionModel();
 
-    const prompt = `Extract receipt data as JSON only. Fields: vendor (string), date (YYYY-MM-DD), totalAmount (number), currency (INR/USD/EUR), tax (number, optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes (string, optional). Return JSON only, no markdown.`;
+    const prompt = `Extract receipt data as JSON only. Fields: vendor (string), date (YYYY-MM-DD), totalAmount (number), currency (INR/USD/EUR), tax (number, optional), lineItems ([{description, amount}]), notes (string, optional). Return JSON only, no markdown. Do not suggest categories - that will be handled separately.`;
 
     try {
       logger.info({
@@ -378,7 +403,6 @@ export class OcrService {
           totalAmount: result.totalAmount,
           date: result.date,
           currency: result.currency,
-          categorySuggestion: result.categorySuggestion,
           hasLineItems: !!(result.lineItems && result.lineItems.length > 0),
           lineItemsCount: result.lineItems?.length || 0,
         }, 'OCR extraction successful')
@@ -514,12 +538,7 @@ export class OcrService {
       result.currency = currencyMatch[1].trim().toUpperCase();
     }
     
-    // Try to extract category
-    const categoryMatch = content.match(/"categorySuggestion"\s*:\s*"([^"]+)"/i) ||
-                         content.match(/category[:\s]+(Travel|Food|Office|Others)/i);
-    if (categoryMatch) {
-      result.categorySuggestion = categoryMatch[1].trim();
-    }
+    // Category matching is now handled separately via AI service
 
     logger.info({
       extractedFields: Object.keys(result),
