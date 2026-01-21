@@ -605,6 +605,15 @@ export class AuthService {
       const { NotificationService } = await import('./notification.service');
       const resetLink = `${config.frontend.url}/reset-password?token=${resetToken}`;
       
+      // Log reset link for debugging (without exposing token in production logs)
+      logger.info({ 
+        email: normalizedEmail, 
+        resetLink: resetLink.substring(0, 50) + '...',
+        linkLength: resetLink.length,
+        frontendUrl: config.frontend.url,
+        hasToken: !!resetToken && resetToken.length > 0
+      }, 'Preparing password reset email');
+      
       await NotificationService.sendEmail({
         to: normalizedEmail,
         subject: 'Reset Your Password - NexPense',
@@ -615,7 +624,7 @@ export class AuthService {
         },
       });
       
-      logger.info({ email: normalizedEmail }, 'Password reset email sent');
+      logger.info({ email: normalizedEmail, resetLinkLength: resetLink.length }, 'Password reset email sent successfully');
     } catch (error) {
       logger.error({ error, email: normalizedEmail }, 'Failed to send password reset email');
       // Don't throw - still return success to avoid revealing user existence

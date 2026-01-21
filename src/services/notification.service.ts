@@ -800,28 +800,94 @@ export class NotificationService {
           break;
         case 'password_reset':
           const resetLink = (data as any).resetLink || '';
+          
+          // Validate resetLink before using it
+          if (!resetLink || resetLink.trim() === '') {
+            logger.error({ resetLink }, 'Reset link is empty or undefined in password_reset template');
+            throw new Error('Reset link is required for password reset email');
+          }
+          
+          // Ensure URL starts with https://
+          const safeResetLink = resetLink.startsWith('http://') || resetLink.startsWith('https://') 
+            ? resetLink 
+            : `https://${resetLink}`;
+          
+          // Log the link being used (truncated for security)
+          logger.info({ 
+            resetLinkPrefix: safeResetLink.substring(0, 50) + '...',
+            linkLength: safeResetLink.length,
+            startsWithHttps: safeResetLink.startsWith('https://')
+          }, 'Generating password reset email HTML');
+          
+          // Gmail-safe email template - simple HTML, no complex styling
+          // Using only inline styles, plain anchor tags, no buttons or JS
           html = `
-            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-              <h2 style="color: #333; margin-bottom: 20px;">Reset Your Password</h2>
-              <p style="color: #666; font-size: 14px; line-height: 1.6; margin-bottom: 20px;">
-                You requested to reset your password for your NexPense account. Click the button below to reset your password.
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+</head>
+<body style="margin: 0; padding: 0; font-family: Arial, sans-serif; background-color: #f5f5f5;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background-color: #f5f5f5; padding: 20px;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="background-color: #ffffff; border-radius: 8px; overflow: hidden;">
+          <!-- Header -->
+          <tr>
+            <td style="padding: 30px 20px; text-align: center; background-color: #ffffff;">
+              <h1 style="color: #333333; margin: 0; font-size: 24px; font-weight: bold;">Reset Your Password</h1>
+            </td>
+          </tr>
+          <!-- Content -->
+          <tr>
+            <td style="padding: 20px 30px;">
+              <p style="color: #666666; font-size: 14px; line-height: 1.6; margin: 0 0 20px 0;">
+                You requested to reset your password for your NexPense account. Click the link below to reset your password.
               </p>
-              <div style="text-align: center; margin: 30px 0;">
-                <a href="${resetLink}" style="display: inline-block; padding: 12px 30px; background-color: #4F46E5; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
-                  Reset Password
-                </a>
-              </div>
-              <p style="color: #666; font-size: 14px; line-height: 1.6; margin-top: 20px;">
+              
+              <!-- Reset Password Link - Gmail-safe anchor tag -->
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin: 30px 0;">
+                <tr>
+                  <td align="center">
+                    <a href="${safeResetLink}" target="_blank" style="display: inline-block; padding: 14px 32px; background-color: #4F46E5; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+                      Reset Password
+                    </a>
+                  </td>
+                </tr>
+              </table>
+              
+              <p style="color: #666666; font-size: 14px; line-height: 1.6; margin: 20px 0 0 0;">
                 This link will expire in <strong>15 minutes</strong> for security reasons.
               </p>
-              <p style="color: #999; font-size: 12px; line-height: 1.6; margin-top: 30px;">
+              
+              <p style="color: #999999; font-size: 12px; line-height: 1.6; margin: 30px 0 0 0;">
                 If you did not request a password reset, please ignore this email. Your password will remain unchanged.
               </p>
-              <p style="color: #999; font-size: 12px; line-height: 1.6; margin-top: 10px;">
-                If the button doesn't work, copy and paste this link into your browser:<br/>
-                <a href="${resetLink}" style="color: #4F46E5; word-break: break-all;">${resetLink}</a>
+              
+              <!-- Fallback text link -->
+              <p style="color: #999999; font-size: 12px; line-height: 1.6; margin: 20px 0 0 0; padding-top: 20px; border-top: 1px solid #eeeeee;">
+                If the button above does not work, copy and paste this link into your browser:
               </p>
-            </div>
+              <p style="color: #4F46E5; font-size: 12px; line-height: 1.6; margin: 10px 0 0 0; word-break: break-all;">
+                <a href="${safeResetLink}" style="color: #4F46E5; text-decoration: underline;">${safeResetLink}</a>
+              </p>
+            </td>
+          </tr>
+          <!-- Footer -->
+          <tr>
+            <td style="padding: 20px 30px; text-align: center; background-color: #f9f9f9; border-top: 1px solid #eeeeee;">
+              <p style="color: #999999; font-size: 11px; margin: 0;">
+                © ${new Date().getFullYear()} NexPense. All rights reserved.
+              </p>
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
           `;
           break;
         default:
