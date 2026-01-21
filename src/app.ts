@@ -220,6 +220,13 @@ export const createApp = (): Express => {
   // Meta routes (version info, etc.) - public endpoints
   app.use('/api/meta', metaRoutes);
 
+  // Test routes (for debugging - remove in production or add auth)
+  if (config.app.env === 'development') {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const testEmailRoutes = require('./routes/test-email.routes').default;
+    app.use('/api/v1', testEmailRoutes);
+  }
+
   // 404 handler
   app.use((_req, res) => {
     res.status(404).json({

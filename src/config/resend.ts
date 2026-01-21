@@ -7,11 +7,17 @@ import { config } from './index';
 let resendClient: Resend | null = null;
 
 export const getResendClient = (): Resend | null => {
-  if (!resendClient && config.resend.apiKey) {
+  if (!config.resend.apiKey) {
+    logger.warn('RESEND_API_KEY not configured - email notifications will be disabled');
+    return null;
+  }
+
+  if (!resendClient) {
     try {
       resendClient = new Resend(config.resend.apiKey);
+      logger.info('Resend client initialized successfully');
     } catch (error) {
-      logger.warn({ error }, 'Resend not initialized - email notifications will be disabled');
+      logger.error({ error }, 'Failed to initialize Resend client - email notifications will be disabled');
       return null;
     }
   }
@@ -19,6 +25,8 @@ export const getResendClient = (): Resend | null => {
 };
 
 export const getFromEmail = (): string => {
-  return config.resend.fromEmail;
+  const email = config.resend.fromEmail;
+  // Format as "Nexpense <email@domain>" for better email display
+  return `Nexpense <${email}>`;
 };
 

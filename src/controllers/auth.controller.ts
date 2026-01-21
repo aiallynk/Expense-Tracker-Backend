@@ -82,7 +82,6 @@ export class AuthController {
     res.status(200).json({
       success: result.success,
       message: result.message,
-      data: result.resetToken ? { resetToken: result.resetToken } : undefined, // Remove in production
     });
   });
 

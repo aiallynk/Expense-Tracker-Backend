@@ -16,6 +16,8 @@ export interface ICompanyAdmin extends Document {
   companyId: mongoose.Types.ObjectId;
   status: CompanyAdminStatus;
   lastLoginAt?: Date;
+  passwordResetToken?: string;
+  passwordResetExpires?: Date;
   createdAt: Date;
   updatedAt: Date;
   comparePassword(candidatePassword: string): Promise<boolean>;
@@ -61,6 +63,12 @@ const companyAdminSchema = new Schema<ICompanyAdmin>(
       required: true,
     },
     lastLoginAt: {
+      type: Date,
+    },
+    passwordResetToken: {
+      type: String,
+    },
+    passwordResetExpires: {
       type: Date,
     },
   },

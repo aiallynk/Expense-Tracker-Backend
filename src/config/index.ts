@@ -41,7 +41,10 @@ export const config = {
   },
   resend: {
     apiKey: process.env.RESEND_API_KEY || '',
-    fromEmail: process.env.RESEND_FROM_EMAIL || 'no-reply@aially.in',
+    fromEmail: process.env.MAIL_FROM || process.env.RESEND_FROM_EMAIL || 'no-reply@nexpense.aially.in',
+  },
+  frontend: {
+    url: process.env.FRONTEND_URL || 'https://nexpense.aially.in',
   },
   log: {
     level: process.env.LOG_LEVEL || 'info',

@@ -564,14 +564,19 @@ export class AuthService {
   /**
    * Request password reset - generates reset token
    */
-  static async forgotPassword(email: string): Promise<{ success: boolean; message: string; resetToken?: string }> {
+  static async forgotPassword(email: string): Promise<{ success: boolean; message: string }> {
     const normalizedEmail = email.toLowerCase().trim();
     
-    // Find user by email
+    // Find user by email (check both User and CompanyAdmin)
     const user = await User.findOne({ email: normalizedEmail }).exec();
+    let companyAdmin: ICompanyAdmin | null = null;
+    
+    if (!user) {
+      companyAdmin = await CompanyAdmin.findOne({ email: normalizedEmail }).exec();
+    }
     
     // Always return success message (security: don't reveal if email exists)
-    if (!user) {
+    if (!user && !companyAdmin) {
       return {
         success: true,
         message: 'If an account with that email exists, a password reset link has been sent.',
@@ -582,19 +587,43 @@ export class AuthService {
     const crypto = await import('crypto');
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetExpires = new Date();
-    resetExpires.setHours(resetExpires.getHours() + 1); // Token expires in 1 hour
+    resetExpires.setMinutes(resetExpires.getMinutes() + 15); // Token expires in 15 minutes
 
-    // Save reset token to user
-    user.passwordResetToken = resetToken;
-    user.passwordResetExpires = resetExpires;
-    await user.save();
+    // Save reset token to user or company admin
+    if (user) {
+      user.passwordResetToken = resetToken;
+      user.passwordResetExpires = resetExpires;
+      await user.save();
+    } else if (companyAdmin) {
+      companyAdmin.passwordResetToken = resetToken;
+      companyAdmin.passwordResetExpires = resetExpires;
+      await companyAdmin.save();
+    }
 
-    // In production, send email with reset link
-    // For now, return the token (remove in production and send via email)
+    // Send email with reset link
+    try {
+      const { NotificationService } = await import('./notification.service');
+      const resetLink = `${config.frontend.url}/reset-password?token=${resetToken}`;
+      
+      await NotificationService.sendEmail({
+        to: normalizedEmail,
+        subject: 'Reset Your Password - NexPense',
+        template: 'password_reset',
+        data: {
+          resetLink,
+          token: resetToken,
+        },
+      });
+      
+      logger.info({ email: normalizedEmail }, 'Password reset email sent');
+    } catch (error) {
+      logger.error({ error, email: normalizedEmail }, 'Failed to send password reset email');
+      // Don't throw - still return success to avoid revealing user existence
+    }
+
     return {
       success: true,
-      message: 'Password reset token generated. Please use this token to reset your password.',
-      resetToken, // Remove this in production - send via email instead
+      message: 'If an account with that email exists, a password reset link has been sent.',
     };
   }
 
@@ -602,13 +631,21 @@ export class AuthService {
    * Reset password using reset token
    */
   static async resetPassword(token: string, newPassword: string): Promise<{ success: boolean; message: string }> {
-    // Find user with valid reset token
+    // Find user or company admin with valid reset token
     const user = await User.findOne({
       passwordResetToken: token,
       passwordResetExpires: { $gt: new Date() }, // Token not expired
     }).exec();
 
+    let companyAdmin: ICompanyAdmin | null = null;
     if (!user) {
+      companyAdmin = await CompanyAdmin.findOne({
+        passwordResetToken: token,
+        passwordResetExpires: { $gt: new Date() }, // Token not expired
+      }).exec();
+    }
+
+    if (!user && !companyAdmin) {
       const error: any = new Error('Invalid or expired reset token');
       error.statusCode = 400;
       error.code = 'INVALID_RESET_TOKEN';
@@ -619,20 +656,39 @@ export class AuthService {
     const passwordHash = await this.hashPassword(newPassword);
 
     // Update password and clear reset token
-    user.passwordHash = passwordHash;
-    user.passwordResetToken = undefined;
-    user.passwordResetExpires = undefined;
-    await user.save();
+    if (user) {
+      user.passwordHash = passwordHash;
+      user.passwordResetToken = undefined;
+      user.passwordResetExpires = undefined;
+      await user.save();
 
-    // Audit log
-    const userId = (user._id as mongoose.Types.ObjectId).toString();
-    await AuditService.log(
-      userId,
-      'User',
-      userId,
-      AuditAction.UPDATE,
-      { action: 'password_reset' }
-    );
+      // Audit log
+      const userId = (user._id as mongoose.Types.ObjectId).toString();
+      await AuditService.log(
+        userId,
+        'User',
+        userId,
+        AuditAction.UPDATE,
+        { action: 'password_reset' }
+      );
+    } else if (companyAdmin) {
+      companyAdmin.passwordHash = passwordHash;
+      companyAdmin.passwordResetToken = undefined;
+      companyAdmin.passwordResetExpires = undefined;
+      await companyAdmin.save();
+
+      // Audit log
+      const adminId = (companyAdmin._id as mongoose.Types.ObjectId).toString();
+      await AuditService.log(
+        adminId,
+        'CompanyAdmin',
+        adminId,
+        AuditAction.UPDATE,
+        { action: 'password_reset' }
+      );
+    }
+
+    logger.info({ hasToken: !!token }, 'Password reset successfully');
 
     return {
       success: true,

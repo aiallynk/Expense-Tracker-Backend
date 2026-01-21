@@ -450,12 +450,23 @@ export class ReportsService {
               action = approverHistory.status?.toLowerCase();
             }
             
-            // Determine step name
-            let stepName = `Level ${level.levelNumber} Approval`;
-            if (level.levelNumber === 1) {
-              stepName = 'Manager Approval';
-            } else if (level.levelNumber === 2) {
-              stepName = 'Business Head Approval';
+            // Use actual role names from approval matrix instead of hardcoded level names
+            // If we have role names, use them; otherwise fallback to level-based naming
+            const roleNameDisplay = roleNames.join(', ') || 'Approver';
+            let stepName;
+            
+            // Prioritize role names from approval matrix
+            if (roleNames.length > 0 && roleNameDisplay !== 'Approver') {
+              // Use the actual role name(s) from the approval matrix
+              stepName = roleNameDisplay;
+            } else {
+              // Fallback to level-based naming only if no role names available
+              stepName = `Level ${level.levelNumber} Approval`;
+              if (level.levelNumber === 1) {
+                stepName = 'Manager Approval';
+              } else if (level.levelNumber === 2) {
+                stepName = 'Business Head Approval';
+              }
             }
             
             // Map action to frontend expected format
@@ -467,7 +478,7 @@ export class ReportsService {
             approvalChain.push({
               level: level.levelNumber,
               step: stepName,
-              role: roleNames.join(', ') || 'Approver',
+              role: roleNameDisplay, // Actual role names from Role model
               roleIds: roleIds,
               name: approverName, // Frontend expects 'name'
               approverName: approverName, // Also include for compatibility

@@ -42,7 +42,14 @@ const envSchema = z.object({
 
   // Resend (optional)
   RESEND_API_KEY: z.string().optional(),
-  RESEND_FROM_EMAIL: z.string().email().optional(),
+  RESEND_FROM_EMAIL: z.preprocess(
+    (val) => (val === '' || val === null || val === undefined ? undefined : val),
+    z.string().email().optional()
+  ),
+  MAIL_FROM: z.preprocess(
+    (val) => (val === '' || val === null || val === undefined ? undefined : val),
+    z.string().email().optional()
+  ),
 
   // Redis
   REDIS_HOST: z.string().default('localhost'),

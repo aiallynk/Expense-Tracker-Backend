@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 import { getMessaging } from '../config/firebase';
 import { getResendClient, getFromEmail } from '../config/resend';
+import { config } from '../config/index';
 import { NotificationToken } from '../models/NotificationToken';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused
@@ -797,24 +798,73 @@ export class NotificationService {
             ${(data as any).type ? `<p style="margin-top: 16px; font-size: 12px; opacity: 0.8;">Type: ${(data as any).type}</p>` : ''}
           `;
           break;
+        case 'password_reset':
+          const resetLink = (data as any).resetLink || '';
+          html = `
+            <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
+              <h2 style="color: #333; margin-bottom: 20px;">Reset Your Password</h2>
+              <p style="color: #666; font-size: 14px; line-height: 1.6; margin-bottom: 20px;">
+                You requested to reset your password for your NexPense account. Click the button below to reset your password.
+              </p>
+              <div style="text-align: center; margin: 30px 0;">
+                <a href="${resetLink}" style="display: inline-block; padding: 12px 30px; background-color: #4F46E5; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: bold; font-size: 16px;">
+                  Reset Password
+                </a>
+              </div>
+              <p style="color: #666; font-size: 14px; line-height: 1.6; margin-top: 20px;">
+                This link will expire in <strong>15 minutes</strong> for security reasons.
+              </p>
+              <p style="color: #999; font-size: 12px; line-height: 1.6; margin-top: 30px;">
+                If you did not request a password reset, please ignore this email. Your password will remain unchanged.
+              </p>
+              <p style="color: #999; font-size: 12px; line-height: 1.6; margin-top: 10px;">
+                If the button doesn't work, copy and paste this link into your browser:<br/>
+                <a href="${resetLink}" style="color: #4F46E5; word-break: break-all;">${resetLink}</a>
+              </p>
+            </div>
+          `;
+          break;
         default:
           html = `<p>${data.subject}</p>`;
       }
 
       const client = getResendClient();
       if (!client) {
-        logger.warn('Resend not configured - email not sent');
+        logger.warn({ 
+          to: data.to, 
+          subject: data.subject,
+          apiKeyConfigured: !!config.resend.apiKey,
+          fromEmail: fromEmail 
+        }, 'Resend not configured - email not sent');
         return;
       }
 
-      await client.emails.send({
+      logger.info({ 
+        to: data.to, 
+        from: fromEmail,
+        subject: data.subject 
+      }, 'Attempting to send email via Resend');
+
+      const result = await client.emails.send({
         from: fromEmail,
         to: data.to,
         subject: data.subject,
         html,
       });
-    } catch (error) {
-      logger.error({ error }, 'Error sending email');
+
+      logger.info({ 
+        to: data.to, 
+        subject: data.subject,
+        result: result.data || result.error 
+      }, 'Email send result from Resend');
+    } catch (error: any) {
+      logger.error({ 
+        error: error.message || error,
+        errorDetails: error,
+        to: data.to,
+        subject: data.subject,
+        stack: error.stack 
+      }, 'Error sending email via Resend');
       // Don't throw - emails are non-critical
     }
   }
