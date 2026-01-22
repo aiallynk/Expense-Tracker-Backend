@@ -218,7 +218,16 @@ export class ReportsService {
     console.log(`[ReportsService] Query result: ${reports.length} reports returned (total: ${total}, requested: ${pageSize})`);
 
     // Get expenses count for each report
-    let reportsWithExpenses: any[] = reports.map((r) => r.toObject());
+    // Format dates as strings to prevent timezone conversion issues
+    let reportsWithExpenses: any[] = reports.map((r) => {
+      const reportObj = r.toObject();
+      return {
+        ...reportObj,
+        // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+        fromDate: r.fromDate ? DateUtils.backendDateToFrontend(r.fromDate) : reportObj.fromDate,
+        toDate: r.toDate ? DateUtils.backendDateToFrontend(r.toDate) : reportObj.toDate,
+      };
+    });
 
     if (reports.length > 0) {
       const reportIds = reports.map((r) => r._id as mongoose.Types.ObjectId);
@@ -236,13 +245,16 @@ export class ReportsService {
         expensesCountMap.set(reportId, item.count);
       });
 
-      // Add expenses count to each report
+      // Add expenses count to each report and format dates as strings
       reportsWithExpenses = reports.map((report) => {
         const reportObj = report.toObject();
         const reportId = (report._id as mongoose.Types.ObjectId).toString();
         const expensesCount = expensesCountMap.get(reportId) || 0;
         return {
           ...reportObj,
+          // Format dates as YYYY-MM-DD strings to prevent timezone conversion issues
+          fromDate: report.fromDate ? DateUtils.backendDateToFrontend(report.fromDate) : reportObj.fromDate,
+          toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
           expensesCount,
           expenses: [], // Empty array for compatibility, but we have the count
         };
@@ -506,6 +518,9 @@ export class ReportsService {
     const reportObj = report.toObject();
     return {
       ...reportObj,
+      // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+      fromDate: report.fromDate ? DateUtils.backendDateToFrontend(report.fromDate) : reportObj.fromDate,
+      toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
       expenses: expensesWithSignedUrls,
       approvers: approvalChain.length > 0 ? approvalChain : reportObj.approvers || [],
     };
@@ -555,11 +570,13 @@ export class ReportsService {
     }
 
     if (data.fromDate !== undefined) {
-      report.fromDate = new Date(data.fromDate);
+      // Use DateUtils to parse date string correctly (handles IST timezone)
+      report.fromDate = DateUtils.frontendDateToBackend(data.fromDate);
     }
 
     if (data.toDate !== undefined) {
-      report.toDate = new Date(data.toDate);
+      // Use DateUtils to parse date string correctly (handles IST timezone)
+      report.toDate = DateUtils.frontendDateToBackend(data.toDate);
     }
 
     // Handle advance cash (report-level)

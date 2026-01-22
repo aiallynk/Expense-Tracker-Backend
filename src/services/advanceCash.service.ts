@@ -59,6 +59,35 @@ export class AdvanceCashService {
       .exec();
   }
 
+  /**
+   * List all advance cash entries for a company (for company admins)
+   */
+  static async listCompanyAdvances(params: {
+    companyId: string;
+    employeeId?: string;
+    status?: string;
+  }): Promise<IAdvanceCash[]> {
+    const query: any = {
+      companyId: new mongoose.Types.ObjectId(params.companyId),
+    };
+
+    if (params.employeeId) {
+      query.employeeId = new mongoose.Types.ObjectId(params.employeeId);
+    }
+
+    if (params.status) {
+      query.status = params.status;
+    }
+
+    return AdvanceCash.find(query)
+      .sort({ status: 1, createdAt: -1 })
+      .populate('employeeId', 'name email')
+      .populate('projectId', 'name code')
+      .populate('costCentreId', 'name code')
+      .populate('createdBy', 'name email')
+      .exec();
+  }
+
   static async getEmployeeAvailableBalance(params: {
     companyId: string;
     employeeId: string;

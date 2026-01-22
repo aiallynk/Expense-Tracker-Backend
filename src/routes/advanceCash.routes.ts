@@ -8,6 +8,7 @@ const router = Router();
 router.use(authMiddleware);
 
 router.get('/balance', AdvanceCashController.getBalance);
+router.get('/company', AdvanceCashController.listCompany);
 router.get('/', AdvanceCashController.listMine);
 router.post('/', AdvanceCashController.create);
 

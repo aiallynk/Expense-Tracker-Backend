@@ -205,8 +205,23 @@ export const updateReportSchema = z.object({
   // Advance cash (report-level)
   advanceAppliedAmount: z.number().min(0).optional(),
   advanceCurrency: z.string().optional(),
-  fromDate: z.string().datetime().optional(),
-  toDate: z.string().datetime().optional(),
+  // Accept YYYY-MM-DD format (calendar dates) or ISO datetime strings
+  fromDate: z.string().refine(
+    (val) => {
+      if (!val) return true; // Optional
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for fromDate' }
+  ).optional(),
+  toDate: z.string().refine(
+    (val) => {
+      if (!val) return true; // Optional
+      const date = new Date(val);
+      return !isNaN(date.getTime());
+    },
+    { message: 'Invalid datetime format for toDate' }
+  ).optional(),
 }).refine((data) => {
   if (data.fromDate && data.toDate) {
     return new Date(data.fromDate) <= new Date(data.toDate);

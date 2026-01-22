@@ -13,6 +13,7 @@ import {
 import { ExportFormat } from '../utils/enums';
 
 import { logger } from '@/config/logger';
+import { DateUtils } from '@/utils/dateUtils';
 // import { ExpenseReportStatus } from '../utils/enums'; // Unused
 
 export class ReportsController {
@@ -42,9 +43,17 @@ export class ReportsController {
       'Report created successfully'
     );
 
+    // Format dates as strings in response to prevent timezone conversion issues
+    const reportObj = report.toObject();
+    const formattedReport = {
+      ...reportObj,
+      fromDate: report.fromDate ? DateUtils.backendDateToFrontend(report.fromDate) : reportObj.fromDate,
+      toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
+    };
+
     res.status(201).json({
       success: true,
-      data: report,
+      data: formattedReport,
     });
   });
 
@@ -90,9 +99,17 @@ export class ReportsController {
       data
     );
 
+    // Format dates as strings in response to prevent timezone conversion issues
+    const reportObj = report.toObject();
+    const formattedReport = {
+      ...reportObj,
+      fromDate: report.fromDate ? DateUtils.backendDateToFrontend(report.fromDate) : reportObj.fromDate,
+      toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
+    };
+
     res.status(200).json({
       success: true,
-      data: report,
+      data: formattedReport,
     });
   });
 

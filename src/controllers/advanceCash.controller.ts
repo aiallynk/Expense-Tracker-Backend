@@ -130,6 +130,40 @@ export class AdvanceCashController {
 
     res.status(201).json({ success: true, data: created });
   });
+
+  /**
+   * List all advance cash entries for a company (company admin only)
+   */
+  static listCompany = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const companyId = await getUserCompanyId(req);
+    const actorRole = req.user?.role;
+
+    if (!companyId) {
+      res.status(400).json({ success: false, message: 'User is not associated with a company', code: 'NO_COMPANY' });
+      return;
+    }
+
+    // Only COMPANY_ADMIN and ADMIN can list all advances for a company
+    if (actorRole !== UserRole.COMPANY_ADMIN && actorRole !== UserRole.ADMIN) {
+      res.status(403).json({
+        success: false,
+        message: 'You do not have permission to list all advance cash entries',
+        code: 'INSUFFICIENT_PERMISSIONS',
+      });
+      return;
+    }
+
+    const employeeId = typeof req.query.employeeId === 'string' ? req.query.employeeId : undefined;
+    const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+
+    const data = await AdvanceCashService.listCompanyAdvances({
+      companyId,
+      employeeId,
+      status,
+    });
+
+    res.status(200).json({ success: true, data });
+  });
 }
 
 

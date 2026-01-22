@@ -249,10 +249,10 @@ export class AdminController {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
 
-    // Only include expenses whose reports are at/after manager or BH approval (final approval)
+    // BUSINESS RULE: Only expenses from FULLY APPROVED reports should be included in dashboard analytics
+    // Exclude: DRAFT, SUBMITTED, PENDING_APPROVAL_L*, CHANGES_REQUESTED, REJECTED
+    // Include ONLY: APPROVED
     const approvedReportStatuses = [
-      ExpenseReportStatus.MANAGER_APPROVED,
-      ExpenseReportStatus.BH_APPROVED,
       ExpenseReportStatus.APPROVED,
     ];
 

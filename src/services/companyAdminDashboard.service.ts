@@ -74,15 +74,11 @@ export class CompanyAdminDashboardService {
     // Build queries
     const reportQuery = { userId: { $in: userIds } };
 
+    // BUSINESS RULE: Only expenses from FULLY APPROVED reports should be included in dashboard analytics
+    // Exclude: DRAFT, SUBMITTED, PENDING_APPROVAL_L*, CHANGES_REQUESTED, REJECTED
+    // Include ONLY: APPROVED
     const approvedReportStatuses = [
-      ExpenseReportStatus.MANAGER_APPROVED,
-      ExpenseReportStatus.BH_APPROVED,
       ExpenseReportStatus.APPROVED,
-      ExpenseReportStatus.PENDING_APPROVAL_L1,
-      ExpenseReportStatus.PENDING_APPROVAL_L2,
-      ExpenseReportStatus.PENDING_APPROVAL_L3,
-      ExpenseReportStatus.PENDING_APPROVAL_L4,
-      ExpenseReportStatus.PENDING_APPROVAL_L5,
     ];
 
     const approvedReports = await ExpenseReport.find({
