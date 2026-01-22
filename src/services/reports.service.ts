@@ -1333,14 +1333,17 @@ export class ReportsService {
     return vouchers.map((v) => ({
       _id: v._id,
       voucherCode: v.voucherCode,
-      totalAmount: v.totalAmount,
-      remainingAmount: v.remainingAmount,
-      usedAmount: v.usedAmount,
+      totalAmount: v.totalAmount ?? v.amount ?? 0,
+      remainingAmount: v.remainingAmount ?? v.balance ?? 0,
+      usedAmount: v.usedAmount ?? 0,
       currency: v.currency,
       status: v.status,
       projectId: v.projectId,
       costCentreId: v.costCentreId,
       createdAt: v.createdAt,
+      // Include legacy fields for backward compatibility
+      amount: v.totalAmount ?? v.amount,
+      balance: v.remainingAmount ?? v.balance,
     }));
   }
 

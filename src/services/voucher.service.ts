@@ -112,11 +112,18 @@ export class VoucherService {
     projectId?: string;
     costCentreId?: string;
   }): Promise<IAdvanceCash[]> {
+    // Build base query - be lenient with status and amount checks
     const query: any = {
       companyId: new mongoose.Types.ObjectId(params.companyId),
       employeeId: new mongoose.Types.ObjectId(params.employeeId),
+      // Check status - include ACTIVE and PARTIAL
       status: { $in: [AdvanceCashStatus.ACTIVE, AdvanceCashStatus.PARTIAL] },
-      remainingAmount: { $gt: 0 },
+      // Handle both new (remainingAmount) and legacy (balance) field names
+      // Show vouchers where either remainingAmount > 0 OR balance > 0
+      $or: [
+        { remainingAmount: { $gt: 0 } },
+        { balance: { $gt: 0 } },
+      ],
     };
 
     // Note: Currency filter is optional - show vouchers of any currency
@@ -125,52 +132,85 @@ export class VoucherService {
     //   query.currency = params.currency.toUpperCase();
     // }
 
-    // Filter by project/cost centre scope (match OR unscoped)
-    const scopeOr: any[] = [];
-    if (params.projectId && mongoose.Types.ObjectId.isValid(params.projectId)) {
-      scopeOr.push({ projectId: new mongoose.Types.ObjectId(params.projectId) });
-    }
-    if (params.costCentreId && mongoose.Types.ObjectId.isValid(params.costCentreId)) {
-      scopeOr.push({ costCentreId: new mongoose.Types.ObjectId(params.costCentreId) });
-    }
-    scopeOr.push({ projectId: { $exists: false }, costCentreId: { $exists: false } });
-    scopeOr.push({ projectId: null, costCentreId: null });
-
-    if (scopeOr.length > 0) {
-      query.$or = scopeOr;
-    }
+    // Note: Project/Cost Centre filtering removed - show ALL user vouchers
+    // Users should be able to use any voucher they have, regardless of project/cost centre matching
+    // Project/cost centre is metadata for tracking, not a restriction on usage
 
     // Exclude vouchers already used in submitted reports (if reportId provided, exclude it)
+    // Note: Vouchers can be used across multiple reports, so we only exclude if already used in OTHER reports
+    let usedVoucherIds: mongoose.Types.ObjectId[] = [];
     if (params.reportId) {
-      const usedVoucherIds = await VoucherUsage.find({
+      // Only exclude vouchers used in OTHER reports (not the current one)
+      const usedInOtherReports = await VoucherUsage.find({
         reportId: { $ne: new mongoose.Types.ObjectId(params.reportId) },
         status: VoucherUsageStatus.APPLIED,
       })
         .distinct('voucherId')
         .exec();
+      
+      usedVoucherIds = usedInOtherReports;
+      
+      logger.info({
+        reportId: params.reportId,
+        usedInOtherReportsCount: usedVoucherIds.length,
+        usedVoucherIds: usedVoucherIds.map(id => id.toString()),
+      }, 'Vouchers used in other reports');
+    }
+    // Note: We don't exclude vouchers used in submitted reports when reportId is provided
+    // because vouchers can be reused across multiple reports
 
-      if (usedVoucherIds.length > 0) {
-        query._id = { $nin: usedVoucherIds };
-      }
-    } else {
-      // If no reportId, exclude all vouchers used in any submitted report
-      const submittedReports = await ExpenseReport.find({
-        status: { $ne: ExpenseReportStatus.DRAFT },
-        advanceCashId: { $exists: true },
-      })
-        .distinct('advanceCashId')
-        .exec();
-
-      if (submittedReports.length > 0) {
-        query._id = { $nin: submittedReports };
-      }
+    if (usedVoucherIds.length > 0) {
+      query._id = { $nin: usedVoucherIds };
     }
 
-    return AdvanceCash.find(query)
+    // Debug logging
+    logger.info({
+      companyId: params.companyId,
+      employeeId: params.employeeId,
+      reportId: params.reportId,
+      query: JSON.stringify(query),
+      usedVoucherIdsCount: usedVoucherIds.length,
+    }, 'Fetching available vouchers');
+
+    // First, let's check all vouchers for this user to debug
+    const allUserVouchers = await AdvanceCash.find({
+      companyId: new mongoose.Types.ObjectId(params.companyId),
+      employeeId: new mongoose.Types.ObjectId(params.employeeId),
+    })
+      .select('_id status remainingAmount balance totalAmount amount')
+      .exec();
+
+    logger.info({
+      allVouchersCount: allUserVouchers.length,
+      allVouchers: allUserVouchers.map(v => ({
+        id: (v._id as mongoose.Types.ObjectId).toString(),
+        status: v.status,
+        remainingAmount: v.remainingAmount,
+        balance: v.balance,
+        totalAmount: v.totalAmount,
+        amount: v.amount,
+      })),
+    }, 'All user vouchers (for debugging)');
+
+    const vouchers = await AdvanceCash.find(query)
       .sort({ createdAt: -1 })
       .populate('projectId', 'name code')
       .populate('costCentreId', 'name code')
       .exec();
+
+    logger.info({
+      voucherCount: vouchers.length,
+      voucherIds: vouchers.map(v => (v._id as mongoose.Types.ObjectId).toString()),
+      voucherDetails: vouchers.map(v => ({
+        id: (v._id as mongoose.Types.ObjectId).toString(),
+        status: v.status,
+        remainingAmount: v.remainingAmount,
+        balance: v.balance,
+        totalAmount: v.totalAmount,
+      })),
+    }, 'Found available vouchers');
+
+    return vouchers;
   }
 
   /**
@@ -183,6 +223,21 @@ export class VoucherService {
     amount: number;
     userId: string;
   }): Promise<IVoucherUsage> {
+    // Validate voucherId format
+    if (!mongoose.Types.ObjectId.isValid(params.voucherId)) {
+      throw new Error(`Invalid voucher ID format: ${params.voucherId}`);
+    }
+    
+    // Validate reportId format
+    if (!mongoose.Types.ObjectId.isValid(params.reportId)) {
+      throw new Error(`Invalid report ID format: ${params.reportId}`);
+    }
+    
+    // Validate userId format
+    if (!mongoose.Types.ObjectId.isValid(params.userId)) {
+      throw new Error(`Invalid user ID format: ${params.userId}`);
+    }
+    
     const session = await mongoose.startSession();
     session.startTransaction();
 
