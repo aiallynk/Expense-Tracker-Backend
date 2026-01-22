@@ -14,6 +14,8 @@ import accountantRoutes from './routes/accountant.routes';
 import adminRoutes from './routes/admin.routes';
 import advanceCashRoutes from './routes/advanceCash.routes';
 import analyticsRoutes from './routes/analytics.routes';
+import voucherRoutes from './routes/voucher.routes';
+import voucherReturnRoutes from './routes/voucherReturn.routes';
 import approvalMatrixRoutes from './routes/approvalMatrix.routes';
 import authRoutes from './routes/auth.routes';
 import bulkUploadRoutes from './routes/bulkUpload.routes';
@@ -186,6 +188,8 @@ export const createApp = (): Express => {
   app.use('/api/v1/categories', categoriesRoutes);
   app.use('/api/v1/cost-centres', costCentresRoutes);
   app.use('/api/v1/advance-cash', advanceCashRoutes);
+  app.use('/api/v1/vouchers', voucherRoutes);
+  app.use('/api/v1/voucher-returns', voucherReturnRoutes);
   app.use('/api/v1/reports', reportsRoutes);
   app.use('/api/v1', expensesRoutes);
   app.use('/api/v1', receiptsRoutes);

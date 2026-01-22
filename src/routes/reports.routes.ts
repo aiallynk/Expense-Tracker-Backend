@@ -30,6 +30,9 @@ router.post(
 router.get('/:id/export/excel', ReportsController.exportExcel);
 router.get('/:id/export/pdf', ReportsController.exportPDF);
 
+// Voucher selection route (must come before /:id to avoid route conflicts)
+router.get('/:id/available-vouchers', ReportsController.getAvailableVouchers);
+
 router.get('/:id', ReportsController.getById);
 router.patch('/:id', validate(updateReportSchema), ReportsController.update);
 router.delete('/:id', ReportsController.delete);

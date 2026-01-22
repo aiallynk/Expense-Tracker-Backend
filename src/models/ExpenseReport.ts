@@ -35,6 +35,8 @@ export interface IExpenseReport extends Document {
   advanceAppliedAmount?: number; // Amount used from the voucher for this report
   advanceCurrency?: string; // Currency of advance application
   advanceAppliedAt?: Date; // When advance was actually applied (on approval)
+  voucherLockedAt?: Date; // Timestamp when voucher was locked to this report
+  voucherLockedBy?: mongoose.Types.ObjectId; // User who locked the voucher
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -153,6 +155,13 @@ const expenseReportSchema = new Schema<IExpenseReport>(
     },
     advanceAppliedAt: {
       type: Date,
+    },
+    voucherLockedAt: {
+      type: Date,
+    },
+    voucherLockedBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
     },
     updatedBy: {
       type: Schema.Types.ObjectId,

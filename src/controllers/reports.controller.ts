@@ -115,8 +115,11 @@ export class ReportsController {
 
   static submit = asyncHandler(async (req: AuthRequest, res: Response) => {
     const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const submitData = req.body.advanceCashId || req.body.advanceAmount 
-      ? { advanceCashId: req.body.advanceCashId, advanceAmount: req.body.advanceAmount }
+    // Support both old field names (advanceCashId, advanceAmount) and new (voucherId, voucherAmount)
+    const voucherId = req.body.voucherId || req.body.advanceCashId;
+    const voucherAmount = req.body.voucherAmount || req.body.advanceAmount;
+    const submitData = voucherId && voucherAmount 
+      ? { advanceCashId: voucherId, advanceAmount: voucherAmount }
       : undefined;
     const report = await ReportsService.submitReport(reportId, req.user!.id, submitData);
 
@@ -127,6 +130,16 @@ export class ReportsController {
         status: report.status,
         approvers: report.approvers,
       },
+    });
+  });
+
+  static getAvailableVouchers = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const vouchers = await ReportsService.getVoucherSelectionForReport(reportId, req.user!.id);
+
+    res.status(200).json({
+      success: true,
+      data: vouchers,
     });
   });
 

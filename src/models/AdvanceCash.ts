@@ -2,26 +2,34 @@ import mongoose, { Document, Schema } from 'mongoose';
 
 export enum AdvanceCashStatus {
   ACTIVE = 'ACTIVE',
-  SETTLED = 'SETTLED',
+  PARTIAL = 'PARTIAL',
+  EXHAUSTED = 'EXHAUSTED',
+  RETURNED = 'RETURNED',
+  SETTLED = 'SETTLED', // Keep for backward compatibility
 }
 
 export interface IAdvanceCash extends Document {
   companyId: mongoose.Types.ObjectId;
   employeeId: mongoose.Types.ObjectId;
-  amount: number;
-  balance: number;
+  totalAmount: number; // Original issued amount
+  remainingAmount: number; // Current available balance (replaces 'balance')
+  usedAmount: number; // Sum of all usages
   currency: string;
   projectId?: mongoose.Types.ObjectId;
   costCentreId?: mongoose.Types.ObjectId;
   status: AdvanceCashStatus;
-  reportId?: mongoose.Types.ObjectId; // Track which report this voucher is assigned to (one voucher per report)
-  usedAmount?: number; // Amount used from this voucher
+  voucherCode?: string; // Optional unique identifier
+  returnRequestId?: mongoose.Types.ObjectId; // Reference to return request if any
   returnedAmount?: number; // Amount returned from this voucher
   returnedBy?: mongoose.Types.ObjectId; // Who returned the remaining amount
   returnedAt?: Date; // When the amount was returned
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
+  // Legacy fields for backward compatibility
+  amount?: number; // Maps to totalAmount
+  balance?: number; // Maps to remainingAmount
+  reportId?: mongoose.Types.ObjectId; // Deprecated - vouchers can be used across multiple reports
 }
 
 const advanceCashSchema = new Schema<IAdvanceCash>(
@@ -38,14 +46,19 @@ const advanceCashSchema = new Schema<IAdvanceCash>(
       required: true,
       index: true,
     },
-    amount: {
+    totalAmount: {
       type: Number,
       required: true,
       min: 0,
     },
-    balance: {
+    remainingAmount: {
       type: Number,
       required: true,
+      min: 0,
+    },
+    usedAmount: {
+      type: Number,
+      default: 0,
       min: 0,
     },
     currency: {
@@ -70,15 +83,15 @@ const advanceCashSchema = new Schema<IAdvanceCash>(
       required: true,
       index: true,
     },
-    reportId: {
-      type: Schema.Types.ObjectId,
-      ref: 'ExpenseReport',
-      index: true,
+    voucherCode: {
+      type: String,
+      trim: true,
+      sparse: true, // Allows null/undefined but enforces uniqueness when present
+      unique: true,
     },
-    usedAmount: {
-      type: Number,
-      default: 0,
-      min: 0,
+    returnRequestId: {
+      type: Schema.Types.ObjectId,
+      ref: 'VoucherReturnRequest',
     },
     returnedAmount: {
       type: Number,
@@ -97,9 +110,49 @@ const advanceCashSchema = new Schema<IAdvanceCash>(
       ref: 'User',
       required: true,
     },
+    // Legacy fields for backward compatibility
+    amount: {
+      type: Number,
+      min: 0,
+    },
+    balance: {
+      type: Number,
+      min: 0,
+    },
+    reportId: {
+      type: Schema.Types.ObjectId,
+      ref: 'ExpenseReport',
+      index: true,
+    },
   },
   { timestamps: true }
 );
+
+// Pre-save hook to sync legacy fields and calculate status
+advanceCashSchema.pre('save', function (next) {
+  // Sync legacy fields for backward compatibility
+  if (this.totalAmount !== undefined && this.amount === undefined) {
+    this.amount = this.totalAmount;
+  }
+  if (this.remainingAmount !== undefined && this.balance === undefined) {
+    this.balance = this.remainingAmount;
+  }
+  
+  // Auto-calculate status based on remainingAmount
+  if (this.remainingAmount !== undefined && this.totalAmount !== undefined) {
+    if (this.status !== AdvanceCashStatus.RETURNED) {
+      if (this.remainingAmount === 0) {
+        this.status = AdvanceCashStatus.EXHAUSTED;
+      } else if (this.remainingAmount < this.totalAmount) {
+        this.status = AdvanceCashStatus.PARTIAL;
+      } else if (this.remainingAmount === this.totalAmount) {
+        this.status = AdvanceCashStatus.ACTIVE;
+      }
+    }
+  }
+  
+  next();
+});
 
 advanceCashSchema.index({ companyId: 1, employeeId: 1, status: 1, createdAt: 1 });
 advanceCashSchema.index({ companyId: 1, status: 1 });

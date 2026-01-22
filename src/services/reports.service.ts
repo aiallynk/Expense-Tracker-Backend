@@ -1112,6 +1112,38 @@ export class ReportsService {
       }
     }
 
+    // Handle voucher application (NEW voucher system)
+    // Voucher can only be applied when report is in DRAFT status
+    // MUST be done BEFORE status change
+    if (data?.advanceCashId && data.advanceAmount && data.advanceAmount > 0) {
+      if (report.status !== ExpenseReportStatus.DRAFT) {
+        throw new Error('Voucher can only be applied to DRAFT reports');
+      }
+
+      try {
+        const { VoucherService } = await import('./voucher.service');
+        await VoucherService.applyVoucherToReport({
+          voucherId: data.advanceCashId,
+          reportId: id,
+          amount: data.advanceAmount,
+          userId,
+        });
+
+        logger.info({
+          reportId: id,
+          voucherId: data.advanceCashId,
+          voucherAmount: data.advanceAmount,
+        }, 'Voucher applied to report via VoucherService');
+      } catch (error: any) {
+        logger.error({
+          error: error.message,
+          reportId: id,
+          voucherId: data.advanceCashId,
+        }, 'Failed to apply voucher to report');
+        throw error; // Re-throw to prevent submission if voucher application fails
+      }
+    }
+
     // Track approvers for audit/logging without relying on a scoped variable
     let approvalInstanceIdForAudit: string | undefined;
 
@@ -1180,49 +1212,6 @@ export class ReportsService {
 
       report.approvers = approvers;
       report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
-    }
-
-    // Handle advance cash voucher assignment (one voucher per report)
-    if (data?.advanceCashId && data.advanceAmount && data.advanceAmount > 0) {
-      const { AdvanceCash } = await import('../models/AdvanceCash');
-      const advanceCashId = new mongoose.Types.ObjectId(data.advanceCashId);
-      const advanceCash = await AdvanceCash.findById(advanceCashId).exec();
-      
-      if (!advanceCash) {
-        throw new Error('Advance cash voucher not found');
-      }
-      
-      // Verify voucher belongs to the employee
-      if (advanceCash.employeeId.toString() !== userId) {
-        throw new Error('Access denied: This voucher does not belong to you');
-      }
-      
-      // Verify voucher is not already assigned to another report
-      if (advanceCash.reportId && advanceCash.reportId.toString() !== id) {
-        throw new Error('This voucher is already assigned to another report');
-      }
-      
-      // Verify amount doesn't exceed balance
-      if (data.advanceAmount > advanceCash.balance) {
-        throw new Error(`Amount exceeds voucher balance. Available: ${advanceCash.balance} ${advanceCash.currency}`);
-      }
-      
-      // Assign voucher to report
-      advanceCash.reportId = new mongoose.Types.ObjectId(id);
-      advanceCash.usedAmount = data.advanceAmount;
-      advanceCash.balance = advanceCash.balance - data.advanceAmount;
-      await advanceCash.save();
-      
-      // Update report with voucher info
-      report.advanceCashId = advanceCashId;
-      report.advanceAppliedAmount = data.advanceAmount;
-      report.advanceCurrency = advanceCash.currency;
-      
-      logger.info({
-        reportId: id,
-        advanceCashId: data.advanceCashId,
-        advanceAmount: data.advanceAmount,
-      }, 'Advance cash voucher assigned to report');
     }
 
     report.submittedAt = new Date();
@@ -1303,6 +1292,56 @@ export class ReportsService {
     }
 
     return saved;
+  }
+
+  /**
+   * Get available vouchers for a report (only when report is DRAFT)
+   */
+  static async getVoucherSelectionForReport(reportId: string, userId: string): Promise<any[]> {
+    const report = await ExpenseReport.findById(reportId).exec();
+
+    if (!report) {
+      throw new Error('Report not found');
+    }
+
+    if (report.userId.toString() !== userId) {
+      throw new Error('Access denied');
+    }
+
+    // Only allow voucher selection when report is DRAFT
+    if (report.status !== ExpenseReportStatus.DRAFT) {
+      throw new Error('Vouchers can only be selected for DRAFT reports');
+    }
+
+    // Get user's company
+    const user = await User.findById(userId).select('companyId').exec();
+    if (!user || !user.companyId) {
+      throw new Error('User company not found');
+    }
+
+    // Get available vouchers
+    const { VoucherService } = await import('./voucher.service');
+    const vouchers = await VoucherService.getAvailableVouchers({
+      companyId: user.companyId.toString(),
+      employeeId: userId,
+      reportId,
+      currency: report.currency,
+      projectId: report.projectId?.toString(),
+      costCentreId: report.costCentreId?.toString(),
+    });
+
+    return vouchers.map((v) => ({
+      _id: v._id,
+      voucherCode: v.voucherCode,
+      totalAmount: v.totalAmount,
+      remainingAmount: v.remainingAmount,
+      usedAmount: v.usedAmount,
+      currency: v.currency,
+      status: v.status,
+      projectId: v.projectId,
+      costCentreId: v.costCentreId,
+      createdAt: v.createdAt,
+    }));
   }
 
   static async handleReportAction(
