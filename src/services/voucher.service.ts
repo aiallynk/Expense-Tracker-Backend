@@ -119,9 +119,11 @@ export class VoucherService {
       remainingAmount: { $gt: 0 },
     };
 
-    if (params.currency) {
-      query.currency = params.currency.toUpperCase();
-    }
+    // Note: Currency filter is optional - show vouchers of any currency
+    // Users can use vouchers regardless of report currency (conversion handled separately)
+    // if (params.currency) {
+    //   query.currency = params.currency.toUpperCase();
+    // }
 
     // Filter by project/cost centre scope (match OR unscoped)
     const scopeOr: any[] = [];
