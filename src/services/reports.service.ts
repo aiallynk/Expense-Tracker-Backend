@@ -395,7 +395,13 @@ export class ReportsService {
     const expensesWithSignedUrls = await Promise.all(
       expenses.map(async (expense: any) => {
         const expenseObj = expense.toObject();
-        if (expenseObj.receiptPrimaryId && expenseObj.receiptPrimaryId.storageKey) {
+        // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+        const formattedExpense = {
+          ...expenseObj,
+          expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
+          invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
+        };
+        if (formattedExpense.receiptPrimaryId && formattedExpense.receiptPrimaryId.storageKey) {
           try {
             const signedUrl = await getPresignedDownloadUrl(
               'receipts',
@@ -412,7 +418,7 @@ export class ReportsService {
             // Continue without signed URL - frontend will handle gracefully
           }
         }
-        return expenseObj;
+        return formattedExpense;
       })
     );
 

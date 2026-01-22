@@ -181,7 +181,13 @@ export class ExpensesService {
       logger.error({ error }, 'Error emitting company admin dashboard update');
     }
 
-    return saved;
+    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+    const savedObj = saved.toObject();
+    return {
+      ...savedObj,
+      expenseDate: saved.expenseDate ? DateUtils.backendDateToFrontend(saved.expenseDate) : savedObj.expenseDate,
+      invoiceDate: saved.invoiceDate ? DateUtils.backendDateToFrontend(saved.invoiceDate) : savedObj.invoiceDate,
+    } as any;
   }
 
   static async updateExpense(
@@ -384,7 +390,13 @@ export class ExpensesService {
       }
     }
 
-    return saved;
+    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+    const savedObj = saved.toObject();
+    return {
+      ...savedObj,
+      expenseDate: saved.expenseDate ? DateUtils.backendDateToFrontend(saved.expenseDate) : savedObj.expenseDate,
+      invoiceDate: saved.invoiceDate ? DateUtils.backendDateToFrontend(saved.invoiceDate) : savedObj.invoiceDate,
+    } as any;
   }
 
   static async getExpenseById(
@@ -418,7 +430,13 @@ export class ExpensesService {
       throw new Error('Access denied');
     }
 
-    return expense;
+    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+    const expenseObj = expense.toObject();
+    return {
+      ...expenseObj,
+      expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
+      invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
+    } as any;
   }
 
   static async listExpensesForUser(
@@ -503,7 +521,17 @@ export class ExpensesService {
 
     console.log(`[ExpensesService] Query result: ${expenses.length} expenses returned (total: ${total}, requested: ${pageSize})`);
 
-    return createPaginatedResult(expenses, total, page, pageSize);
+    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+    const formattedExpenses = expenses.map((expense) => {
+      const expenseObj = expense.toObject();
+      return {
+        ...expenseObj,
+        expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
+        invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
+      };
+    });
+
+    return createPaginatedResult(formattedExpenses, total, page, pageSize);
   }
 
   static async adminListExpenses(filters: ExpenseFiltersDto, req: AuthRequest): Promise<any> {
@@ -601,7 +629,17 @@ export class ExpensesService {
       Expense.countDocuments(query).exec(),
     ]);
 
-    return createPaginatedResult(expenses, total, page, pageSize);
+    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+    const formattedExpenses = expenses.map((expense) => {
+      const expenseObj = expense.toObject();
+      return {
+        ...expenseObj,
+        expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
+        invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
+      };
+    });
+
+    return createPaginatedResult(formattedExpenses, total, page, pageSize);
   }
 
   static async adminChangeExpenseStatus(
@@ -630,7 +668,13 @@ export class ExpensesService {
       { status: newStatus }
     );
 
-    return saved;
+    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+    const savedObj = saved.toObject();
+    return {
+      ...savedObj,
+      expenseDate: saved.expenseDate ? DateUtils.backendDateToFrontend(saved.expenseDate) : savedObj.expenseDate,
+      invoiceDate: saved.invoiceDate ? DateUtils.backendDateToFrontend(saved.invoiceDate) : savedObj.invoiceDate,
+    } as any;
   }
 
   static async deleteExpense(
