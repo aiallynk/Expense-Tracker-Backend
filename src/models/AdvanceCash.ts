@@ -14,6 +14,11 @@ export interface IAdvanceCash extends Document {
   projectId?: mongoose.Types.ObjectId;
   costCentreId?: mongoose.Types.ObjectId;
   status: AdvanceCashStatus;
+  reportId?: mongoose.Types.ObjectId; // Track which report this voucher is assigned to (one voucher per report)
+  usedAmount?: number; // Amount used from this voucher
+  returnedAmount?: number; // Amount returned from this voucher
+  returnedBy?: mongoose.Types.ObjectId; // Who returned the remaining amount
+  returnedAt?: Date; // When the amount was returned
   createdBy: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -64,6 +69,28 @@ const advanceCashSchema = new Schema<IAdvanceCash>(
       default: AdvanceCashStatus.ACTIVE,
       required: true,
       index: true,
+    },
+    reportId: {
+      type: Schema.Types.ObjectId,
+      ref: 'ExpenseReport',
+      index: true,
+    },
+    usedAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    returnedAmount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+    returnedBy: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+    },
+    returnedAt: {
+      type: Date,
     },
     createdBy: {
       type: Schema.Types.ObjectId,

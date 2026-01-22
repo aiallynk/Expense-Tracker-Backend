@@ -30,8 +30,9 @@ export interface IExpenseReport extends Document {
   submittedAt?: Date;
   approvedAt?: Date;
   rejectedAt?: Date;
-  // Advance cash (report-level)
-  advanceAppliedAmount?: number; // Total advance applied to this report (user-specified)
+  // Advance cash (report-level) - voucher-based
+  advanceCashId?: mongoose.Types.ObjectId; // Reference to the advance cash voucher used for this report
+  advanceAppliedAmount?: number; // Amount used from the voucher for this report
   advanceCurrency?: string; // Currency of advance application
   advanceAppliedAt?: Date; // When advance was actually applied (on approval)
   updatedBy?: mongoose.Types.ObjectId;
@@ -136,6 +137,10 @@ const expenseReportSchema = new Schema<IExpenseReport>(
     },
     rejectedAt: {
       type: Date,
+    },
+    advanceCashId: {
+      type: Schema.Types.ObjectId,
+      ref: 'AdvanceCash',
     },
     advanceAppliedAmount: {
       type: Number,

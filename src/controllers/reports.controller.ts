@@ -115,7 +115,10 @@ export class ReportsController {
 
   static submit = asyncHandler(async (req: AuthRequest, res: Response) => {
     const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const report = await ReportsService.submitReport(reportId, req.user!.id);
+    const submitData = req.body.advanceCashId || req.body.advanceAmount 
+      ? { advanceCashId: req.body.advanceCashId, advanceAmount: req.body.advanceAmount }
+      : undefined;
+    const report = await ReportsService.submitReport(reportId, req.user!.id, submitData);
 
     res.status(200).json({
       success: true,

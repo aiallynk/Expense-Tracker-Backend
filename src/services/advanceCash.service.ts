@@ -56,6 +56,63 @@ export class AdvanceCashService {
       .populate('projectId', 'name code')
       .populate('costCentreId', 'name code')
       .populate('createdBy', 'name email')
+      .populate('reportId', 'name status')
+      .exec();
+  }
+
+  /**
+   * Get available vouchers (not assigned to any report) for an employee
+   */
+  static async getAvailableVouchers(params: {
+    companyId: string;
+    employeeId: string;
+    currency?: string;
+    projectId?: string;
+    costCentreId?: string;
+  }): Promise<IAdvanceCash[]> {
+    const query: any = {
+      companyId: new mongoose.Types.ObjectId(params.companyId),
+      employeeId: new mongoose.Types.ObjectId(params.employeeId),
+      status: AdvanceCashStatus.ACTIVE,
+      balance: { $gt: 0 },
+      $or: [
+        { reportId: { $exists: false } },
+        { reportId: null },
+      ],
+    };
+
+    if (params.currency) {
+      query.currency = params.currency.toUpperCase();
+    }
+
+    // Filter by project/cost centre scope (match OR unscoped)
+    const scopeOr: any[] = [];
+    if (params.projectId && mongoose.Types.ObjectId.isValid(params.projectId)) {
+      scopeOr.push({ projectId: new mongoose.Types.ObjectId(params.projectId) });
+    }
+    if (params.costCentreId && mongoose.Types.ObjectId.isValid(params.costCentreId)) {
+      scopeOr.push({ costCentreId: new mongoose.Types.ObjectId(params.costCentreId) });
+    }
+    scopeOr.push({ projectId: { $exists: false }, costCentreId: { $exists: false } });
+    scopeOr.push({ projectId: null, costCentreId: null });
+
+    if (scopeOr.length > 0) {
+      query.$and = [
+        { $or: scopeOr },
+        {
+          $or: [
+            { reportId: { $exists: false } },
+            { reportId: null },
+          ],
+        },
+      ];
+      delete query.$or;
+    }
+
+    return AdvanceCash.find(query)
+      .sort({ createdAt: -1 })
+      .populate('projectId', 'name code')
+      .populate('costCentreId', 'name code')
       .exec();
   }
 

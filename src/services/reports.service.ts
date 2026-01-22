@@ -1050,7 +1050,7 @@ export class ReportsService {
     return approver;
   }
 
-  static async submitReport(id: string, userId: string): Promise<IExpenseReport> {
+  static async submitReport(id: string, userId: string, data?: { advanceCashId?: string; advanceAmount?: number }): Promise<IExpenseReport> {
     const report = await ExpenseReport.findById(id);
 
     if (!report) {
@@ -1180,6 +1180,49 @@ export class ReportsService {
 
       report.approvers = approvers;
       report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
+    }
+
+    // Handle advance cash voucher assignment (one voucher per report)
+    if (data?.advanceCashId && data.advanceAmount && data.advanceAmount > 0) {
+      const { AdvanceCash } = await import('../models/AdvanceCash');
+      const advanceCashId = new mongoose.Types.ObjectId(data.advanceCashId);
+      const advanceCash = await AdvanceCash.findById(advanceCashId).exec();
+      
+      if (!advanceCash) {
+        throw new Error('Advance cash voucher not found');
+      }
+      
+      // Verify voucher belongs to the employee
+      if (advanceCash.employeeId.toString() !== userId) {
+        throw new Error('Access denied: This voucher does not belong to you');
+      }
+      
+      // Verify voucher is not already assigned to another report
+      if (advanceCash.reportId && advanceCash.reportId.toString() !== id) {
+        throw new Error('This voucher is already assigned to another report');
+      }
+      
+      // Verify amount doesn't exceed balance
+      if (data.advanceAmount > advanceCash.balance) {
+        throw new Error(`Amount exceeds voucher balance. Available: ${advanceCash.balance} ${advanceCash.currency}`);
+      }
+      
+      // Assign voucher to report
+      advanceCash.reportId = new mongoose.Types.ObjectId(id);
+      advanceCash.usedAmount = data.advanceAmount;
+      advanceCash.balance = advanceCash.balance - data.advanceAmount;
+      await advanceCash.save();
+      
+      // Update report with voucher info
+      report.advanceCashId = advanceCashId;
+      report.advanceAppliedAmount = data.advanceAmount;
+      report.advanceCurrency = advanceCash.currency;
+      
+      logger.info({
+        reportId: id,
+        advanceCashId: data.advanceCashId,
+        advanceAmount: data.advanceAmount,
+      }, 'Advance cash voucher assigned to report');
     }
 
     report.submittedAt = new Date();

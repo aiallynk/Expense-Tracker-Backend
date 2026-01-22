@@ -48,6 +48,29 @@ export class AdvanceCashController {
     res.status(200).json({ success: true, data });
   });
 
+  static getAvailableVouchers = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const companyId = await getUserCompanyId(req);
+    const userId = req.user?.id;
+
+    if (!companyId || !userId) {
+      res.status(200).json({ success: true, data: [] });
+      return;
+    }
+
+    const projectId = typeof req.query.projectId === 'string' ? req.query.projectId : undefined;
+    const costCentreId = typeof req.query.costCentreId === 'string' ? req.query.costCentreId : undefined;
+    const currency = typeof req.query.currency === 'string' ? req.query.currency : undefined;
+
+    const data = await AdvanceCashService.getAvailableVouchers({
+      companyId,
+      employeeId: userId,
+      currency,
+      projectId,
+      costCentreId,
+    });
+    res.status(200).json({ success: true, data });
+  });
+
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
     const companyId = await getUserCompanyId(req);
     const actorId = req.user?.id;

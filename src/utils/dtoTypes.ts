@@ -232,6 +232,11 @@ export const updateReportSchema = z.object({
   path: ['toDate'],
 });
 
+export const submitReportSchema = z.object({
+  advanceCashId: z.string().optional(), // Voucher ID to use for this report
+  advanceAmount: z.number().min(0).optional(), // Amount to use from the voucher
+});
+
 export const reportActionSchema = z.object({
   action: z.enum(['approve', 'reject', 'request_changes']),
   comment: z.string().optional(),
