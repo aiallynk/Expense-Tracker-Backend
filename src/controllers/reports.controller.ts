@@ -178,7 +178,7 @@ export class ReportsController {
     try {
       const report = await ReportsService.submitReport(reportId, req.user!.id, submitData);
 
-      res.status(200).json({
+      return res.status(200).json({
         success: true,
         data: {
           reportId: (report._id as any).toString(),
