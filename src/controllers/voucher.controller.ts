@@ -80,16 +80,22 @@ export class VoucherController {
     const employeeId = typeof req.query.employeeId === 'string' ? req.query.employeeId : undefined;
     const status = typeof req.query.status === 'string' ? req.query.status : undefined;
 
-    // Admins can list all vouchers, users can only see their own
-    const targetEmployeeId = actorRole === UserRole.COMPANY_ADMIN || actorRole === UserRole.ADMIN
-      ? (employeeId || actorId)
-      : actorId;
-
     const { AdvanceCash } = await import('../models/AdvanceCash');
     const query: any = {
       companyId: companyId,
-      employeeId: targetEmployeeId,
     };
+
+    // Admins can list all vouchers (if no employeeId filter), users can only see their own
+    if (actorRole === UserRole.COMPANY_ADMIN || actorRole === UserRole.ADMIN) {
+      // If employeeId is provided, filter by it; otherwise show all vouchers in company
+      if (employeeId) {
+        query.employeeId = employeeId;
+      }
+      // If no employeeId, don't add employeeId filter - show all vouchers
+    } else {
+      // Regular users can only see their own vouchers
+      query.employeeId = actorId;
+    }
 
     if (status) {
       query.status = status;

@@ -813,14 +813,21 @@ export class NotificationService {
           `;
           break;
         case 'approval_required':
+          const approvalData = data as any;
+          const requestType = approvalData.requestType || 'Request';
+          const requestName = approvalData.requestName || 'Unnamed Request';
+          const requesterName = approvalData.requesterName || 'An employee';
+          const roleNames = approvalData.roleNames || 'N/A';
+          const level = approvalData.level ? `Level ${approvalData.level}` : 'N/A';
+          
           html = `
             <h2>New Approval Required</h2>
-            <p>A new ${(data as any).requestType || 'request'} requires your approval:</p>
+            <p>A new ${requestType} requires your approval:</p>
             <ul>
-              <li><strong>Request:</strong> ${(data as any).requestName}</li>
-              <li><strong>Submitted by:</strong> ${(data as any).requesterName}</li>
-              <li><strong>Your Role(s):</strong> ${(data as any).roleNames}</li>
-              <li><strong>Approval Level:</strong> ${(data as any).level || 'N/A'}</li>
+              <li><strong>Request:</strong> ${requestName}</li>
+              <li><strong>Submitted by:</strong> ${requesterName}</li>
+              <li><strong>Your Role(s):</strong> ${roleNames}</li>
+              <li><strong>Approval Level:</strong> ${level}</li>
             </ul>
             <p>Please review and approve or reject this request in your Pending Approvals inbox.</p>
           `;

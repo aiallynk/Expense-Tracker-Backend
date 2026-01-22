@@ -58,6 +58,7 @@ export class ApprovalMatrixNotificationService {
                     companyId: approvalInstance.companyId,
                 })
                     .select('_id email name roles')
+                    .populate('roles', 'name')
                     .exec();
             } else {
                 // Old format: find users with the specified roles
@@ -67,6 +68,7 @@ export class ApprovalMatrixNotificationService {
                     companyId: approvalInstance.companyId,
                 })
                     .select('_id email name roles')
+                    .populate('roles', 'name')
                     .exec();
             }
 
@@ -85,7 +87,41 @@ export class ApprovalMatrixNotificationService {
             }, `Found ${usersToNotify.length} users with required approval roles`);
 
             // Get approver names for display
-            const approverNames = usersToNotify.map(u => u.name).join(', ');
+            const approverNames = usersToNotify.map(u => u.name || u.email || 'Unknown').join(', ');
+
+            // Get role names for email display
+            let roleNames = 'N/A';
+            if (!isUserBasedApproval && currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
+                // For role-based approval, get role names
+                const { Role } = await import('../models/Role');
+                const roles = await Role.find({
+                    _id: { $in: currentLevelConfig.approverRoleIds },
+                    companyId: approvalInstance.companyId,
+                })
+                    .select('name')
+                    .exec();
+                roleNames = roles.map(r => r.name).join(', ') || 'N/A';
+            } else if (isUserBasedApproval) {
+                // For user-based approval, get the user's roles
+                const { Role } = await import('../models/Role');
+                const allUserRoleIds = new Set<string>();
+                usersToNotify.forEach((u: any) => {
+                    if (u.roles && Array.isArray(u.roles)) {
+                        u.roles.forEach((roleId: any) => {
+                            allUserRoleIds.add(roleId.toString());
+                        });
+                    }
+                });
+                if (allUserRoleIds.size > 0) {
+                    const roles = await Role.find({
+                        _id: { $in: Array.from(allUserRoleIds) },
+                        companyId: approvalInstance.companyId,
+                    })
+                        .select('name')
+                        .exec();
+                    roleNames = roles.map(r => r.name).join(', ') || 'N/A';
+                }
+            }
 
             // Prepare notification payload
             const requestType = requestData.name ? 'Expense Report' : 'Request';
@@ -148,15 +184,26 @@ export class ApprovalMatrixNotificationService {
                             subject: `New Approval Required: ${requestName}`,
                             template: 'approval_required',
                             data: {
-                                requestType,
-                                requestName,
-                                requesterName,
-                                level: approvalInstance.currentLevel,
-                                approverNames,
+                                requestType: requestType || 'Request',
+                                requestName: requestName || 'Unnamed Request',
+                                requesterName: requesterName || 'An employee',
+                                roleNames: roleNames || 'N/A',
+                                level: approvalInstance.currentLevel || 'N/A',
+                                approverNames: approverNames || 'N/A',
                                 instanceId: approvalInstance._id.toString(),
                             },
                         });
-                        logger.debug({ userId: user._id.toString(), email: user.email }, '✅ Email notification sent');
+                        logger.debug({ 
+                            userId: user._id.toString(), 
+                            email: user.email,
+                            data: {
+                                requestType,
+                                requestName,
+                                requesterName,
+                                roleNames,
+                                level: approvalInstance.currentLevel,
+                            }
+                        }, '✅ Email notification sent');
                     }
                 } catch (error: any) {
                     logger.error({

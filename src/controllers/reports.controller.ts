@@ -178,7 +178,7 @@ export class ReportsController {
     try {
       const report = await ReportsService.submitReport(reportId, req.user!.id, submitData);
 
-      return res.status(200).json({
+      res.status(200).json({
         success: true,
         data: {
           reportId: (report._id as any).toString(),
@@ -193,6 +193,7 @@ export class ReportsController {
         reportId,
         userId: req.user!.id,
         submitData,
+        body: req.body,
       }, 'Error in submitReport service');
       
       // Re-throw to let asyncHandler handle it, but ensure error message is clear
