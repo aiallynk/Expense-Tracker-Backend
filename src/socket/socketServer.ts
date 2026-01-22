@@ -5,8 +5,7 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 
 import { config } from '../config/index';
 import { UserRole } from '../utils/enums';
-
-import { logger } from '@/config/logger';
+import { logger } from '../config/logger';
 
 interface AuthenticatedSocket extends Socket {
   user?: {

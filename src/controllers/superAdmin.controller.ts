@@ -1407,7 +1407,7 @@ export class SuperAdminController {
   // Update Company
   static updateCompany = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { name, location, type, status, plan, domain } = req.body;
-    const companyId = req.params.id;
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
 
     const company = await Company.findById(companyId);
 

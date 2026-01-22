@@ -1,6 +1,5 @@
 import { getIO, emitToSuperAdmin } from './socketServer';
-
-import { logger } from '@/config/logger';
+import { logger } from '../config/logger';
 
 // Real-time event types for super admin
 export enum SuperAdminEvent {

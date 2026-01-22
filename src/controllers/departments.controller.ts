@@ -180,8 +180,9 @@ export class DepartmentsController {
         ...(data.status && { status: data.status as DepartmentStatus }),
         ...(data.headId && { headId: data.headId }),
       };
+      const departmentId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
       const department = await DepartmentsService.updateDepartment(
-        req.params.id,
+        departmentId,
         companyId,
         updateData
       );
