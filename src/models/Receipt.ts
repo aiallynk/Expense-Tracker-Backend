@@ -1,5 +1,7 @@
 import mongoose, { Document, Schema } from 'mongoose';
 
+import { ReceiptStatus, ReceiptFailureReason } from '../utils/enums';
+
 export interface IReceipt extends Document {
   expenseId?: mongoose.Types.ObjectId;
   storageKey: string;
@@ -10,6 +12,13 @@ export interface IReceipt extends Document {
   ocrJobId?: mongoose.Types.ObjectId;
   parsedData?: Record<string, any>;
   uploadConfirmed: boolean;
+  status: ReceiptStatus;
+  failureReason?: ReceiptFailureReason;
+  uploadTimeMs?: number;
+  ocrTimeMs?: number;
+  queueWaitTimeMs?: number;
+  openaiTimeMs?: number;
+  totalPipelineMs?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,6 +61,36 @@ const receiptSchema = new Schema<IReceipt>(
       default: false,
       required: true,
     },
+    status: {
+      type: String,
+      enum: Object.values(ReceiptStatus),
+      default: ReceiptStatus.PENDING,
+      required: true,
+    },
+    failureReason: {
+      type: String,
+      enum: Object.values(ReceiptFailureReason),
+    },
+    uploadTimeMs: {
+      type: Number,
+      min: 0,
+    },
+    ocrTimeMs: {
+      type: Number,
+      min: 0,
+    },
+    queueWaitTimeMs: {
+      type: Number,
+      min: 0,
+    },
+    openaiTimeMs: {
+      type: Number,
+      min: 0,
+    },
+    totalPipelineMs: {
+      type: Number,
+      min: 0,
+    },
   },
   {
     timestamps: true,
@@ -61,6 +100,7 @@ const receiptSchema = new Schema<IReceipt>(
 // Indexes
 receiptSchema.index({ expenseId: 1 });
 receiptSchema.index({ ocrJobId: 1 });
+receiptSchema.index({ status: 1 });
 
 export const Receipt = mongoose.model<IReceipt>('Receipt', receiptSchema);
 

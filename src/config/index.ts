@@ -31,7 +31,7 @@ export const config = {
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY || '',
-    modelVision: process.env.OPENAI_MODEL_VISION || 'gpt-4o',
+    modelVision: process.env.OPENAI_MODEL_VISION || 'gpt-4o-mini',
     baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
   },
   firebase: {
@@ -59,11 +59,22 @@ export const config = {
   ocr: {
     disableOcr: process.env.DISABLE_OCR === 'true',
     queueName: 'ocr-jobs',
-    // Increased default concurrency for high-volume processing
-    // Supports 100K+ users with multiple OCR workers
-    concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '20', 10), // Increased from 3 to 20
-    // Demo mode: concurrency = 1 for stable processing
-    demoConcurrency: process.env.DEMO_MODE === 'true' ? 1 : parseInt(process.env.OCR_WORKER_CONCURRENCY || '20', 10),
+    // Global concurrency limit: max 20 concurrent OCR jobs across all users
+    concurrency: parseInt(process.env.OCR_CONCURRENCY || '20', 10),
+    // Per-user concurrency limit: max 3 concurrent OCR jobs per user
+    perUserConcurrency: parseInt(process.env.OCR_PER_USER_CONCURRENCY || '3', 10),
+    // Global throttling limit: max concurrent OCR jobs globally (from env)
+    maxGlobalOcr: parseInt(process.env.MAX_GLOBAL_OCR || process.env.OCR_CONCURRENCY || '20', 10),
+    // Per-user throttling limit: max concurrent OCR jobs per user (from env)
+    maxPerUserOcr: parseInt(process.env.MAX_PER_USER_OCR || process.env.OCR_PER_USER_CONCURRENCY || '3', 10),
+    // Single retry on failure (manual retry via UI, not automatic)
+    retry: 1,
+    // 30 second timeout per receipt
+    timeout: 30000,
+    // OCR timeout in milliseconds (from env, defaults to 30s)
+    timeoutMs: parseInt(process.env.OCR_TIMEOUT_MS || '30000', 10),
+    // Demo mode: silently ignore OCR failures
+    demoMode: process.env.OCR_DEMO_MODE === 'true',
   },
   ai: {
     disableCategoryMatching: process.env.DISABLE_AI_CATEGORY_MATCHING === 'true',

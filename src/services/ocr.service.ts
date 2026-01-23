@@ -1,18 +1,18 @@
-import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { HeadObjectCommand } from '@aws-sdk/client-s3';
 import mongoose from 'mongoose';
 
-import { s3Client, getS3Bucket } from '../config/aws';
+import { getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
 import { openaiClient, getVisionModel } from '../config/openai';
-import { Expense } from '../models/Expense';
 import { OcrJob, IOcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
 import { OcrJobStatus } from '../utils/enums';
 import { ocrQueue } from '../utils/inProcessQueue';
+import { getPresignedDownloadUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
-import { DateUtils } from '@/utils/dateUtils';
-import { CategoryMatchingService } from './categoryMatching.service';
+import { ReceiptStatus, ReceiptFailureReason } from '../utils/enums';
+import { emitReceiptProcessed, emitReceiptProcessing } from '../socket/realtimeEvents';
 
 export interface OcrResult {
   vendor?: string;
@@ -31,10 +31,23 @@ export class OcrService {
    * Returns job ID immediately
    */
   static async enqueueOcrJob(receiptId: string): Promise<string> {
-    const receipt = await Receipt.findById(receiptId);
+    const receipt = await Receipt.findById(receiptId).populate({
+      path: 'expenseId',
+      populate: { path: 'reportId' },
+    });
 
     if (!receipt) {
       throw new Error('Receipt not found');
+    }
+
+    // Extract userId from receipt (via expense → report → userId)
+    let userId: string | undefined;
+    if (receipt.expenseId) {
+      const expense = receipt.expenseId as any;
+      const report = expense.reportId as any;
+      if (report && report.userId) {
+        userId = report.userId.toString();
+      }
     }
 
     // Check if OCR is disabled
@@ -66,17 +79,31 @@ export class OcrService {
 
     const jobId = (saved._id as mongoose.Types.ObjectId).toString();
 
-    // Enqueue job to in-process queue
+    // Enqueue job to p-queue (non-blocking, processes automatically)
     try {
-      ocrQueue.enqueue({
-        jobId,
-        receiptId,
-        createdAt: new Date(),
-      });
+      const queueResult = await ocrQueue.add(
+        {
+          jobId,
+          receiptId,
+          userId,
+          createdAt: new Date(),
+        },
+        async (job) => {
+          // Processor function - called by p-queue when job is ready
+          await OcrService.processOcrJob(job.jobId);
+        }
+      );
+      
+      // If job is queued (per-user limit exceeded), emit socket event
+      if (queueResult.queued && userId && queueResult.position) {
+        // Emit queued event to frontend
+        const { emitReceiptQueued } = await import('../socket/realtimeEvents');
+        emitReceiptQueued(userId, receiptId, queueResult.position);
+      }
     } catch (error: any) {
-      // If queue is full, mark job as failed
+      // If queue is full or timeout, mark job as failed
       ocrJob.status = OcrJobStatus.FAILED;
-      ocrJob.error = error.message || 'Queue is full';
+      ocrJob.error = error.message || 'Queue error';
       await ocrJob.save();
       throw error;
     }
@@ -142,11 +169,51 @@ export class OcrService {
       throw new Error('OCR job not found');
     }
 
+    const ocrStartTime = Date.now();
     job.status = OcrJobStatus.PROCESSING;
     await job.save();
 
+    // Get receipt populated data from job (declared early for use throughout function)
+    const receiptPopulated = job.receiptId as any;
+
+    // Get receipt and update status to PROCESSING
+    const receiptDoc = await Receipt.findById(job.receiptId).populate({
+      path: 'expenseId',
+      populate: { path: 'reportId' },
+    });
+    
+    let userId: string | null = null;
+    let receiptIdStr: string | null = null;
+    
+    if (receiptDoc) {
+      receiptDoc.status = ReceiptStatus.PROCESSING;
+      await receiptDoc.save();
+      
+      receiptIdStr = (receiptDoc._id as mongoose.Types.ObjectId).toString();
+      
+      // Minimal log: OCR_STARTED
+      logger.info({ receiptId: receiptIdStr }, 'OCR_STARTED');
+      
+      // Get userId for socket emission
+      if (receiptDoc.expenseId) {
+        const expense = receiptDoc.expenseId as any;
+        const report = expense.reportId as any;
+        if (report && report.userId) {
+          userId = report.userId.toString();
+        }
+      }
+      
+      // Emit processing event when OCR job starts
+      if (userId && receiptIdStr) {
+        emitReceiptProcessing(userId, receiptIdStr);
+      }
+    } else {
+      // Fallback: get receiptId from populated job
+      receiptIdStr = receiptPopulated?._id?.toString() || job.receiptId?.toString() || '';
+      logger.info({ receiptId: receiptIdStr }, 'OCR_STARTED');
+    }
+
     try {
-      const receiptPopulated = job.receiptId as any;
       
       if (!receiptPopulated) {
         throw new Error('Receipt not found for OCR job');
@@ -154,8 +221,9 @@ export class OcrService {
 
       const bucket = getS3Bucket('receipts');
 
-      // First, verify the object exists in S3
+      // Verify the object exists in S3 (lightweight check)
       try {
+        const { s3Client } = await import('../config/aws');
         const headCommand = new HeadObjectCommand({
           Bucket: bucket,
           Key: receiptPopulated.storageKey,
@@ -163,10 +231,6 @@ export class OcrService {
         await s3Client.send(headCommand);
       } catch (headError: any) {
         if (headError.name === 'NotFound' || headError.$metadata?.httpStatusCode === 404) {
-          logger.error({
-            jobId,
-            receiptId: receiptPopulated._id,
-          }, 'Receipt not found in S3');
           job.status = OcrJobStatus.FAILED;
           job.error = 'Receipt file not found in S3. Please ensure the upload completed successfully.';
           await job.save();
@@ -175,29 +239,40 @@ export class OcrService {
         throw headError;
       }
 
-      // Download image from S3
-      const command = new GetObjectCommand({
-        Bucket: bucket,
-        Key: receiptPopulated.storageKey,
-      });
-
-      const response = await s3Client.send(command);
+      // Generate presigned GET URL (5 min expiry) for OpenAI to access image directly
+      const presignedUrl = await getPresignedDownloadUrl('receipts', receiptPopulated.storageKey, 300);
       
-      if (!response.Body) {
-        logger.error({ jobId, storageKey: receiptPopulated.storageKey }, 'S3 response has no body');
-        job.status = OcrJobStatus.FAILED;
-        job.error = 'S3 object has no body content';
-        await job.save();
-        throw new Error('S3 object has no body content');
+      // Track OpenAI API call time
+      const openaiStartTime = Date.now();
+      
+      // Call OpenAI Vision API with presigned URL (no base64, no memory usage)
+      // Use timeout with abort controller
+      const result = await this.callOpenAIVisionWithTimeout(
+        presignedUrl, 
+        receiptPopulated.mimeType,
+        config.ocr.timeoutMs
+      );
+      
+      const openaiTimeMs = Date.now() - openaiStartTime;
+      
+      const totalProcessingTimeMs = Date.now() - ocrStartTime;
+      
+      // Calculate queue wait time (from job creation to processing start)
+      let queueWaitTimeMs = 0;
+      if (job.createdAt) {
+        const createdAtTime = job.createdAt instanceof Date 
+          ? job.createdAt.getTime() 
+          : new Date(job.createdAt).getTime();
+        queueWaitTimeMs = Math.max(0, ocrStartTime - createdAtTime);
       }
       
-      const imageBuffer = await this.streamToBuffer(response.Body);
-
-      // Convert to base64
-      const base64Image = imageBuffer.toString('base64');
-
-      // Call OpenAI Vision API
-      const result = await this.callOpenAIVision(base64Image, receiptPopulated.mimeType);
+      // Minimal log: OCR_COMPLETED
+      logger.info({ 
+        receiptId: receiptIdStr, 
+        timeMs: totalProcessingTimeMs,
+        queueWaitMs: queueWaitTimeMs,
+        openaiMs: openaiTimeMs
+      }, 'OCR_COMPLETED');
       
       // Save result to both result and resultJson for compatibility
       job.status = OcrJobStatus.COMPLETED;
@@ -206,134 +281,64 @@ export class OcrService {
       job.completedAt = new Date();
       await job.save();
 
-      // Update receipt with parsedData
-      const receiptDoc = await Receipt.findById(job.receiptId);
-      if (receiptDoc) {
-        receiptDoc.parsedData = result;
-        await receiptDoc.save();
-      }
-
-      // Memory cleanup: nullify large objects to allow GC
-      (imageBuffer as any) = null;
-      (base64Image as any) = null;
-      
-      // Allow GC to run
-      process.nextTick(() => {
-        // Additional cleanup if needed
+      // Update receipt with parsedData and status
+      const receiptDocUpdated = await Receipt.findById(job.receiptId).populate({
+        path: 'expenseId',
+        populate: { path: 'reportId' },
       });
-
-      // Auto-fill expense fields if expense exists and report is still DRAFT
-      // Try to find expense by receiptPrimaryId or by receiptIds array
-      const receiptIdForSearch = receiptDoc?._id || receiptPopulated?._id;
-      const expense = await Expense.findOne({
-        $or: [
-          { receiptPrimaryId: receiptIdForSearch },
-          { receiptIds: receiptIdForSearch }
-        ]
-      })
-        .populate('reportId');
       
-      if (expense) {
-        const report = expense.reportId as any;
+      if (receiptDocUpdated) {
+        receiptDocUpdated.parsedData = result;
+        receiptDocUpdated.status = ReceiptStatus.COMPLETED;
+        receiptDocUpdated.ocrTimeMs = openaiTimeMs;
+        receiptDocUpdated.queueWaitTimeMs = queueWaitTimeMs;
+        receiptDocUpdated.openaiTimeMs = openaiTimeMs;
+        receiptDocUpdated.totalPipelineMs = totalProcessingTimeMs;
+        await receiptDocUpdated.save();
         
-        // Only auto-update if report is DRAFT
-        if (report.status === 'DRAFT') {
-          let updated = false;
-          
-          if (result.vendor && result.vendor.trim()) {
-            expense.vendor = result.vendor.trim();
-            updated = true;
-          }
-          
-          if (result.totalAmount && result.totalAmount > 0) {
-            expense.amount = result.totalAmount;
-            updated = true;
-          }
-          
-          if (result.date) {
-            try {
-              if (DateUtils.isValidDateString(result.date)) {
-                expense.expenseDate = DateUtils.parseISTDate(result.date);
-                updated = true;
-              } else {
-                logger.warn({ receiptId: receiptDoc?._id }, 'Invalid date format from OCR');
-              }
-            } catch (e) {
-              logger.warn({ receiptId: receiptDoc?._id, error: (e as Error).message }, 'Error parsing OCR date');
-            }
-          }
-          
-          if (result.currency && result.currency.trim()) {
-            expense.currency = result.currency.trim().toUpperCase();
-            updated = true;
-          }
-          
-          // Use AI-powered category matching
-          try {
-            const categoryMatch = await CategoryMatchingService.findBestCategoryMatch({
-              vendor: result.vendor,
-              lineItems: result.lineItems,
-              notes: result.notes,
-              extractedText: result.notes || '' // Use notes as extracted text fallback
-            }, (expense as any).companyId);
-
-            if (categoryMatch.bestMatch && categoryMatch.bestMatch.confidence >= 50) {
-              expense.categoryId = categoryMatch.bestMatch.categoryId;
-              updated = true;
-        } else if (categoryMatch.fallbackCategory) {
-          // Use fallback category if no good match
-          expense.categoryId = categoryMatch.fallbackCategory.categoryId;
-          updated = true;
+        if (!receiptIdStr) {
+          receiptIdStr = (receiptDocUpdated._id as mongoose.Types.ObjectId).toString();
         }
-          } catch (error: any) {
-            logger.warn({
-              receiptId: receiptDoc?._id,
-              error: (error as Error).message
-            }, 'AI category matching failed, skipping category assignment');
-          }
-          
-          if (result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
-            // Combine line items into notes if notes is empty
-            if (!expense.notes || expense.notes.trim() === '') {
-              const lineItemsText = result.lineItems
-                .map((item: any) => `${item.description || 'Item'}: ${item.amount || 0}`)
-                .join('\n');
-              expense.notes = lineItemsText;
-              updated = true;
-            }
-          } else if (result.notes && result.notes.trim()) {
-            // Use extracted notes if available
-            if (!expense.notes || expense.notes.trim() === '') {
-              expense.notes = result.notes.trim();
-              updated = true;
-            }
-          }
-          
-          if (updated) {
-            await expense.save();
-            // Recalculate report totals
-            const { ReportsService } = await import('./reports.service');
-            await ReportsService.recalcTotals(report._id.toString());
+        
+        // Get userId from expense/report for socket emission
+        if (receiptDocUpdated.expenseId) {
+          const expense = receiptDocUpdated.expenseId as any;
+          const report = expense.reportId as any;
+          if (report && report.userId) {
+            userId = report.userId.toString();
           }
         }
       }
 
-      // Final memory cleanup: clear result object reference after all processing
-      (result as any) = null;
-      
-      // Allow GC to run before returning
-      process.nextTick(() => {
-        // GC hint
-      });
+      // No memory cleanup needed - we never loaded images into memory
+
+      // Don't auto-update expenses - user must click submit to save
+      // Expenses will only be created/updated when user explicitly saves them
+
+      // Emit socket event for successful OCR completion
+      if (userId && receiptIdStr) {
+        emitReceiptProcessed(userId, receiptIdStr, {
+          receiptId: receiptIdStr,
+          status: 'COMPLETED',
+          vendor: result.vendor || null,
+          date: result.date || null,
+          total: result.totalAmount || null,
+          currency: result.currency || null,
+        });
+      }
 
       return job;
     } catch (error: any) {
-      logger.error({
-        jobId,
-        error: error.message,
-        stack: error.stack,
-        name: error.name,
-      }, 'OCR processing error');
+      const totalProcessingTimeMs = Date.now() - ocrStartTime;
+      
+      // Determine failure reason
+      let failureReason: ReceiptFailureReason = ReceiptFailureReason.API_ERROR;
+      if (error.message?.includes('timeout') || error.message?.includes('timed out') || totalProcessingTimeMs >= config.ocr.timeoutMs) {
+        failureReason = ReceiptFailureReason.TIMEOUT;
+      } else if (error.message?.includes('unreadable') || error.message?.includes('No response')) {
+        failureReason = ReceiptFailureReason.UNREADABLE;
+      }
+
       job.status = OcrJobStatus.FAILED;
       job.error = error.message;
       job.errorJson = {
@@ -341,26 +346,143 @@ export class OcrService {
       };
       job.attempts = (job.attempts || 0) + 1;
       await job.save();
+
+      // Minimal log: OCR_FAILED
+      logger.error({ receiptId: receiptIdStr, reason: failureReason }, 'OCR_FAILED');
+
+      // Update receipt status to FAILED
+      const receiptDocFailed = await Receipt.findById(job.receiptId).populate({
+        path: 'expenseId',
+        populate: { path: 'reportId' },
+      });
+      
+      if (receiptDocFailed) {
+        receiptDocFailed.status = ReceiptStatus.FAILED;
+        receiptDocFailed.failureReason = failureReason;
+        receiptDocFailed.totalPipelineMs = totalProcessingTimeMs;
+        await receiptDocFailed.save();
+        
+        const failedReceiptIdStr = (receiptDocFailed._id as mongoose.Types.ObjectId).toString();
+        
+        // Get userId for socket emission
+        let failedUserId: string | null = null;
+        if (receiptDocFailed.expenseId) {
+          const expense = receiptDocFailed.expenseId as any;
+          const report = expense.reportId as any;
+          if (report && report.userId) {
+            failedUserId = report.userId.toString();
+          }
+        }
+
+        // Emit socket event for failed OCR
+        if (failedUserId && failedReceiptIdStr) {
+          emitReceiptProcessed(failedUserId, failedReceiptIdStr, {
+            receiptId: failedReceiptIdStr,
+            status: 'FAILED',
+            reason: failureReason,
+          });
+        }
+      }
+
       throw error;
     }
   }
 
-  private static async streamToBuffer(stream: any): Promise<Buffer> {
-    const chunks: Buffer[] = [];
-    return new Promise((resolve, reject) => {
-      stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-      stream.on('error', reject);
-      stream.on('end', () => resolve(Buffer.concat(chunks)));
+  /**
+   * Call OpenAI Vision API with timeout handling using Promise.race
+   */
+  private static async callOpenAIVisionWithTimeout(
+    presignedUrl: string,
+    _mimeType: string,
+    timeoutMs: number
+  ): Promise<OcrResult> {
+    // Create timeout promise
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => {
+        reject(new Error('OCR request timed out'));
+      }, timeoutMs);
     });
+
+    // Race between OCR call and timeout
+    try {
+      const result = await Promise.race([
+        this.callOpenAIVisionWithFallback(presignedUrl, _mimeType),
+        timeoutPromise,
+      ]);
+      return result;
+    } catch (error: any) {
+      // Check if timeout occurred
+      if (error.message?.includes('timed out')) {
+        throw new Error('OCR request timed out');
+      }
+      throw error;
+    }
   }
 
-  private static async callOpenAIVision(
-    base64Image: string,
-    mimeType: string
+  /**
+   * Call OpenAI Vision API with fallback: try gpt-4o-mini first, then gpt-4o on failure
+   */
+  private static async callOpenAIVisionWithFallback(
+    presignedUrl: string,
+    _mimeType: string
   ): Promise<OcrResult> {
-    const model = getVisionModel();
+    const primaryModel = 'gpt-4o-mini';
+    const fallbackModel = 'gpt-4o';
 
-    const prompt = `Extract receipt data as JSON only. Fields: vendor (string), date (YYYY-MM-DD), totalAmount (number), currency (INR/USD/EUR), tax (number, optional), lineItems ([{description, amount}]), notes (string, optional). Return JSON only, no markdown. Do not suggest categories - that will be handled separately.`;
+    // Try primary model first
+    try {
+      return await this.callOpenAIVision(presignedUrl, _mimeType, primaryModel);
+    } catch (error: any) {
+      // Check if error is retryable (not authentication, not invalid model, etc.)
+      const isRetryable = !(
+        error.status === 401 || 
+        error.message?.includes('authentication') || 
+        error.message?.includes('Unauthorized') ||
+        error.message?.includes('invalid_model') ||
+        error.code === 'invalid_model'
+      );
+
+      if (isRetryable) {
+        // Log fallback attempt
+        logger.warn({ 
+          primaryModel, 
+          fallbackModel, 
+          error: error.message 
+        }, 'Primary OCR model failed, attempting fallback');
+        
+        // Try fallback model
+        try {
+          return await this.callOpenAIVision(presignedUrl, _mimeType, fallbackModel);
+        } catch (fallbackError: any) {
+          // Both models failed - throw original error with fallback context
+          throw new Error(
+            `OCR failed with both models. Primary (${primaryModel}): ${error.message}. Fallback (${fallbackModel}): ${fallbackError.message}`
+          );
+        }
+      } else {
+        // Non-retryable error (auth, invalid model, etc.) - don't retry
+        throw error;
+      }
+    }
+  }
+
+  /**
+   * Call OpenAI Vision API with a specific model
+   */
+  private static async callOpenAIVision(
+    presignedUrl: string,
+    _mimeType: string,
+    model: string = getVisionModel()
+  ): Promise<OcrResult> {
+    const prompt = `Extract receipt data. Return JSON only:
+{
+  "vendor": string | null,
+  "date": string | null,
+  "total": number | null,
+  "currency": string | null
+}
+
+If unreadable, return null. No explanations.`;
 
     try {
       // OpenAI vision API format
@@ -377,21 +499,20 @@ export class OcrService {
               {
                 type: 'image_url',
                 image_url: {
-                  url: `data:${mimeType};base64,${base64Image}`,
+                  url: presignedUrl, // S3 presigned URL - OpenAI fetches directly
                   detail: 'high', // Use high detail for better OCR accuracy
                 },
               },
             ],
           },
         ],
-        max_tokens: 1500, // Reduced for faster response
+        max_tokens: 2000,
         response_format: { type: 'json_object' }, // Force JSON response format
         temperature: 0.0, // Zero temperature for fastest, most consistent results
       });
 
       const content = response.choices[0]?.message?.content;
       if (!content) {
-        logger.error('OpenAI returned empty response');
         throw new Error('No response from OpenAI');
       }
 
@@ -405,30 +526,23 @@ export class OcrService {
 
       // Parse JSON response
       try {
-        const result = JSON.parse(cleanedContent) as OcrResult;
-        result.confidence = 0.85; // Default confidence, could be calculated
-        
-        // Validate that we got at least some data
-        if (!result.vendor && !result.totalAmount && !result.date) {
-          logger.warn('OCR extraction returned minimal data');
-        }
+        const parsed = JSON.parse(cleanedContent);
+        // Map simplified OpenAI response format to our internal format
+        const result: OcrResult = {
+          vendor: parsed.vendor || null,
+          date: parsed.date || null,
+          totalAmount: parsed.total || null,
+          currency: parsed.currency || 'INR',
+          confidence: 0.85,
+        };
         
         return result;
       } catch (error) {
         // If not JSON, try to extract structured data
-        logger.warn({
-          error: error instanceof Error ? error.message : String(error),
-        }, 'OpenAI response not in JSON format, attempting to parse')
         const parsed = this.parseUnstructuredResponse(cleanedContent);
         return parsed;
       }
     } catch (error: any) {
-      logger.error({
-        error: error.message,
-        status: error.status,
-        code: error.code,
-      }, 'OpenAI API call failed')
-      
       // Provide more helpful error messages
       if (error.message?.includes('model') || error.code === 'invalid_model' || error.status === 404) {
         throw new Error(

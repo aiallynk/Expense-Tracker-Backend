@@ -4,6 +4,7 @@ import mongoose from 'mongoose';
 
 import { Expense } from '../models/Expense';
 import { Receipt, IReceipt } from '../models/Receipt';
+import { ReceiptStatus } from '../utils/enums';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused - accessed via populate
 import { UploadIntentDto } from '../utils/dtoTypes';
@@ -160,13 +161,17 @@ export class ReceiptsService {
       }
     }
 
-    // Mark upload as confirmed
+    // Mark upload as confirmed and set status to PROCESSING
     receipt.uploadConfirmed = true;
+    receipt.status = ReceiptStatus.PROCESSING;
     await receipt.save();
 
-    // Small delay to ensure S3 upload has fully propagated
+    // Small delay to ensure S3 upload has fully propagated (non-blocking, runs in background)
     // S3 eventual consistency can cause issues if we try to read immediately
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    // Don't await - let it run in background while we return response
+    setTimeout(() => {
+      // Background check happens in worker
+    }, 1000);
 
     // Generate signed URL for the receipt (valid for 7 days)
     let signedUrl: string;
@@ -299,10 +304,11 @@ export class ReceiptsService {
       }
     }
     
+    // Return immediately with PROCESSING status - OCR results will come via socket
     return {
       receipt: finalReceiptObj,
       ocrJobId: ocrJobId || '',
-      extractedFields: null, // OCR is queued, results will be available later
+      extractedFields: undefined, // Not populated - will come via socket event
     };
   }
 

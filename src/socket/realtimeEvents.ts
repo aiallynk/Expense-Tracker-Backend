@@ -300,6 +300,54 @@ export const emitExpenseChangesRequestedToEmployee = (userId: string, expense: a
   logger.debug(`Emitted expense changes requested to employee ${userId}, expense: ${expense._id || expense.id}`);
 };
 
+// Receipt processing events
+export enum ReceiptEvent {
+  PROCESSING = 'receipt:processing',
+  PROCESSED = 'receipt:processed',
+  FAILED = 'receipt:failed',
+  QUEUED = 'receipt:queued',
+}
+
+// Emit receipt queued event to user (when job is queued due to per-user limit)
+export const emitReceiptQueued = (userId: string, receiptId: string, position: number) => {
+  emitToUser(userId, ReceiptEvent.QUEUED, {
+    receiptId,
+    status: 'QUEUED',
+    position,
+  });
+  logger.debug(`Emitted receipt:queued to user ${userId}, receipt: ${receiptId}, position: ${position}`);
+};
+
+// Emit receipt processing event to user (when OCR job starts)
+export const emitReceiptProcessing = (userId: string, receiptId: string) => {
+  emitToUser(userId, ReceiptEvent.PROCESSING, {
+    receiptId,
+    status: 'PROCESSING',
+  });
+  logger.debug(`Emitted receipt:processing to user ${userId}, receipt: ${receiptId}`);
+};
+
+// Emit receipt processed event to user
+export const emitReceiptProcessed = (
+  userId: string,
+  receiptId: string,
+  data: {
+    receiptId: string;
+    status: 'COMPLETED' | 'FAILED';
+    vendor?: string | null;
+    date?: string | null;
+    total?: number | null;
+    currency?: string | null;
+    reason?: 'TIMEOUT' | 'UNREADABLE' | 'API_ERROR';
+  }
+) => {
+  emitToUser(userId, ReceiptEvent.PROCESSED, {
+    ...data,
+    receiptId, // Override receiptId from data to ensure consistency
+  });
+  logger.debug(`Emitted receipt:processed to user ${userId}, receipt: ${receiptId}, status: ${data.status}`);
+};
+
 // Notification events
 export const NOTIFICATION_EVENT = 'notification:new';
 

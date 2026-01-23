@@ -538,41 +538,64 @@ export class NotificationService {
 
       try {
         // Create notification record in database (for UI display)
-        await NotificationDataService.createNotification({
-          userId: approverId,
-          companyId: reportOwner.companyId?.toString(),
-          type: NotificationType.REPORT_SUBMITTED,
-          title: 'New Expense Report Submitted',
-          description: `Report "${report.name}" has been submitted by ${reportOwner.name || reportOwner.email || 'an employee'} for your approval`,
-          link: `/manager/approvals/${report._id.toString()}`,
-          metadata: {
-            reportId: report._id.toString(),
-            reportName: report.name,
-            employeeId: report.userId?.toString(),
-            employeeName: reportOwner.name,
-            employeeEmail: reportOwner.email,
-          },
-        });
-        logger.info({ approverId, reportId: report._id }, '✅ Notification record created in database');
-
-        // Send email to specific approver
-        const approverUser = await User.findById(approverId).select('email').exec();
-        if (approverUser?.email) {
-          await this.sendEmail({
-            to: approverUser.email,
-            subject: `New Expense Report: ${report.name}`,
-            template: 'report_submitted',
-            data: {
-              reportName: report.name,
-              ownerName: reportOwner.name || reportOwner.email,
-              ownerEmail: reportOwner.email,
+        try {
+          await NotificationDataService.createNotification({
+            userId: approverId,
+            companyId: reportOwner.companyId?.toString(),
+            type: NotificationType.REPORT_SUBMITTED,
+            title: 'New Expense Report Submitted',
+            description: `Report "${report.name}" has been submitted by ${reportOwner.name || reportOwner.email || 'an employee'} for your approval`,
+            link: `/manager/approvals/${report._id.toString()}`,
+            metadata: {
               reportId: report._id.toString(),
+              reportName: report.name,
+              employeeId: report.userId?.toString(),
+              employeeName: reportOwner.name,
+              employeeEmail: reportOwner.email,
             },
           });
-          logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
+          logger.info({ approverId, reportId: report._id }, '✅ Notification record created in database');
+        } catch (notifError: any) {
+          logger.error({ 
+            error: notifError.message || notifError, 
+            approverId, 
+            reportId: report._id 
+          }, '❌ Failed to create notification record - continuing with email');
         }
-      } catch (error) {
-        logger.error({ error, approverId, reportId: report._id }, 'Error creating notification record or sending email');
+
+        // Send email to specific approver
+        try {
+          const approverUser = await User.findById(approverId).select('email').exec();
+          if (approverUser?.email) {
+            await this.sendEmail({
+              to: approverUser.email,
+              subject: `New Expense Report: ${report.name}`,
+              template: 'report_submitted',
+              data: {
+                reportName: report.name,
+                ownerName: reportOwner.name || reportOwner.email,
+                ownerEmail: reportOwner.email,
+                reportId: report._id.toString(),
+              },
+            });
+            logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
+          } else {
+            logger.warn({ approverId }, '⚠️ Approver has no email address - skipping email');
+          }
+        } catch (emailError: any) {
+          logger.error({ 
+            error: emailError.message || emailError, 
+            approverId, 
+            reportId: report._id 
+          }, '❌ Failed to send email notification');
+        }
+      } catch (error: any) {
+        logger.error({ 
+          error: error.message || error, 
+          approverId, 
+          reportId: report._id,
+          stack: error.stack 
+        }, '❌ Unexpected error in notification flow');
       }
     }
   }

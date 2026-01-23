@@ -325,6 +325,7 @@ export const bulkDocumentConfirmSchema = z.object({
   mimeType: z.string().min(1, 'MimeType is required'),
   reportId: z.string().min(1, 'Report ID is required'),
   receiptId: z.string().optional(), // Receipt ID for linking document to expenses
+  skipExpenseCreation: z.boolean().optional().default(false), // Skip auto-creating expense drafts
 });
 
 // Query DTOs - Base schema with both limit and pageSize support

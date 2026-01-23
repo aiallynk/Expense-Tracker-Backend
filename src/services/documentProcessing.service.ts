@@ -7,7 +7,7 @@ import sharp from 'sharp';
 
 import { s3Client, getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
-import { openaiClient, getVisionModel } from '../config/openai';
+import { openaiClient } from '../config/openai';
 import { Category } from '../models/Category';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
@@ -51,8 +51,8 @@ export interface DocumentProcessingResult {
   // Optional detailed per-receipt outcome for richer UIs (backwards compatible)
   results?: Array<{
     index: number;
-    status: 'created' | 'duplicate' | 'error';
-    expenseId?: string;
+    status: 'created' | 'duplicate' | 'error' | 'extracted';
+    expenseId?: string | null;
     duplicateExpense?: any;
     message?: string;
   }>;
@@ -62,6 +62,20 @@ export interface DocumentProcessingResult {
 }
 
 export class DocumentProcessingService {
+  // OCR concurrency semaphore - limit to max 2 concurrent OCR calls
+  private static ocrSemaphore = { count: 0, max: 2 };
+  
+  private static async acquireOcrSlot(): Promise<void> {
+    while (this.ocrSemaphore.count >= this.ocrSemaphore.max) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    this.ocrSemaphore.count++;
+  }
+  
+  private static releaseOcrSlot(): void {
+    this.ocrSemaphore.count--;
+  }
+
   private static normalizeAiReceipt(raw: any): ExtractedReceipt {
     const invoiceId =
       raw?.invoiceId ??
@@ -89,7 +103,8 @@ export class DocumentProcessingService {
     mimeType: string,
     reportId: string,
     userId: string,
-    documentReceiptId?: string // Receipt ID of the uploaded document
+    documentReceiptId?: string, // Receipt ID of the uploaded document
+    skipExpenseCreation: boolean = false // Skip auto-creating expense drafts
   ): Promise<DocumentProcessingResult> {
     logger.info({ storageKey, mimeType, reportId, documentReceiptId }, 'Processing document');
 
@@ -124,15 +139,15 @@ export class DocumentProcessingService {
 
     // Determine document type and process accordingly
     if (mimeType === 'application/pdf') {
-      return await this.processPdf(buffer, storageKey, reportId, userId, documentReceiptId, companyId);
+      return await this.processPdf(buffer, storageKey, reportId, userId, documentReceiptId, companyId, skipExpenseCreation);
     } else if (
       mimeType === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' ||
       mimeType === 'application/vnd.ms-excel' ||
       mimeType === 'text/csv'
     ) {
-      return await this.processExcel(buffer, reportId, userId, mimeType, documentReceiptId, companyId);
+      return await this.processExcel(buffer, reportId, userId, mimeType, documentReceiptId, companyId, skipExpenseCreation);
     } else if (mimeType.startsWith('image/')) {
-      return await this.processImage(buffer, mimeType, storageKey, reportId, userId, documentReceiptId, companyId);
+      return await this.processImage(buffer, mimeType, storageKey, reportId, userId, documentReceiptId, companyId, skipExpenseCreation);
     } else {
       throw new Error(`Unsupported document type: ${mimeType}`);
     }
@@ -147,7 +162,8 @@ export class DocumentProcessingService {
     reportId: string,
     userId: string,
     documentReceiptId?: string,
-    companyId?: mongoose.Types.ObjectId
+    companyId?: mongoose.Types.ObjectId,
+    skipExpenseCreation: boolean = false
   ): Promise<DocumentProcessingResult> {
     logger.info({ storageKey, documentReceiptId }, 'Processing PDF document');
 
@@ -183,7 +199,7 @@ export class DocumentProcessingService {
 
       // For multi-receipt PDFs, we use AI to analyze the entire PDF
       // and identify individual receipts
-      const receipts = await this.extractReceiptsFromPdfWithAI(buffer, pdfData);
+      const receipts = await this.extractReceiptsFromPdfWithAI(buffer, pdfData, storageKey);
       
       result.receipts = receipts;
 
@@ -222,16 +238,22 @@ export class DocumentProcessingService {
             }
           }
 
-          const expenseId = await this.createExpenseDraft(
-            receipt,
-            reportId,
-            userId,
-            documentReceiptId, // Pass document receipt ID for linking
-            'pdf', // Source document type
-            i + 1 // Sequence number (1-indexed)
-          );
-          result.expensesCreated.push(expenseId);
-          result.results?.push({ index: i, status: 'created', expenseId });
+            if (!skipExpenseCreation) {
+              const expenseId = await this.createExpenseDraft(
+                receipt,
+                reportId,
+                userId,
+                documentReceiptId, // Pass document receipt ID for linking
+                'pdf', // Source document type
+                i + 1 // Sequence number (1-indexed)
+              );
+              result.expensesCreated.push(expenseId);
+              result.results?.push({ index: i, status: 'created', expenseId });
+            } else {
+              // Skip expense creation - user will create expenses manually
+              result.expensesCreated.push(null);
+              result.results?.push({ index: i, status: 'extracted', expenseId: null });
+            }
         } catch (error: any) {
           logger.error({ error: error.message, receipt }, 'Failed to create expense draft');
           result.errors.push(`Failed to create expense for receipt: ${error.message}`);
@@ -247,9 +269,23 @@ export class DocumentProcessingService {
       }
 
     } catch (error: any) {
-      logger.error({ error: error.message, storageKey }, 'PDF processing failed');
-      result.success = false;
-      result.errors.push(`PDF processing failed: ${error.message}`);
+      // Non-OCR errors (S3, PDF parsing, etc.) - log but don't fail completely
+      if (config.ocr.demoMode) {
+        // Demo mode: silently ignore all errors
+        result.receipts = [];
+        result.totalPages = 0;
+        return result;
+      }
+      
+      // If we have receipts extracted, don't mark as completely failed
+      // Only mark as failed if no receipts were extracted
+      if (result.receipts.length === 0 && result.expensesCreated.length === 0) {
+        result.success = false;
+        result.errors.push(`PDF processing failed: ${error.message}`);
+      } else {
+        // Partial success - receipts extracted but some errors occurred
+        result.errors.push(`Some errors occurred during processing: ${error.message}`);
+      }
     }
 
     return result;
@@ -261,7 +297,8 @@ export class DocumentProcessingService {
    */
   private static async extractReceiptsFromPdfWithAI(
     buffer: Buffer,
-    pdfData: PdfParseResult
+    pdfData: PdfParseResult,
+    storageKey?: string
   ): Promise<ExtractedReceipt[]> {
     // If OCR is disabled, return empty
     if (config.ocr.disableOcr) {
@@ -269,7 +306,6 @@ export class DocumentProcessingService {
       return [];
     }
 
-    const model = getVisionModel();
     const allReceipts: ExtractedReceipt[] = [];
 
     try {
@@ -281,75 +317,218 @@ export class DocumentProcessingService {
       let pageNumber = 0;
       for await (const pageImage of pdfDocument) {
         pageNumber++;
-        
-        // Log page processing only in non-production (inside loop - can spam)
-        if (config.app.env !== 'production') {
-          logger.debug({ pageNumber, totalPages: pdfData.numpages }, 'Processing PDF page as image');
-        }
 
         try {
           // Convert page image buffer to base64
           const base64Image = Buffer.from(pageImage).toString('base64');
 
-          const prompt = `Extract ALL receipts from this PDF page. For each receipt return: vendor, invoiceId, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. If no receipts, return {"receipts": []}. JSON only, no markdown.`;
+          const prompt = `You are an OCR extraction engine.
 
-          const response = await openaiClient.chat.completions.create({
-            model,
-            messages: [
-              {
-                role: 'user',
-                content: [
-                  { type: 'text', text: prompt },
+Given an image of a receipt or invoice, extract ONLY the following fields.
+If a field is not visible, return null.
+
+Return STRICT JSON only. No explanations. No markdown.
+
+For EACH receipt found in the image, return:
+- vendor_name (string)
+- invoice_number (string | null)
+- invoice_date (ISO date string YYYY-MM-DD | null)
+- total_amount (number | null)
+- currency (string | null)
+- tax_amount (number | null)
+- line_items (array of { description, amount })
+
+Rules:
+- Do NOT guess values
+- Do NOT hallucinate
+- Use INR if currency symbol ₹ is present
+- Dates must be YYYY-MM-DD
+- Return JSON: {"receipts": [{"vendor_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD", "total_amount": number, "currency": "...", "tax_amount": number, "line_items": [{"description": "...", "amount": number}]}]}
+- If multiple receipts in image, include all in receipts array
+- If no receipts found, return {"receipts": []}`;
+
+          // OCR processing with concurrency limit and error handling
+          await this.acquireOcrSlot();
+          try {
+            let content: string;
+            const primaryModel = 'gpt-4o-mini';
+            const fallbackModel = 'gpt-4o';
+            
+            try {
+              // Try primary model first
+              const response = await openaiClient.chat.completions.create({
+                model: primaryModel,
+                messages: [
                   {
-                    type: 'image_url',
-                    image_url: {
-                      url: `data:image/png;base64,${base64Image}`,
-                      detail: 'high',
-                    },
+                    role: 'user',
+                    content: [
+                      { type: 'text', text: prompt },
+                      {
+                        type: 'image_url',
+                        image_url: {
+                          url: `data:image/png;base64,${base64Image}`,
+                          detail: 'high',
+                        },
+                      },
+                    ],
                   },
                 ],
-              },
-            ],
-            max_tokens: 1500, // Reduced for faster response
-            response_format: { type: 'json_object' },
-            temperature: 0.0, // Zero temperature for fastest, most consistent results
-          });
+                max_tokens: 2000,
+                response_format: { type: 'json_object' },
+                temperature: 0.0,
+              });
 
-          const content = response.choices[0]?.message?.content;
-          if (content) {
-            let cleanedContent = content.trim();
-            if (cleanedContent.startsWith('```json')) {
-              cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-            } else if (cleanedContent.startsWith('```')) {
-              cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+              content = response.choices[0]?.message?.content || '';
+              if (!content) {
+                continue; // Skip empty responses
+              }
+            } catch (ocrError: any) {
+              // Check if error is retryable (not authentication, not invalid model, etc.)
+              const isRetryable = !(
+                ocrError.status === 401 || 
+                ocrError.message?.includes('authentication') || 
+                ocrError.message?.includes('Unauthorized') ||
+                ocrError.message?.includes('invalid_model') ||
+                ocrError.code === 'invalid_model'
+              );
+
+              if (isRetryable) {
+                // Log fallback attempt
+                logger.warn({ 
+                  primaryModel, 
+                  fallbackModel, 
+                  error: ocrError.message,
+                  pageNumber
+                }, 'Primary OCR model failed for PDF page, attempting fallback');
+                
+                // Try fallback model
+                try {
+                  const fallbackResponse = await openaiClient.chat.completions.create({
+                    model: fallbackModel,
+                    messages: [
+                      {
+                        role: 'user',
+                        content: [
+                          { type: 'text', text: prompt },
+                          {
+                            type: 'image_url',
+                            image_url: {
+                              url: `data:image/png;base64,${base64Image}`,
+                              detail: 'high',
+                            },
+                          },
+                        ],
+                      },
+                    ],
+                    max_tokens: 2000,
+                    response_format: { type: 'json_object' },
+                    temperature: 0.0,
+                  });
+
+                  content = fallbackResponse.choices[0]?.message?.content || '';
+                  if (!content) {
+                    logger.warn({ pageNumber }, 'OCR returned empty response from fallback model for PDF page');
+                    continue; // Skip this page
+                  }
+                } catch (fallbackError: any) {
+                  // Both models failed - log and skip this page
+                  const errorDetails = {
+                    message: fallbackError.message,
+                    status: fallbackError.status,
+                    code: fallbackError.code,
+                    pageNumber,
+                    primaryError: ocrError.message,
+                  };
+                  
+                  // Log error details (only in non-production to avoid spam)
+                  if (config.app.env !== 'production' && !config.ocr.demoMode) {
+                    logger.error({ error: errorDetails }, 'Both OCR models failed for PDF page');
+                  }
+                  
+                  // OCR failure for this page - non-blocking, skip page and continue
+                  continue; // Skip this page, continue with next
+                }
+              } else {
+                // Non-retryable error - log and skip this page
+                const errorDetails = {
+                  message: ocrError.message,
+                  status: ocrError.status,
+                  code: ocrError.code,
+                  pageNumber,
+                };
+                
+                // Log error details (only in non-production to avoid spam)
+                if (config.app.env !== 'production' && !config.ocr.demoMode) {
+                  logger.error({ error: errorDetails }, 'Non-retryable OCR error for PDF page');
+                }
+                
+                // OCR failure for this page - non-blocking, skip page and continue
+                continue; // Skip this page, continue with next
+              }
             }
+            
+            // Parse OpenAI response safely
+            try {
+              let cleanedContent = content.trim();
+              if (cleanedContent.startsWith('```json')) {
+                cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+              } else if (cleanedContent.startsWith('```')) {
+                cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+              }
 
-            const parsed = JSON.parse(cleanedContent);
-            const pageReceipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => ({
-              ...this.normalizeAiReceipt(r),
-              sourceType: 'pdf' as const,
-              pageNumber,
-              confidence: 0.85,
-            }));
+              const parsed = JSON.parse(cleanedContent);
+              // Map response format to our internal format (support both vendor_name and vendor)
+              const pageReceipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => {
+                const normalized: ExtractedReceipt = {
+                  vendor: r.vendor_name || r.vendor,
+                  invoiceId: r.invoice_number || r.invoiceId || r.invoice_id,
+                  date: r.invoice_date || r.date || r.invoiceDate,
+                  totalAmount: r.total_amount || r.totalAmount,
+                  currency: r.currency || 'INR',
+                  tax: r.tax_amount || r.tax || r.taxAmount,
+                  lineItems: r.line_items || r.lineItems,
+                  sourceType: 'pdf' as const,
+                  pageNumber,
+                  confidence: 0.85,
+                };
+                return this.normalizeAiReceipt(normalized);
+              });
 
-            allReceipts.push(...pageReceipts);
-            // Log page success only in non-production (inside loop - can spam)
-            if (config.app.env !== 'production') {
-              logger.debug({ pageNumber, receiptsFound: pageReceipts.length }, 'Page processed successfully');
+              allReceipts.push(...pageReceipts);
+            } catch (parseError: any) {
+              // JSON parsing failure for this page - non-blocking, skip page and continue
+              if (!config.ocr.demoMode) {
+                // Only log if not in demo mode
+                // Continue processing other pages
+              }
+              continue; // Skip this page, continue with next
             }
+          } finally {
+            this.releaseOcrSlot();
           }
         } catch (pageError: any) {
-          logger.error({ pageNumber, error: pageError.message }, 'Failed to process page');
-          // Continue processing other pages
+          // Page processing error - non-blocking, continue with other pages
+          // Error already handled in inner try-catch, just continue
         }
       }
 
-      logger.info({ totalReceipts: allReceipts.length, totalPages: pageNumber }, 'PDF processing completed');
+      // Only log summary if receipts were extracted or if not in demo mode
+      if (allReceipts.length > 0 || !config.ocr.demoMode) {
+        const fileName = storageKey ? storageKey.split('/').pop() : 'unknown';
+        logger.info({ fileName, totalReceipts: allReceipts.length, totalPages: pageNumber }, 'PDF processing completed');
+      }
       return allReceipts;
     } catch (error: any) {
-      logger.error({ error: error.message }, 'AI PDF extraction failed, falling back to text analysis');
-      // Fallback: Try to extract from text content
-      return this.extractReceiptsFromText(pdfData.text);
+      // PDF processing failed - return empty receipts, don't throw
+      if (config.ocr.demoMode) {
+        return [];
+      }
+      // Try fallback text extraction, but don't throw if it fails
+      try {
+        return this.extractReceiptsFromText(pdfData.text);
+      } catch {
+        return [];
+      }
     }
   }
 
@@ -482,7 +661,8 @@ export class DocumentProcessingService {
     userId: string,
     mimeType: string,
     documentReceiptId?: string,
-    companyId?: mongoose.Types.ObjectId
+    companyId?: mongoose.Types.ObjectId,
+    skipExpenseCreation: boolean = false
   ): Promise<DocumentProcessingResult> {
     logger.info({ mimeType, reportId, documentReceiptId }, 'Processing Excel document');
 
@@ -624,7 +804,6 @@ export class DocumentProcessingService {
       });
 
       result.totalPages = result.receipts.length;
-      logger.info({ receiptCount: result.receipts.length }, 'Extracted receipts from Excel');
 
       // Create expense drafts for each extracted receipt
       for (let i = 0; i < result.receipts.length; i++) {
@@ -660,16 +839,22 @@ export class DocumentProcessingService {
             }
           }
 
-          const expenseId = await this.createExpenseDraft(
-            receipt,
-            reportId,
-            userId,
-            documentReceiptId, // Link Excel document to expenses
-            'excel', // Source document type
-            i + 1 // Row number (1-indexed, excluding header)
-          );
-          result.expensesCreated.push(expenseId);
-          result.results?.push({ index: i, status: 'created', expenseId });
+          if (!skipExpenseCreation) {
+            const expenseId = await this.createExpenseDraft(
+              receipt,
+              reportId,
+              userId,
+              documentReceiptId, // Link Excel document to expenses
+              'excel', // Source document type
+              i + 1 // Row number (1-indexed, excluding header)
+            );
+            result.expensesCreated.push(expenseId);
+            result.results?.push({ index: i, status: 'created', expenseId });
+          } else {
+            // Skip expense creation - user will create expenses manually
+            result.expensesCreated.push(null);
+            result.results?.push({ index: i, status: 'extracted', expenseId: null });
+          }
         } catch (error: any) {
           logger.error({ error: error.message, receipt }, 'Failed to create expense draft from Excel');
           result.errors.push(`Failed to create expense: ${error.message}`);
@@ -702,7 +887,8 @@ export class DocumentProcessingService {
     reportId: string,
     userId: string,
     documentReceiptId?: string,
-    companyId?: mongoose.Types.ObjectId
+    companyId?: mongoose.Types.ObjectId,
+    skipExpenseCreation: boolean = false
   ): Promise<DocumentProcessingResult> {
     logger.info({ storageKey, mimeType, documentReceiptId }, 'Processing image document');
 
@@ -734,56 +920,221 @@ export class DocumentProcessingService {
       }
 
       const base64Image = processedBuffer.toString('base64');
-      const model = getVisionModel();
 
-      const prompt = `Extract ALL receipts from this image. For each receipt return: vendor, invoiceId, date (YYYY-MM-DD), totalAmount, currency, tax (optional), categorySuggestion (Travel/Food/Office/Others), lineItems ([{description, amount}]), notes. Return JSON: {"receipts": [...]}. JSON only, no markdown.`;
+      const prompt = `You are an OCR extraction engine.
 
-      const response = await openaiClient.chat.completions.create({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: prompt },
+Given an image of a receipt or invoice, extract ONLY the following fields.
+If a field is not visible, return null.
+
+Return STRICT JSON only. No explanations. No markdown.
+
+For EACH receipt found in the image, return:
+- vendor_name (string)
+- invoice_number (string | null)
+- invoice_date (ISO date string YYYY-MM-DD | null)
+- total_amount (number | null)
+- currency (string | null)
+- tax_amount (number | null)
+- line_items (array of { description, amount })
+
+Rules:
+- Do NOT guess values
+- Do NOT hallucinate
+- Use INR if currency symbol ₹ is present
+- Dates must be YYYY-MM-DD
+- Return JSON: {"receipts": [{"vendor_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD", "total_amount": number, "currency": "...", "tax_amount": number, "line_items": [{"description": "...", "amount": number}]}]}
+- If multiple receipts in image, include all in receipts array
+- If no receipts found, return {"receipts": []}`;
+
+      // OCR processing with concurrency limit and error handling
+      await this.acquireOcrSlot();
+      try {
+        let content: string = '';
+        const primaryModel = 'gpt-4o-mini';
+        const fallbackModel = 'gpt-4o';
+        let ocrError: any = null;
+        
+        try {
+          // Try primary model first
+          const response = await openaiClient.chat.completions.create({
+            model: primaryModel,
+            messages: [
               {
-                type: 'image_url',
-                image_url: {
-                  url: `data:${mimeType};base64,${base64Image}`,
-                  detail: 'high',
-                },
+                role: 'user',
+                content: [
+                  { type: 'text', text: prompt },
+                  {
+                    type: 'image_url',
+                    image_url: {
+                      url: `data:${mimeType};base64,${base64Image}`,
+                      detail: 'high',
+                    },
+                  },
+                ],
               },
             ],
-          },
-        ],
-        max_tokens: 1500, // Reduced for faster response
-        response_format: { type: 'json_object' },
-        temperature: 0.0, // Zero temperature for fastest, most consistent results
-      });
+            max_tokens: 2000,
+            response_format: { type: 'json_object' },
+            temperature: 0.0,
+          });
 
-      const content = response.choices[0]?.message?.content;
-      if (!content) {
-        throw new Error('No response from AI');
-      }
+          content = response.choices[0]?.message?.content || '';
+          if (!content) {
+            result.errors.push('OCR returned empty response');
+            result.receipts = [];
+            result.totalPages = 0;
+            return result;
+          }
+        } catch (error: any) {
+          ocrError = error;
+          // Check if error is retryable (not authentication, not invalid model, etc.)
+          const isRetryable = !(
+            error.status === 401 || 
+            error.message?.includes('authentication') || 
+            error.message?.includes('Unauthorized') ||
+            error.message?.includes('invalid_model') ||
+            error.code === 'invalid_model'
+          );
 
-      let cleanedContent = content.trim();
-      if (cleanedContent.startsWith('```json')) {
-        cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-      } else if (cleanedContent.startsWith('```')) {
-        cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
-      }
+          if (isRetryable) {
+            // Log fallback attempt
+            logger.warn({ 
+              primaryModel, 
+              fallbackModel, 
+              error: error.message 
+            }, 'Primary OCR model failed, attempting fallback');
+            
+            // Try fallback model
+            try {
+              const fallbackResponse = await openaiClient.chat.completions.create({
+                model: fallbackModel,
+                messages: [
+                  {
+                    role: 'user',
+                    content: [
+                      { type: 'text', text: prompt },
+                      {
+                        type: 'image_url',
+                        image_url: {
+                          url: `data:${mimeType};base64,${base64Image}`,
+                          detail: 'high',
+                        },
+                      },
+                    ],
+                  },
+                ],
+                max_tokens: 2000,
+                response_format: { type: 'json_object' },
+                temperature: 0.0,
+              });
 
-      const parsed = JSON.parse(cleanedContent);
-      const receipts: ExtractedReceipt[] = (parsed.receipts || []).map((r: any) => ({
-        ...this.normalizeAiReceipt(r),
-        sourceType: 'image' as const,
-        confidence: 0.85,
-      }));
+              content = fallbackResponse.choices[0]?.message?.content || '';
+              if (!content) {
+                result.errors.push('OCR returned empty response from fallback model');
+                result.receipts = [];
+                result.totalPages = 0;
+                return result;
+              }
+            } catch (fallbackError: any) {
+              // Both models failed - use fallback error for logging
+              ocrError = fallbackError;
+            }
+          }
+          
+        }
+        
+        // If we still have an error after fallback attempt, handle it
+        if (!content && ocrError) {
+          // OCR failure - log detailed error for debugging
+          const errorDetails = {
+            message: ocrError.message,
+              status: ocrError.status,
+              code: ocrError.code,
+              statusCode: ocrError.statusCode,
+              response: ocrError.response?.data || ocrError.response,
+            };
+            
+            // Log error details (only in non-production to avoid spam)
+            if (config.app.env !== 'production') {
+              const fileName = storageKey.split('/').pop() || storageKey;
+              logger.error({ error: errorDetails, fileName }, 'OpenAI OCR API call failed');
+            }
+            
+            // OCR failure - non-blocking, add error and continue
+            let errorMsg = `OCR failed: ${ocrError.message || 'Unknown error'}`;
+            
+            // Provide helpful error messages
+            if (ocrError.message?.includes('API key') || ocrError.message?.includes('authentication')) {
+              errorMsg = 'OCR failed: Invalid or missing OPENAI_API_KEY. Please check your .env file.';
+            } else if (ocrError.message?.includes('quota') || ocrError.message?.includes('rate limit')) {
+              errorMsg = 'OCR failed: OpenAI API rate limit exceeded. Please try again later.';
+            } else if (ocrError.statusCode === 400 || ocrError.code === 'invalid_argument') {
+              errorMsg = `OCR failed: Invalid request to OpenAI API. ${ocrError.message || ''}`;
+            }
+            
+            if (config.ocr.demoMode) {
+              // Demo mode: silently ignore OCR failures
+              result.receipts = [];
+              result.totalPages = 0;
+              return result;
+            }
+            result.errors.push(errorMsg);
+            result.receipts = [];
+            result.totalPages = 0;
+            return result;
+          }
+        
+          // Parse OpenAI response safely (only if we have content)
+          if (content) {
+            let receipts: ExtractedReceipt[] = [];
+            try {
+              let cleanedContent = content.trim();
+              if (cleanedContent.startsWith('```json')) {
+                cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+              } else if (cleanedContent.startsWith('```')) {
+                cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
+              }
 
-      result.receipts = receipts;
-      result.totalPages = receipts.length;
+              const parsed = JSON.parse(cleanedContent);
+              // Map response format to our internal format (support both vendor_name and vendor)
+              receipts = (parsed.receipts || []).map((r: any) => {
+                const normalized: ExtractedReceipt = {
+                  vendor: r.vendor_name || r.vendor,
+                  invoiceId: r.invoice_number || r.invoiceId || r.invoice_id,
+                  date: r.invoice_date || r.date || r.invoiceDate,
+                  totalAmount: r.total_amount || r.totalAmount,
+                  currency: r.currency || 'INR',
+                  tax: r.tax_amount || r.tax || r.taxAmount,
+                  lineItems: r.line_items || r.lineItems,
+                  sourceType: 'image' as const,
+                  confidence: 0.85,
+                };
+                return this.normalizeAiReceipt(normalized);
+              });
+            } catch (parseError: any) {
+              // JSON parsing failure - non-blocking, add error
+              const errorMsg = `OCR response parsing failed: ${parseError.message}`;
+              if (config.ocr.demoMode) {
+                // Demo mode: silently ignore parsing failures
+                result.receipts = [];
+                result.totalPages = 0;
+                return result;
+              }
+              result.errors.push(errorMsg);
+              result.receipts = [];
+              result.totalPages = 0;
+              return result;
+            }
+
+            result.receipts = receipts;
+            result.totalPages = receipts.length;
+          }
+        } finally {
+          this.releaseOcrSlot();
+        }
 
       // Create expense drafts - ensure at least one draft is created per image
-      if (receipts.length === 0) {
+      if (result.receipts.length === 0) {
         // If no receipts extracted, create a placeholder draft expense
         try {
           const placeholderReceipt: ExtractedReceipt = {
@@ -796,18 +1147,23 @@ export class DocumentProcessingService {
             sourceType: 'image',
             confidence: 0,
           };
-          const expenseId = await this.createExpenseDraft(
-            placeholderReceipt,
-            reportId,
-            userId,
-            documentReceiptId,
-            'image',
-            1
-          );
-          result.expensesCreated.push(expenseId);
-          result.results?.push({ index: 0, status: 'created', expenseId });
+          if (!skipExpenseCreation) {
+            const expenseId = await this.createExpenseDraft(
+              placeholderReceipt,
+              reportId,
+              userId,
+              documentReceiptId,
+              'image',
+              1
+            );
+            result.expensesCreated.push(expenseId);
+            result.results?.push({ index: 0, status: 'created', expenseId });
+          } else {
+            // Skip expense creation - user will create expenses manually
+            result.expensesCreated.push(null);
+            result.results?.push({ index: 0, status: 'extracted', expenseId: null });
+          }
           result.receipts.push(placeholderReceipt);
-          logger.info({ expenseId, documentReceiptId }, 'Created placeholder expense draft for image with no extracted receipts');
         } catch (error: any) {
           logger.error({ error: error.message }, 'Failed to create placeholder expense draft');
           result.errors.push(`Failed to create placeholder expense: ${error.message}`);
@@ -816,8 +1172,8 @@ export class DocumentProcessingService {
         }
       } else {
         // Create expense drafts for each extracted receipt
-        for (let i = 0; i < receipts.length; i++) {
-          const receipt = receipts[i];
+        for (let i = 0; i < result.receipts.length; i++) {
+          const receipt = result.receipts[i];
           try {
             const invoiceId = receipt.invoiceId?.toString().trim();
             const vendor = receipt.vendor?.toString().trim();
@@ -849,16 +1205,22 @@ export class DocumentProcessingService {
               }
             }
 
-            const expenseId = await this.createExpenseDraft(
-              receipt,
-              reportId,
-              userId,
-              documentReceiptId, // Link image document to expenses
-              'image', // Source document type
-              i + 1 // Sequence number (1-indexed)
-            );
-            result.expensesCreated.push(expenseId);
-            result.results?.push({ index: i, status: 'created', expenseId });
+            if (!skipExpenseCreation) {
+              const expenseId = await this.createExpenseDraft(
+                receipt,
+                reportId,
+                userId,
+                documentReceiptId, // Link image document to expenses
+                'image', // Source document type
+                i + 1 // Sequence number (1-indexed)
+              );
+              result.expensesCreated.push(expenseId);
+              result.results?.push({ index: i, status: 'created', expenseId });
+            } else {
+              // Skip expense creation - user will create expenses manually
+              result.expensesCreated.push(null);
+              result.results?.push({ index: i, status: 'extracted', expenseId: null });
+            }
           } catch (error: any) {
             logger.error({ error: error.message }, 'Failed to create expense draft from image');
             result.errors.push(`Failed to create expense: ${error.message}`);
@@ -869,9 +1231,23 @@ export class DocumentProcessingService {
       }
 
     } catch (error: any) {
-      logger.error({ error: error.message }, 'Image processing failed');
-      result.success = false;
-      result.errors.push(`Image processing failed: ${error.message}`);
+      // Non-OCR errors (S3, sharp, etc.) - log but don't fail completely
+      if (config.ocr.demoMode) {
+        // Demo mode: silently ignore all errors
+        result.receipts = [];
+        result.totalPages = 0;
+        return result;
+      }
+      
+      // If we have receipts extracted, don't mark as completely failed
+      // Only mark as failed if no receipts were extracted
+      if (result.receipts.length === 0 && result.expensesCreated.length === 0) {
+        result.success = false;
+        result.errors.push(`Image processing failed: ${error.message}`);
+      } else {
+        // Partial success - receipts extracted but some errors occurred
+        result.errors.push(`Some errors occurred during processing: ${error.message}`);
+      }
     }
 
     return result;

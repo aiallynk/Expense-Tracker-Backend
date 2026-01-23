@@ -154,56 +154,74 @@ export class ApprovalMatrixNotificationService {
                     logger.debug({ userId: user._id.toString() }, '✅ Push notification sent');
 
                     // 2. Create Database Notification Record (for UI inbox)
-                    const { NotificationDataService } = await import('./notificationData.service');
-                    const { NotificationType } = await import('../models/Notification');
+                    try {
+                        const { NotificationDataService } = await import('./notificationData.service');
+                        const { NotificationType } = await import('../models/Notification');
 
-                    await NotificationDataService.createNotification({
-                        userId: user._id.toString(),
-                        companyId: approvalInstance.companyId.toString(),
-                        type: NotificationType.REPORT_PENDING_APPROVAL,
-                        title: 'New Approval Required',
-                        description: `${requestType} "${requestName}" submitted by ${requesterName} requires your approval (as ${approverNames})`,
-                        link: `/approvals`, // Unified approval inbox
-                        metadata: {
+                        await NotificationDataService.createNotification({
+                            userId: user._id.toString(),
+                            companyId: approvalInstance.companyId.toString(),
+                            type: NotificationType.REPORT_PENDING_APPROVAL,
+                            title: 'New Approval Required',
+                            description: `${requestType} "${requestName}" submitted by ${requesterName} requires your approval (as ${approverNames})`,
+                            link: `/approvals`, // Unified approval inbox
+                            metadata: {
+                                instanceId: approvalInstance._id.toString(),
+                                requestId: approvalInstance.requestId.toString(),
+                                requestType: approvalInstance.requestType,
+                                requestName,
+                                requesterId: requestData.userId.toString(),
+                                requesterName,
+                                level: approvalInstance.currentLevel,
+                                approverNames,
+                            },
+                        });
+                        logger.info({ userId: user._id.toString() }, '✅ Database notification created via approval matrix');
+                    } catch (notifError: any) {
+                        logger.error({
+                            error: notifError.message || notifError,
+                            userId: user._id.toString(),
                             instanceId: approvalInstance._id.toString(),
-                            requestId: approvalInstance.requestId.toString(),
-                            requestType: approvalInstance.requestType,
-                            requestName,
-                            requesterId: requestData.userId.toString(),
-                            requesterName,
-                            level: approvalInstance.currentLevel,
-                            approverNames,
-                        },
-                    });
-                    logger.debug({ userId: user._id.toString() }, '✅ Database notification created');
+                        }, '❌ Failed to create database notification via approval matrix');
+                        // Continue - don't fail the whole notification flow
+                    }
 
                     // 3. Send Email Notification
                     if (user.email) {
-                        await NotificationService.sendEmail({
-                            to: user.email,
-                            subject: `New Approval Required: ${requestName}`,
-                            template: 'approval_required',
-                            data: {
-                                requestType: requestType || 'Request',
-                                requestName: requestName || 'Unnamed Request',
-                                requesterName: requesterName || 'An employee',
-                                roleNames: roleNames || 'N/A',
-                                level: approvalInstance.currentLevel || 'N/A',
-                                approverNames: approverNames || 'N/A',
-                                instanceId: approvalInstance._id.toString(),
-                            },
-                        });
-                        logger.debug({ 
-                            userId: user._id.toString(), 
-                            email: user.email,
-                            data: {
+                        try {
+                            await NotificationService.sendEmail({
+                                to: user.email,
+                                subject: `New Approval Required: ${requestName}`,
+                                template: 'approval_required',
+                                data: {
+                                    requestType: requestType || 'Request',
+                                    requestName: requestName || 'Unnamed Request',
+                                    requesterName: requesterName || 'An employee',
+                                    roleNames: roleNames || 'N/A',
+                                    level: approvalInstance.currentLevel || 'N/A',
+                                    approverNames: approverNames || 'N/A',
+                                    instanceId: approvalInstance._id.toString(),
+                                },
+                            });
+                            logger.info({ 
+                                userId: user._id.toString(), 
+                                email: user.email,
                                 requestType,
                                 requestName,
-                                requesterName,
-                                roleNames,
-                                level: approvalInstance.currentLevel,
-                            }
-                        }, '✅ Email notification sent');
+                            }, '✅ Email notification sent via approval matrix');
+                        } catch (emailError: any) {
+                            logger.error({
+                                error: emailError.message || emailError,
+                                userId: user._id.toString(),
+                                email: user.email,
+                                instanceId: approvalInstance._id.toString(),
+                            }, '❌ Failed to send email notification via approval matrix');
+                            // Continue - don't fail the whole notification flow
+                        }
+                    } else {
+                        logger.warn({ 
+                            userId: user._id.toString() 
+                        }, '⚠️ User has no email address - skipping email notification');
                     }
                 } catch (error: any) {
                     logger.error({

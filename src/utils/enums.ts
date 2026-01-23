@@ -47,6 +47,19 @@ export enum OcrJobStatus {
   FAILED = 'FAILED',
 }
 
+export enum ReceiptStatus {
+  PENDING = 'PENDING',
+  PROCESSING = 'PROCESSING',
+  COMPLETED = 'COMPLETED',
+  FAILED = 'FAILED',
+}
+
+export enum ReceiptFailureReason {
+  TIMEOUT = 'TIMEOUT',
+  UNREADABLE = 'UNREADABLE',
+  API_ERROR = 'API_ERROR',
+}
+
 export enum NotificationPlatform {
   ANDROID = 'android',
   IOS = 'ios',

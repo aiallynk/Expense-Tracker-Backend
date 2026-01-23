@@ -9,6 +9,12 @@ import pino from 'pino';
  * 
  * Note: Reads directly from process.env to avoid circular dependency with config
  * In production: Only ERROR and WARN logs are shown (INFO and DEBUG suppressed)
+ * 
+ * Log Rotation:
+ * - Logger writes to stdout/stderr (captured by PM2)
+ * - PM2 handles log rotation via pm2-logrotate module
+ * - Configuration: max_size=10MB, retain=3 files
+ * - Setup: pm2 install pm2-logrotate && pm2 set pm2-logrotate:max_size 10M && pm2 set pm2-logrotate:retain 3
  */
 // Check if production environment
 const isProduction = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';

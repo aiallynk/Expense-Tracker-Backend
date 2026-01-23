@@ -103,6 +103,8 @@ export class BulkUploadController {
       // Reduced delay - just 500ms for S3 propagation
       await new Promise(resolve => setTimeout(resolve, 500));
 
+      // Always return HTTP 200 - OCR failures are non-blocking
+      let result: any;
       try {
         // Update receipt to confirm upload
         if (data.receiptId) {
@@ -111,30 +113,79 @@ export class BulkUploadController {
           });
         }
 
-        const result = await DocumentProcessingService.processDocument(
+        result = await DocumentProcessingService.processDocument(
           data.storageKey,
           data.mimeType,
           data.reportId,
           userId,
-          data.receiptId // Pass receipt ID for linking
+          data.receiptId, // Pass receipt ID for linking
+          data.skipExpenseCreation || false // Skip expense creation if requested
         );
-        const createdExpenseIds = (result.expensesCreated || []).filter(
-          (id: any): id is string => typeof id === 'string' && id.length > 0
-        );
+      } catch (error: any) {
+        // Even if processDocument throws (non-OCR errors), return HTTP 200 with empty results
+        // Only non-OCR errors should throw (S3 access, invalid report, etc.)
+        // OCR errors are handled inside processDocument and never throw
+        
+        // Check if it's a non-OCR error (S3, report validation, etc.)
+        const isNonOcrError = error.message?.includes('Report not found') || 
+                              error.message?.includes('Access denied') ||
+                              error.message?.includes('S3') ||
+                              error.message?.includes('Unsupported document type');
+        
+        if (isNonOcrError) {
+          // Non-OCR errors: return HTTP 400 (these are real failures)
+          logger.error({
+            userId,
+            reportId: data.reportId,
+            error: error.message,
+          }, 'Bulk document processing failed (non-OCR error)');
 
-        // Update receipt with processing results
-        if (data.receiptId) {
-          await Receipt.findByIdAndUpdate(data.receiptId, {
-            parsedData: {
-              isBulkDocument: true,
-              reportId: data.reportId,
-              receiptsExtracted: result.receipts.length,
-              expensesLinked: createdExpenseIds,
-              processedAt: new Date(),
-            },
+          res.status(400).json({
+            success: false,
+            message: error.message,
+            code: 'DOCUMENT_PROCESSING_FAILED',
           });
+          return;
         }
+        
+        // OCR-related errors: return HTTP 200 with empty results
+        result = {
+          success: false,
+          receipts: [],
+          expensesCreated: [],
+          results: [],
+          errors: [error.message],
+          documentType: data.mimeType.startsWith('image/') ? 'image' : data.mimeType === 'application/pdf' ? 'pdf' : 'excel',
+          totalPages: 0,
+        };
+      }
 
+      const createdExpenseIds = (result.expensesCreated || []).filter(
+        (id: any): id is string => typeof id === 'string' && id.length > 0
+      );
+
+      // Update receipt with processing results
+      if (data.receiptId) {
+        await Receipt.findByIdAndUpdate(data.receiptId, {
+          parsedData: {
+            isBulkDocument: true,
+            reportId: data.reportId,
+            receiptsExtracted: result.receipts.length,
+            expensesLinked: createdExpenseIds,
+            processedAt: new Date(),
+          },
+        });
+      }
+
+      // Log summary - only one log per batch
+      const ocrFailures = result.errors.filter((e: string) => e.includes('OCR') || e.includes('parsing')).length;
+      if (ocrFailures > 0 && result.receipts.length === 0) {
+        logger.warn({
+          userId,
+          reportId: data.reportId,
+          ocrFailures,
+        }, 'Bulk document processed with OCR failures');
+      } else {
         logger.info({
           userId,
           reportId: data.reportId,
@@ -142,49 +193,29 @@ export class BulkUploadController {
           expensesCreated: createdExpenseIds.length,
           errors: result.errors.length,
         }, 'Bulk document processed');
-
-        res.status(200).json({
-          success: result.success,
-          data: {
-            documentType: result.documentType,
-            totalPages: result.totalPages,
-            receiptsExtracted: result.receipts.length,
-            expensesCreated: result.expensesCreated,
-            extractedData: result.receipts,
-            results: result.results,
-            documentReceiptId: data.receiptId, // Include receipt ID for frontend
-            storageKey: data.storageKey,
-            errors: result.errors,
-          },
-          message: result.success 
-            ? `Successfully extracted ${result.receipts.length} receipt(s) and created ${createdExpenseIds.length} expense draft(s)`
-            : 'Document processing completed with errors',
-        });
-      } catch (error: any) {
-        // Update receipt with error info
-        if (data.receiptId) {
-          await Receipt.findByIdAndUpdate(data.receiptId, {
-            parsedData: {
-              isBulkDocument: true,
-              reportId: data.reportId,
-              error: error.message,
-              failedAt: new Date(),
-            },
-          });
-        }
-
-        logger.error({
-          userId,
-          reportId: data.reportId,
-          error: error.message,
-        }, 'Bulk document processing failed');
-
-        res.status(400).json({
-          success: false,
-          message: error.message,
-          code: 'DOCUMENT_PROCESSING_FAILED',
-        });
       }
+
+      // Always return HTTP 200 - success is true if any receipts were extracted
+      res.status(200).json({
+        success: result.receipts.length > 0,
+        data: {
+          documentType: result.documentType,
+          totalPages: result.totalPages,
+          receiptsExtracted: result.receipts.length,
+          expensesCreated: result.expensesCreated,
+          extractedData: result.receipts,
+          results: result.results,
+          documentReceiptId: data.receiptId, // Include receipt ID for frontend
+          storageKey: data.storageKey,
+          errors: result.errors,
+          ocrFailures: result.errors.filter((e: string) => e.includes('OCR') || e.includes('parsing')).length,
+        },
+        message: result.receipts.length > 0
+          ? `Successfully extracted ${result.receipts.length} receipt(s) and created ${createdExpenseIds.length} expense draft(s)`
+          : result.errors.length > 0
+            ? 'Document uploaded but OCR failed. Please enter receipt details manually.'
+            : 'Document uploaded successfully',
+      });
     }
   );
 

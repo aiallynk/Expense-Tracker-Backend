@@ -38,13 +38,15 @@ export class ReceiptsController {
     // Convert receipt to plain object to include all fields
     const receiptObj = (result.receipt as any).toObject ? (result.receipt as any).toObject() : result.receipt;
     
+    // Return immediately with PROCESSING status - OCR results will come via socket
     res.status(200).json({
       success: true,
       data: {
         receiptId: (result.receipt._id as any).toString(),
+        status: receiptObj.status || 'PROCESSING',
         ocrJobId: result.ocrJobId,
-        extractedFields: result.extractedFields || null,
         receipt: receiptObj, // Include full receipt object with signedUrl if available
+        // extractedFields not included - will come via socket event
       },
     });
   });
