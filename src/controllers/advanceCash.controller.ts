@@ -5,7 +5,6 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { User } from '../models/User';
 import { AdvanceCashService } from '../services/advanceCash.service';
-import { CompanySettingsService } from '../services/companySettings.service';
 import { getUserCompanyId } from '../utils/companyAccess';
 import { UserRole } from '../utils/enums';
 
@@ -74,59 +73,30 @@ export class AdvanceCashController {
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
     const companyId = await getUserCompanyId(req);
     const actorId = req.user?.id;
+    const actorRole = req.user?.role;
+    
     if (!companyId || !actorId) {
       res.status(400).json({ success: false, message: 'User is not associated with a company', code: 'NO_COMPANY' });
       return;
     }
 
-    // Get company settings to check advance cash policy
-    const companySettings = await CompanySettingsService.getSettingsByCompanyId(companyId);
-    const advanceCashSettings = companySettings.advanceCash || {
-      allowSelfCreation: true,
-      allowOthersCreation: true,
-      requireAdminApproval: false,
-    };
-
-    // Employees can create advances only for themselves.
-    // COMPANY_ADMIN / ADMIN can create for any employee in their company.
-    const requestedEmployeeId = req.body.employeeId as string | undefined;
-    let employeeId = actorId;
-    const isCreatingForSelf = !requestedEmployeeId || requestedEmployeeId === actorId;
-    const isCreatingForOthers = requestedEmployeeId && requestedEmployeeId !== actorId;
-
-    const actorRole = req.user?.role;
-    const canCreateForOthers = actorRole === UserRole.COMPANY_ADMIN || actorRole === UserRole.ADMIN;
-
-    // Policy enforcement: Check if self-creation is allowed
-    if (isCreatingForSelf && !advanceCashSettings.allowSelfCreation) {
+    // ONLY COMPANY_ADMIN and ADMIN can create advance cash vouchers
+    // Regular employees/approvers cannot create vouchers - they can only view and request returns
+    if (actorRole !== UserRole.COMPANY_ADMIN && actorRole !== UserRole.ADMIN) {
       res.status(403).json({
         success: false,
-        message: 'Creating advance cash for yourself is not allowed by company policy',
-        code: 'SELF_CREATION_NOT_ALLOWED',
+        message: 'You do not have permission to create advance cash vouchers. Only administrators can issue vouchers.',
+        code: 'INSUFFICIENT_PERMISSIONS',
       });
       return;
     }
 
-    // Policy enforcement: Check if creating for others is allowed
-    if (isCreatingForOthers) {
-      if (!canCreateForOthers) {
-        res.status(403).json({
-          success: false,
-          message: 'You do not have permission to create advance cash for other employees',
-          code: 'INSUFFICIENT_PERMISSIONS',
-        });
-        return;
-      }
+    // Admins can create vouchers for any employee in their company
+    const requestedEmployeeId = req.body.employeeId as string | undefined;
+    let employeeId = actorId;
 
-      if (!advanceCashSettings.allowOthersCreation) {
-        res.status(403).json({
-          success: false,
-          message: 'Creating advance cash for other employees is not allowed by company policy',
-          code: 'OTHERS_CREATION_NOT_ALLOWED',
-        });
-        return;
-      }
-
+    if (requestedEmployeeId && requestedEmployeeId !== actorId) {
+      // Creating for another employee
       if (!mongoose.Types.ObjectId.isValid(requestedEmployeeId)) {
         res.status(400).json({ success: false, message: 'Invalid employeeId', code: 'INVALID_EMPLOYEE' });
         return;
