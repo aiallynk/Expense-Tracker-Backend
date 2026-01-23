@@ -174,7 +174,7 @@ export class AdvanceCashController {
       return;
     }
 
-    const advanceCashId = req.params.id;
+    const advanceCashId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     if (!advanceCashId) {
       res.status(400).json({ success: false, message: 'Advance cash ID is required', code: 'MISSING_ID' });
       return;
