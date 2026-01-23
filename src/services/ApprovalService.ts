@@ -8,6 +8,7 @@ import { User } from '../models/User';
 import { ExpenseReportStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
+import { config } from '@/config/index';
 // NOTE: Keep ApprovalService fully functional for matrix-based approvals.
 // Employee-level chains can be integrated later without breaking ApprovalInstance flow.
 
@@ -246,13 +247,16 @@ export class ApprovalService {
       // Apply pagination to filtered results
       const paginatedResults = pendingForUser.slice(skip, skip + limit);
       
-      logger.info({ 
-        userId, 
-        totalFiltered: pendingForUser.length, 
-        paginatedCount: paginatedResults.length,
-        page,
-        limit
-      }, 'getPendingApprovalsForUser - Complete');
+      // Pagination logging (only in non-production)
+      if (config.app.env !== 'production') {
+        logger.debug({ 
+          userId, 
+          totalFiltered: pendingForUser.length, 
+          paginatedCount: paginatedResults.length,
+          page,
+          limit
+        }, 'getPendingApprovalsForUser - Complete');
+      }
       
       return { data: paginatedResults, total: pendingForUser.length };
     } catch (err) {

@@ -6,6 +6,7 @@ import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
 import { ExpenseReportStatus } from '../utils/enums';
+import { VoucherUsage } from '../models/VoucherUsage';
 
 import { logger } from '@/config/logger';
 
@@ -32,8 +33,11 @@ export class AdvanceCashService {
     const advance = new AdvanceCash({
       companyId: companyObjectId,
       employeeId: employeeObjectId,
-      amount,
-      balance: amount,
+      totalAmount: amount,
+      remainingAmount: amount,
+      usedAmount: 0,
+      amount, // Legacy field
+      balance: amount, // Legacy field
       currency,
       projectId: params.projectId ? new mongoose.Types.ObjectId(params.projectId) : undefined,
       costCentreId: params.costCentreId ? new mongoose.Types.ObjectId(params.costCentreId) : undefined,
@@ -74,10 +78,17 @@ export class AdvanceCashService {
       companyId: new mongoose.Types.ObjectId(params.companyId),
       employeeId: new mongoose.Types.ObjectId(params.employeeId),
       status: AdvanceCashStatus.ACTIVE,
-      balance: { $gt: 0 },
       $or: [
-        { reportId: { $exists: false } },
-        { reportId: null },
+        { remainingAmount: { $gt: 0 } },
+        { balance: { $gt: 0 } }, // Fallback for legacy records
+      ],
+      $and: [
+        {
+          $or: [
+            { reportId: { $exists: false } },
+            { reportId: null },
+          ],
+        },
       ],
     };
 
@@ -165,12 +176,24 @@ export class AdvanceCashService {
       employeeId,
       currency,
       status: AdvanceCashStatus.ACTIVE,
-      balance: { $gt: 0 },
+      $or: [
+        { remainingAmount: { $gt: 0 } },
+        { balance: { $gt: 0 } }, // Fallback for legacy records
+      ],
     };
 
     const totalAgg = await AdvanceCash.aggregate([
       { $match: base },
-      { $group: { _id: null, total: { $sum: '$balance' } } },
+      { 
+        $group: { 
+          _id: null, 
+          total: { 
+            $sum: { 
+              $ifNull: ['$remainingAmount', '$balance'] // Use remainingAmount, fallback to balance
+            } 
+          } 
+        } 
+      },
     ]);
 
     const totalBalance = Number(totalAgg?.[0]?.total || 0);
@@ -188,8 +211,30 @@ export class AdvanceCashService {
     scopeOr.push({ projectId: null, costCentreId: null });
 
     const scopedAgg = await AdvanceCash.aggregate([
-      { $match: { ...base, $or: scopeOr } },
-      { $group: { _id: null, total: { $sum: '$balance' } } },
+      { 
+        $match: { 
+          ...base, 
+          $and: [
+            { $or: scopeOr },
+            {
+              $or: [
+                { remainingAmount: { $gt: 0 } },
+                { balance: { $gt: 0 } }, // Fallback for legacy records
+              ],
+            },
+          ],
+        } 
+      },
+      { 
+        $group: { 
+          _id: null, 
+          total: { 
+            $sum: { 
+              $ifNull: ['$remainingAmount', '$balance'] // Use remainingAmount, fallback to balance
+            } 
+          } 
+        } 
+      },
     ]);
 
     const scopedBalance = Number(scopedAgg?.[0]?.total || 0);
@@ -338,7 +383,10 @@ export class AdvanceCashService {
               employeeId,
               currency,
               status: AdvanceCashStatus.ACTIVE,
-              balance: { $gt: 0 },
+              $or: [
+                { remainingAmount: { $gt: 0 } },
+                { balance: { $gt: 0 } }, // Fallback for legacy records
+              ],
               projectId: expense.projectId,
             });
           }
@@ -350,7 +398,10 @@ export class AdvanceCashService {
               employeeId,
               currency,
               status: AdvanceCashStatus.ACTIVE,
-              balance: { $gt: 0 },
+              $or: [
+                { remainingAmount: { $gt: 0 } },
+                { balance: { $gt: 0 } }, // Fallback for legacy records
+              ],
               costCentreId: expense.costCentreId,
               projectId: { $in: [null, undefined] },
             });
@@ -362,7 +413,10 @@ export class AdvanceCashService {
             employeeId,
             currency,
             status: AdvanceCashStatus.ACTIVE,
-            balance: { $gt: 0 },
+            $or: [
+              { remainingAmount: { $gt: 0 } },
+              { balance: { $gt: 0 } }, // Fallback for legacy records
+            ],
             projectId: { $in: [null, undefined] },
             costCentreId: { $in: [null, undefined] },
           });
@@ -373,20 +427,24 @@ export class AdvanceCashService {
           for (const q of tiers) {
             if (remaining <= 0) break;
             const advances = await AdvanceCash.find(q).sort({ createdAt: 1 }).session(session || null).exec();
-            for (const adv of advances) {
-              if (remaining <= 0) break;
-              const available = Number(adv.balance || 0);
-              if (available <= 0) continue;
+          for (const adv of advances) {
+            if (remaining <= 0) break;
+            const available = Number(adv.remainingAmount ?? adv.balance ?? 0);
+            if (available <= 0) continue;
 
-              const use = Math.min(remaining, available);
-              if (use <= 0) continue;
+            const use = Math.min(remaining, available);
+            if (use <= 0) continue;
 
-              adv.balance = Number(adv.balance) - use;
-              if (adv.balance <= 0) {
-                adv.balance = 0;
-                adv.status = AdvanceCashStatus.SETTLED;
-              }
-              await adv.save({ session });
+            // Update both new and legacy fields
+            adv.remainingAmount = available - use;
+            adv.usedAmount = (adv.usedAmount || 0) + use;
+            adv.balance = adv.remainingAmount; // Sync legacy field
+            if (adv.remainingAmount <= 0) {
+              adv.remainingAmount = 0;
+              adv.balance = 0;
+              adv.status = AdvanceCashStatus.SETTLED;
+            }
+            await adv.save({ session });
 
               allocations.push({
                 advanceCashId: adv._id as mongoose.Types.ObjectId,
@@ -466,7 +524,10 @@ export class AdvanceCashService {
         employeeId,
         currency,
         status: AdvanceCashStatus.ACTIVE,
-        balance: { $gt: 0 },
+        $or: [
+          { remainingAmount: { $gt: 0 } },
+          { balance: { $gt: 0 } }, // Fallback for legacy records
+        ],
         projectId,
       });
     }
@@ -478,7 +539,10 @@ export class AdvanceCashService {
         employeeId,
         currency,
         status: AdvanceCashStatus.ACTIVE,
-        balance: { $gt: 0 },
+        $or: [
+          { remainingAmount: { $gt: 0 } },
+          { balance: { $gt: 0 } }, // Fallback for legacy records
+        ],
         costCentreId,
         projectId: { $in: [null, undefined] },
       });
@@ -490,7 +554,10 @@ export class AdvanceCashService {
       employeeId,
       currency,
       status: AdvanceCashStatus.ACTIVE,
-      balance: { $gt: 0 },
+      $or: [
+        { remainingAmount: { $gt: 0 } },
+        { balance: { $gt: 0 } }, // Fallback for legacy records
+      ],
       projectId: { $in: [null, undefined] },
       costCentreId: { $in: [null, undefined] },
     });
@@ -504,14 +571,18 @@ export class AdvanceCashService {
       const advances = await AdvanceCash.find(q).sort({ createdAt: 1 }).exec();
       for (const adv of advances) {
         if (remaining <= 0) break;
-        const available = Number(adv.balance || 0);
+        const available = Number(adv.remainingAmount ?? adv.balance ?? 0);
         if (available <= 0) continue;
 
         const use = Math.min(remaining, available);
         if (use <= 0) continue;
 
-        adv.balance = Number(adv.balance) - use;
-        if (adv.balance <= 0) {
+        // Update both new and legacy fields
+        adv.remainingAmount = available - use;
+        adv.usedAmount = (adv.usedAmount || 0) + use;
+        adv.balance = adv.remainingAmount; // Sync legacy field
+        if (adv.remainingAmount <= 0) {
+          adv.remainingAmount = 0;
           adv.balance = 0;
           adv.status = AdvanceCashStatus.SETTLED;
         }
@@ -543,6 +614,89 @@ export class AdvanceCashService {
     }
 
     return { applied: false, amountApplied: 0 };
+  }
+
+  /**
+   * Delete an advance cash voucher
+   * - Checks if voucher is used in any transactions, reports, or voucher usages
+   * - Only allows deletion if voucher is not used anywhere
+   * - Users can only delete their own vouchers
+   * - Admins can delete any voucher in their company
+   */
+  static async deleteAdvance(params: {
+    advanceCashId: string;
+    companyId: string;
+    userId: string;
+    userRole: string;
+  }): Promise<void> {
+    const { advanceCashId, companyId, userId, userRole } = params;
+
+    if (!mongoose.Types.ObjectId.isValid(advanceCashId)) {
+      throw new Error('Invalid advance cash ID');
+    }
+
+    const advanceCashObjectId = new mongoose.Types.ObjectId(advanceCashId);
+
+    // Find the advance cash voucher
+    const advanceCash = await AdvanceCash.findById(advanceCashObjectId)
+      .select('companyId employeeId status balance')
+      .exec();
+
+    if (!advanceCash) {
+      throw new Error('Advance cash voucher not found');
+    }
+
+    // Verify company match
+    if (advanceCash.companyId.toString() !== companyId) {
+      throw new Error('Advance cash voucher does not belong to your company');
+    }
+
+    // Check permissions: users can only delete their own vouchers, admins can delete any
+    const isAdmin = userRole === 'COMPANY_ADMIN' || userRole === 'ADMIN' || userRole === 'company-admin' || userRole === 'admin';
+    if (!isAdmin && advanceCash.employeeId.toString() !== userId) {
+      throw new Error('You can only delete your own advance cash vouchers');
+    }
+
+    // Check if voucher is used in any AdvanceCashTransaction allocations
+    const transactionUsage = await AdvanceCashTransaction.findOne({
+      'allocations.advanceCashId': advanceCashObjectId,
+    }).exec();
+
+    if (transactionUsage) {
+      throw new Error('Cannot delete voucher: It has been used in expense reports');
+    }
+
+    // Check if voucher is referenced in any ExpenseReport
+    const reportUsage = await ExpenseReport.findOne({
+      advanceCashId: advanceCashObjectId,
+    }).exec();
+
+    if (reportUsage) {
+      throw new Error('Cannot delete voucher: It is currently assigned to an expense report');
+    }
+
+    // Check if voucher is used in any VoucherUsage records
+    const voucherUsage = await VoucherUsage.findOne({
+      voucherId: advanceCashObjectId,
+      status: 'APPLIED', // Only check active usages
+    }).exec();
+
+    if (voucherUsage) {
+      throw new Error('Cannot delete voucher: It has been applied to an expense report');
+    }
+
+    // Safe to delete - remove the voucher
+    await AdvanceCash.findByIdAndDelete(advanceCashObjectId).exec();
+
+    logger.info(
+      {
+        advanceCashId,
+        companyId,
+        deletedBy: userId,
+        userRole,
+      },
+      'Advance cash voucher deleted'
+    );
   }
 }
 

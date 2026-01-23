@@ -27,6 +27,7 @@ import { DuplicateInvoiceService } from './duplicateInvoice.service';
 import { NotificationService } from './notification.service';
 
 import { logger } from '@/config/logger';
+import { config } from '@/config/index';
 import { DateUtils } from '@/utils/dateUtils';
 
 export class ReportsService {
@@ -176,8 +177,10 @@ export class ReportsService {
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     
-    // Debug logging for pagination
-    console.log(`[ReportsService] Pagination: page=${page}, pageSize=${pageSize}, skip=${(page - 1) * pageSize}`);
+    // Debug logging for pagination (only in non-production)
+    if (config.app.env !== 'production') {
+      logger.debug({ page, pageSize, skip: (page - 1) * pageSize }, '[ReportsService] Pagination');
+    }
     
     // Ensure userId is converted to ObjectId for proper matching
     const query: any = { userId: new mongoose.Types.ObjectId(userId) };
@@ -215,7 +218,10 @@ export class ReportsService {
       ExpenseReport.countDocuments(query).exec(),
     ]);
 
-    console.log(`[ReportsService] Query result: ${reports.length} reports returned (total: ${total}, requested: ${pageSize})`);
+    // Query result logging (only in non-production)
+    if (config.app.env !== 'production') {
+      logger.debug({ count: reports.length, total, requested: pageSize }, '[ReportsService] Query result');
+    }
 
     // Get expenses count for each report
     // Format dates as strings to prevent timezone conversion issues

@@ -2,7 +2,7 @@ import { Router } from 'express';
 
 import { BulkUploadController } from '../controllers/bulkUpload.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { receiptUploadRateLimiter } from '../middleware/rateLimit.middleware';
+import { bulkUploadRateLimiter } from '../middleware/rateLimit.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { bulkDocumentUploadIntentSchema, bulkDocumentConfirmSchema } from '../utils/dtoTypes';
 
@@ -17,7 +17,7 @@ router.use(authMiddleware);
  */
 router.post(
   '/bulk-upload/intent',
-  receiptUploadRateLimiter,
+  bulkUploadRateLimiter,
   validate(bulkDocumentUploadIntentSchema),
   BulkUploadController.createUploadIntent
 );
@@ -28,7 +28,7 @@ router.post(
  */
 router.post(
   '/bulk-upload/confirm',
-  receiptUploadRateLimiter,
+  bulkUploadRateLimiter,
   validate(bulkDocumentConfirmSchema),
   BulkUploadController.confirmUpload
 );

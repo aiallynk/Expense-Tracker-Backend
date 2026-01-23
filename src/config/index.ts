@@ -11,6 +11,7 @@ export const config = {
     port: parseInt(process.env.PORT || process.env.APP_PORT || '4000', 10),
     frontendUrlApp: process.env.APP_FRONTEND_URL_APP || 'http://localhost:3000',
     frontendUrlAdmin: process.env.APP_FRONTEND_URL_ADMIN || 'http://localhost:3001',
+    demoMode: process.env.DEMO_MODE === 'true',
   },
   mongodb: {
     uri: process.env.MONGODB_URI || 'mongodb://localhost:27017',
@@ -61,6 +62,8 @@ export const config = {
     // Increased default concurrency for high-volume processing
     // Supports 100K+ users with multiple OCR workers
     concurrency: parseInt(process.env.OCR_WORKER_CONCURRENCY || '20', 10), // Increased from 3 to 20
+    // Demo mode: concurrency = 1 for stable processing
+    demoConcurrency: process.env.DEMO_MODE === 'true' ? 1 : parseInt(process.env.OCR_WORKER_CONCURRENCY || '20', 10),
   },
   ai: {
     disableCategoryMatching: process.env.DISABLE_AI_CATEGORY_MATCHING === 'true',
@@ -73,8 +76,11 @@ export const config = {
 };
 
 // Log analytics API key status at startup (length only, not value)
-if (config.analytics.apiKey && config.analytics.apiKey.length > 0) {
-  console.log(`[CONFIG] Analytics API Key loaded (length: ${config.analytics.apiKey.length} characters)`);
-} else {
-  console.warn('[CONFIG] WARNING: ANALYTICS_API_KEY not configured or empty');
+// Note: Using logger here would cause circular dependency, so we use console only in non-production
+if (config.app.env !== 'production') {
+  if (config.analytics.apiKey && config.analytics.apiKey.length > 0) {
+    console.log(`[CONFIG] Analytics API Key loaded (length: ${config.analytics.apiKey.length} characters)`);
+  } else {
+    console.warn('[CONFIG] WARNING: ANALYTICS_API_KEY not configured or empty');
+  }
 }

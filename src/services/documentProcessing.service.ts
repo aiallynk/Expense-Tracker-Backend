@@ -282,7 +282,10 @@ export class DocumentProcessingService {
       for await (const pageImage of pdfDocument) {
         pageNumber++;
         
-        logger.info({ pageNumber, totalPages: pdfData.numpages }, 'Processing PDF page as image');
+        // Log page processing only in non-production (inside loop - can spam)
+        if (config.app.env !== 'production') {
+          logger.debug({ pageNumber, totalPages: pdfData.numpages }, 'Processing PDF page as image');
+        }
 
         try {
           // Convert page image buffer to base64
@@ -330,7 +333,10 @@ export class DocumentProcessingService {
             }));
 
             allReceipts.push(...pageReceipts);
-            logger.info({ pageNumber, receiptsFound: pageReceipts.length }, 'Page processed successfully');
+            // Log page success only in non-production (inside loop - can spam)
+            if (config.app.env !== 'production') {
+              logger.debug({ pageNumber, receiptsFound: pageReceipts.length }, 'Page processed successfully');
+            }
           }
         } catch (pageError: any) {
           logger.error({ pageNumber, error: pageError.message }, 'Failed to process page');

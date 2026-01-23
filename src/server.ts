@@ -14,6 +14,7 @@ import { SystemAnalyticsService } from './services/systemAnalytics.service';
 import { schedulerService } from './services/scheduler.service';
 import { initializeSocketServer } from './socket/socketServer';
 import { startExchangeRateWorker } from './worker/exchangeRate.worker';
+import { startInProcessOcrWorker, stopInProcessOcrWorker } from './worker/ocr.inProcessWorker';
 
 import { logger } from '@/config/logger';
 
@@ -70,6 +71,14 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
     logger.info('Scheduler service stopped');
   } catch (error) {
     logger.error({ error }, 'Error stopping scheduler service');
+  }
+
+  // Stop in-process OCR worker
+  try {
+    await stopInProcessOcrWorker();
+    logger.info('In-process OCR worker stopped');
+  } catch (error) {
+    logger.error({ error }, 'Error stopping in-process OCR worker');
   }
 
   // Give connections time to close (max 10 seconds)
@@ -220,6 +229,9 @@ const initializeServices = async (): Promise<void> => {
     // Start SuperAdmin insight detection scheduler
     schedulerService.start();
     logger.info('SuperAdmin insight scheduler started');
+
+    // Start in-process OCR worker (processes queued OCR jobs)
+    startInProcessOcrWorker();
 
     logger.info('Periodic analytics services started');
   } catch (error) {

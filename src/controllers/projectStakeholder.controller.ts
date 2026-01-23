@@ -9,6 +9,8 @@ import { CompanyAdmin } from '../models/CompanyAdmin';
 import { User } from '../models/User';
 import { ProjectStakeholderService } from '../services/projectStakeholder.service';
 
+import { logger } from '@/config/logger';
+
 // Helper function to get company ID for both regular users and company admins
 async function getCompanyId(req: AuthRequest): Promise<string | undefined> {
   // If user is COMPANY_ADMIN, look in CompanyAdmin collection
@@ -304,7 +306,7 @@ export class ProjectStakeholderController {
       });
 
     } catch (error: any) {
-      console.error('CSV upload error:', error);
+      logger.error({ error }, 'CSV upload error');
       res.status(400).json({
         success: false,
         message: 'Failed to process CSV file. Please ensure it contains valid user identifiers.',

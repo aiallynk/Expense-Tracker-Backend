@@ -1,4 +1,8 @@
-import express, { Router } from 'express';
+import { Router } from 'express';
+import multer from 'multer';
+import path from 'path';
+import os from 'os';
+import fs from 'fs';
 
 import { ReceiptsController } from '../controllers/receipts.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -27,11 +31,39 @@ router.post(
 router.get('/receipts/:id', ReceiptsController.getById);
 
 // Upload file via backend (bypasses CORS)
-// Use raw body parser for binary file uploads
+// Use multer with diskStorage to avoid loading entire file into memory
+const uploadDir = path.join(os.tmpdir(), 'receipt-uploads');
+// Ensure temp directory exists
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, uploadDir);
+  },
+  filename: (_req, _file, cb) => {
+    // Generate unique filename
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, `receipt-${uniqueSuffix}`);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit
+  },
+  fileFilter: (_req, _file, cb) => {
+    // Accept all file types for receipts (images, PDFs, etc.)
+    cb(null, true);
+  },
+});
+
 router.post(
   '/receipts/:receiptId/upload',
   receiptUploadRateLimiter,
-  express.raw({ type: '*/*', limit: '10mb' }),
+  upload.single('file'),
   ReceiptsController.uploadFile
 );
 

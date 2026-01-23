@@ -147,7 +147,10 @@ export const authMiddleware = async (
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith('Bearer ')) {
-      logger.warn(`Auth middleware - No authorization header for ${req.method} ${req.path}`);
+      // Only log missing auth header warnings in non-production to prevent spam
+      if (config.app.env !== 'production') {
+        logger.warn(`Auth middleware - No authorization header for ${req.method} ${req.path}`);
+      }
       res.status(401).json({
         success: false,
         message: 'Authentication required',

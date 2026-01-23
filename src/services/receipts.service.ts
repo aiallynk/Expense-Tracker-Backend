@@ -7,7 +7,7 @@ import { Receipt, IReceipt } from '../models/Receipt';
 import { User } from '../models/User';
 // import { ExpenseReport } from '../models/ExpenseReport'; // Unused - accessed via populate
 import { UploadIntentDto } from '../utils/dtoTypes';
-import { getPresignedUploadUrl, getObjectUrl, getPresignedDownloadUrl, uploadToS3 } from '../utils/s3';
+import { getPresignedUploadUrl, getObjectUrl, getPresignedDownloadUrl, uploadFileToS3 } from '../utils/s3';
 
 
 
@@ -36,14 +36,6 @@ export class ReceiptsService {
     // Generate storage key (bucket is assumed to exist)
     const storageKey = `receipts/${expenseId}/${randomUUID()}-${Date.now()}`;
     
-    logger.info({
-      expenseId,
-      userId,
-      filename: data.filename,
-      mimeType: data.mimeType,
-      sizeBytes: data.sizeBytes,
-      storageKey,
-    }, 'Creating upload intent')
     
     const uploadUrl = await getPresignedUploadUrl({
       bucketType: 'receipts',
@@ -64,13 +56,6 @@ export class ReceiptsService {
     });
 
     const saved = await receipt.save();
-    
-    logger.info({
-      receiptId: saved._id,
-      expenseId,
-      storageKey,
-      storageUrl,
-    }, 'Receipt created for upload')
 
     // Link receipt to expense
     if (!expense.receiptIds) {
@@ -93,19 +78,26 @@ export class ReceiptsService {
 
   /**
    * Upload file directly to S3 via backend (bypasses CORS)
+   * Uses file path for streaming upload (memory efficient)
    */
   static async uploadFile(
     receiptId: string,
     userId: string,
-    fileBuffer: Buffer,
+    filePath: string,
     mimeType: string
   ): Promise<void> {
+    const fs = await import('fs');
+    
     const receipt = await Receipt.findById(receiptId).populate({
       path: 'expenseId',
       populate: { path: 'reportId' },
     });
 
     if (!receipt) {
+      // Clean up temp file if receipt not found
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
       throw new Error('Receipt not found');
     }
 
@@ -114,21 +106,35 @@ export class ReceiptsService {
     const report = expense.reportId as any;
 
     if (report && report.userId.toString() !== userId) {
+      // Clean up temp file on access denied
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
       throw new Error('Access denied');
     }
 
-    // Upload to S3
-    await uploadToS3('receipts', receipt.storageKey, fileBuffer, mimeType);
+    try {
+      // Upload file to S3 using streaming (memory efficient)
+      const fileSize = await uploadFileToS3('receipts', receipt.storageKey, filePath, mimeType);
 
-    // Update receipt with file size
-    receipt.sizeBytes = fileBuffer.length;
-    await receipt.save();
+      // Update receipt with file size
+      receipt.sizeBytes = fileSize;
+      await receipt.save();
 
-    logger.info({
-      receiptId,
-      storageKey: receipt.storageKey,
-      sizeBytes: fileBuffer.length,
-    }, 'File uploaded to S3 via backend');
+      logger.info({
+        receiptId,
+        storageKey: receipt.storageKey,
+      }, 'Upload success');
+    } finally {
+      // Always delete temp file after upload (success or failure)
+      if (fs.existsSync(filePath)) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch (deleteError) {
+          // Ignore delete errors - file may have been deleted already
+        }
+      }
+    }
   }
 
   static async confirmUpload(
@@ -157,13 +163,6 @@ export class ReceiptsService {
     // Mark upload as confirmed
     receipt.uploadConfirmed = true;
     await receipt.save();
-    
-    logger.info({
-      receiptId,
-      userId,
-      storageKey: receipt.storageKey,
-      storageUrl: receipt.storageUrl,
-    }, 'Receipt upload confirmed')
 
     // Small delay to ensure S3 upload has fully propagated
     // S3 eventual consistency can cause issues if we try to read immediately
@@ -220,11 +219,6 @@ export class ReceiptsService {
       }
 
       await user.save();
-      logger.info({
-        userId,
-        receiptId,
-        storageUrl: receipt.storageUrl,
-      }, 'Receipt URL stored in user collection')
     }
     
     // Add signedUrl to receipt object for response
@@ -233,18 +227,11 @@ export class ReceiptsService {
       (receiptObj as any).signedUrl = signedUrl;
     }
 
-    // Process OCR synchronously (no queue)
+    // Enqueue OCR job (non-blocking)
     let ocrJobId: string | null = null;
-    let extractedFields: any = null;
     
     try {
-      logger.info({ 
-        receiptId,
-        storageKey: receipt.storageKey,
-        storageUrl: receipt.storageUrl,
-      }, 'Starting OCR processing');
-      
-      // Verify file exists in S3 before processing OCR
+      // Verify file exists in S3 before queuing OCR
       const { HeadObjectCommand } = await import('@aws-sdk/client-s3');
       const { s3Client, getS3Bucket } = await import('../config/aws');
       const bucket = getS3Bucket('receipts');
@@ -255,13 +242,12 @@ export class ReceiptsService {
           Key: receipt.storageKey,
         });
         await s3Client.send(headCommand);
-        logger.info({ receiptId, storageKey: receipt.storageKey }, 'Receipt verified in S3 before OCR');
       } catch (s3Error: any) {
         if (s3Error.name === 'NotFound' || s3Error.$metadata?.httpStatusCode === 404) {
           logger.error({
             receiptId,
             storageKey: receipt.storageKey,
-          }, 'Receipt not found in S3 - upload may not have completed. OCR will be skipped.');
+          }, 'Receipt not found in S3 - OCR will be skipped.');
           // Don't throw - allow the confirm to succeed, OCR can be retried later
           return {
             receipt,
@@ -272,23 +258,15 @@ export class ReceiptsService {
         throw s3Error;
       }
       
-      const ocrJob = await OcrService.processReceiptSync(receiptId);
-      ocrJobId = (ocrJob._id as mongoose.Types.ObjectId).toString();
-      
-      if (ocrJob.status === 'COMPLETED' && ocrJob.result) {
-        extractedFields = ocrJob.result;
-        logger.info({ receiptId, ocrJobId }, 'OCR completed successfully');
-      } else if (ocrJob.status === 'FAILED') {
-        logger.warn({ receiptId, ocrJobId, error: ocrJob.error }, 'OCR processing failed');
-      }
+      // Enqueue OCR job (non-blocking)
+      ocrJobId = await OcrService.enqueueOcrJob(receiptId);
+      logger.info({ receiptId }, 'OCR queued');
     } catch (error: any) {
       logger.error({
         receiptId,
-        storageKey: receipt.storageKey,
         error: error.message,
-        stack: error.stack,
-      }, 'OCR processing error');
-      // Don't fail the confirm upload if OCR fails - receipt is still uploaded
+      }, 'OCR queue error');
+      // Don't fail the confirm upload if OCR queue fails - receipt is still uploaded
     }
     
     // Return receipt with OCR job info
@@ -302,8 +280,8 @@ export class ReceiptsService {
       .exec();
     
     if (!receiptWithOcr) {
-      logger.error({ receiptId }, 'Receipt not found after OCR processing');
-      throw new Error('Receipt not found after OCR processing');
+      logger.error({ receiptId }, 'Receipt not found');
+      throw new Error('Receipt not found');
     }
     
     // Ensure receipt has signedUrl if it was generated
@@ -312,9 +290,8 @@ export class ReceiptsService {
       (finalReceiptObj as any).signedUrl = signedUrl;
     }
     
-    // Ensure ocrJobId is included in the response (as both object and string)
+    // Ensure ocrJobId is included in the response
     if (ocrJobId) {
-      // If ocrJobId is populated as object, extract the ID string
       if ((finalReceiptObj as any).ocrJobId && typeof (finalReceiptObj as any).ocrJobId === 'object') {
         (finalReceiptObj as any).ocrJobId = (finalReceiptObj as any).ocrJobId._id?.toString() || (finalReceiptObj as any).ocrJobId.id?.toString() || ocrJobId;
       } else if (!(finalReceiptObj as any).ocrJobId) {
@@ -322,17 +299,10 @@ export class ReceiptsService {
       }
     }
     
-    logger.debug({
-      receiptId,
-      hasOcrJobId: !!(finalReceiptObj as any).ocrJobId,
-      ocrJobId,
-      ocrJobIdType: typeof (finalReceiptObj as any).ocrJobId,
-    }, 'Returning receipt with OCR job info');
-    
     return {
       receipt: finalReceiptObj,
       ocrJobId: ocrJobId || '',
-      extractedFields,
+      extractedFields: null, // OCR is queued, results will be available later
     };
   }
 

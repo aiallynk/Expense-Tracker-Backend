@@ -36,9 +36,12 @@ export const loginRateLimiter = rateLimit({
 });
 
 // Receipt upload rate limiter - control costs
+// Higher limits in DEMO_MODE and production for bulk uploads
 export const receiptUploadRateLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 50, // 50 uploads per hour
+  max: config.app.demoMode 
+    ? parseInt(process.env.RECEIPT_UPLOAD_RATE_LIMIT_DEMO || '1000', 10) // 1000 in demo mode
+    : parseInt(process.env.RECEIPT_UPLOAD_RATE_LIMIT || '500', 10), // 500 in production
   message: {
     success: false,
     message: 'Too many receipt uploads, please try again later',
@@ -49,6 +52,40 @@ export const receiptUploadRateLimiter = rateLimit({
   // Skip validation warnings for trust proxy in production (Render uses reverse proxy)
   validate: {
     trustProxy: false, // Disable trust proxy validation warning
+  },
+  // Use user ID for authenticated requests (better than IP-based)
+  keyGenerator: (req: any) => {
+    // Use user ID if available (authenticated requests)
+    if (req.user?.id) {
+      return `user:${req.user.id}`;
+    }
+    // Fallback to IP for unauthenticated requests
+    return req.ip || req.socket.remoteAddress || 'unknown';
+  },
+});
+
+// Bulk upload rate limiter - higher limits for bulk operations
+export const bulkUploadRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: config.app.demoMode
+    ? parseInt(process.env.BULK_UPLOAD_RATE_LIMIT_DEMO || '2000', 10) // 2000 in demo mode
+    : parseInt(process.env.BULK_UPLOAD_RATE_LIMIT || '1000', 10), // 1000 in production
+  message: {
+    success: false,
+    message: 'Too many bulk upload requests, please try again later',
+    code: 'RATE_LIMIT_EXCEEDED',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: {
+    trustProxy: false,
+  },
+  // Use user ID for authenticated requests
+  keyGenerator: (req: any) => {
+    if (req.user?.id) {
+      return `user:${req.user.id}`;
+    }
+    return req.ip || req.socket.remoteAddress || 'unknown';
   },
 });
 

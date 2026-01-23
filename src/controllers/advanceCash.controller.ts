@@ -157,6 +157,50 @@ export class AdvanceCashController {
 
     res.status(200).json({ success: true, data });
   });
+
+  /**
+   * Delete an advance cash voucher
+   * - Users can delete their own vouchers
+   * - Admins can delete any voucher in their company
+   * - Cannot delete if voucher is used in any reports or transactions
+   */
+  static delete = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const companyId = await getUserCompanyId(req);
+    const userId = req.user?.id;
+    const userRole = req.user?.role;
+
+    if (!companyId || !userId) {
+      res.status(400).json({ success: false, message: 'User is not associated with a company', code: 'NO_COMPANY' });
+      return;
+    }
+
+    const advanceCashId = req.params.id;
+    if (!advanceCashId) {
+      res.status(400).json({ success: false, message: 'Advance cash ID is required', code: 'MISSING_ID' });
+      return;
+    }
+
+    try {
+      await AdvanceCashService.deleteAdvance({
+        advanceCashId,
+        companyId,
+        userId,
+        userRole: userRole || '',
+      });
+
+      res.status(200).json({ success: true, message: 'Advance cash voucher deleted successfully' });
+    } catch (error: any) {
+      const statusCode = error.message.includes('not found') ? 404 : 
+                        error.message.includes('permission') || error.message.includes('only delete') ? 403 :
+                        error.message.includes('Cannot delete') ? 400 : 500;
+      
+      res.status(statusCode).json({
+        success: false,
+        message: error.message || 'Failed to delete advance cash voucher',
+        code: 'DELETE_FAILED',
+      });
+    }
+  });
 }
 
 

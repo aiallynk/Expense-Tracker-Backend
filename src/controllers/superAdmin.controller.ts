@@ -906,7 +906,7 @@ export class SuperAdminController {
       ocrSuccessRate = ocrStats.length > 0 ? (ocrStats[0].successfulJobs / ocrStats[0].totalJobs * 100) : 100;
       avgProcessingTime = ocrStats.length > 0 ? Math.round(ocrStats[0].avgProcessingTime || 0) : 0;
     } catch (ocrError: any) {
-      console.warn('OCR stats aggregation failed:', ocrError.message);
+      logger.warn({ error: ocrError.message }, 'OCR stats aggregation failed');
       // Use default values
     }
 
@@ -953,7 +953,7 @@ export class SuperAdminController {
       ]);
     } catch (apiLogError: any) {
       // ApiRequestLog might not exist or have issues, use fallback
-      console.warn('ApiRequestLog query failed, using fallback values:', apiLogError.message);
+      logger.warn({ error: apiLogError.message }, 'ApiRequestLog query failed, using fallback values');
       totalApiCalls = totalReports * 5; // Estimate based on reports
       apiCallsThisMonth = reportsThisMonth * 5;
       apiCallsLastMonth = reportsLastMonth * 5;
@@ -1005,7 +1005,7 @@ export class SuperAdminController {
 
       totalRevenue = monthlyRevenue.reduce((sum, item) => sum + item.total, 0);
     } catch (revenueError: any) {
-      console.warn('Revenue aggregation failed:', revenueError.message);
+      logger.warn({ error: revenueError.message }, 'Revenue aggregation failed');
       totalRevenue = 0;
     }
 
@@ -1082,7 +1082,7 @@ export class SuperAdminController {
 
       mrrGrowth = normalizedLastPeriod > 0 ? ((mrrContribution - normalizedLastPeriod) / normalizedLastPeriod * 100) : 0;
     } catch (growthError: any) {
-      console.warn('MRR growth calculation failed:', growthError.message);
+      logger.warn({ error: growthError.message }, 'MRR growth calculation failed');
       mrrGrowth = 0;
     }
 
@@ -1128,7 +1128,7 @@ export class SuperAdminController {
       failedReceipts = failedCount;
       unprocessedReceipts = Math.max(0, totalReceipts - processedCount - pendingCount - failedCount);
     } catch (receiptStatusError: any) {
-      console.warn('Receipt status counting failed:', receiptStatusError.message);
+      logger.warn({ error: receiptStatusError.message }, 'Receipt status counting failed');
       // Use fallback: assume all receipts are unprocessed
       unprocessedReceipts = totalReceipts;
     }
@@ -1210,7 +1210,7 @@ export class SuperAdminController {
       });
     } catch (socketError: any) {
       // Socket emission failed, but don't fail the API call
-      console.warn('Failed to emit analytics update:', socketError.message);
+      logger.warn({ error: socketError.message }, 'Failed to emit analytics update');
     }
 
     res.status(200).json({

@@ -12,6 +12,7 @@ router.get('/available-vouchers', AdvanceCashController.getAvailableVouchers);
 router.get('/company', AdvanceCashController.listCompany);
 router.get('/', AdvanceCashController.listMine);
 router.post('/', AdvanceCashController.create);
+router.delete('/:id', AdvanceCashController.delete);
 
 export default router;
 

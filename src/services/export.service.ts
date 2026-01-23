@@ -15,7 +15,7 @@ import { ExpenseReport } from '../models/ExpenseReport';
 import { ExportFormat } from '../utils/enums';
 import { getObjectUrl } from '../utils/s3';
 
-// import { logger } from '@/config/logger'; // Unused
+import { logger } from '@/config/logger';
 
 /**
  * Get currency symbol based on currency code
@@ -602,7 +602,7 @@ export class ExportService {
             });
           } catch (error) {
             // Log but don't fail PDF generation if logo fails
-            console.error('Error loading company logo:', error);
+            logger.error({ error }, 'Error loading company logo');
           }
         }
 
@@ -613,7 +613,7 @@ export class ExportService {
             (doc as any).image(logoBuffer, 50, yPosition, { width: 100, height: 50 });
             yPosition += 60;
           } catch (error) {
-            console.error('Error adding logo to PDF:', error);
+            logger.error({ error }, 'Error adding logo to PDF');
           }
         }
 

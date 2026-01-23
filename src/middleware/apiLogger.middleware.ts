@@ -3,6 +3,7 @@ import { Request, Response, NextFunction } from 'express';
 import { ApiRequestLog } from '../models/ApiRequestLog';
 import { emitLogEntry } from '../socket/realtimeEvents';
 
+import { logger } from '@/config/logger';
 import { AuthRequest } from './auth.middleware';
 
 /**
@@ -116,10 +117,10 @@ export const apiLoggerMiddleware = async (
           });
         }
       } catch (error) {
-        // Don't fail request if logging fails - use console as fallback
-        // This is a critical path, so we can't use logger here (circular dependency risk)
+        // Don't fail request if logging fails - use logger if available
+        // Only log in non-production to prevent spam
         if (process.env.NODE_ENV !== 'production') {
-          console.error('Failed to log API request:', error);
+          logger.error({ error }, 'Failed to log API request');
         }
       }
     });

@@ -8,6 +8,7 @@ import { Expense } from '../models/Expense';
 import { OcrJob, IOcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
 import { OcrJobStatus } from '../utils/enums';
+import { ocrQueue } from '../utils/inProcessQueue';
 
 import { logger } from '@/config/logger';
 import { DateUtils } from '@/utils/dateUtils';
@@ -26,7 +27,66 @@ export interface OcrResult {
 
 export class OcrService {
   /**
-   * Process OCR synchronously (no queue) - simple implementation
+   * Enqueue OCR job to in-process queue (non-blocking)
+   * Returns job ID immediately
+   */
+  static async enqueueOcrJob(receiptId: string): Promise<string> {
+    const receipt = await Receipt.findById(receiptId);
+
+    if (!receipt) {
+      throw new Error('Receipt not found');
+    }
+
+    // Check if OCR is disabled
+    if (config.ocr.disableOcr) {
+      const ocrJob = new OcrJob({
+        status: OcrJobStatus.COMPLETED,
+        provider: 'DISABLED',
+        receiptId,
+        result: { message: 'OCR disabled by configuration' },
+        attempts: 0,
+      });
+      const saved = await ocrJob.save();
+      receipt.ocrJobId = saved._id as mongoose.Types.ObjectId;
+      await receipt.save();
+      return (saved._id as mongoose.Types.ObjectId).toString();
+    }
+
+    // Create OCR job with QUEUED status
+    const ocrJob = new OcrJob({
+      status: OcrJobStatus.QUEUED,
+      provider: 'OPENAI',
+      receiptId,
+      attempts: 0,
+    });
+
+    const saved = await ocrJob.save();
+    receipt.ocrJobId = saved._id as mongoose.Types.ObjectId;
+    await receipt.save();
+
+    const jobId = (saved._id as mongoose.Types.ObjectId).toString();
+
+    // Enqueue job to in-process queue
+    try {
+      ocrQueue.enqueue({
+        jobId,
+        receiptId,
+        createdAt: new Date(),
+      });
+    } catch (error: any) {
+      // If queue is full, mark job as failed
+      ocrJob.status = OcrJobStatus.FAILED;
+      ocrJob.error = error.message || 'Queue is full';
+      await ocrJob.save();
+      throw error;
+    }
+
+    return jobId;
+  }
+
+  /**
+   * Process OCR synchronously (no queue) - DEPRECATED, kept for backward compatibility
+   * Use enqueueOcrJob instead
    */
   static async processReceiptSync(receiptId: string): Promise<IOcrJob> {
     const receipt = await Receipt.findById(receiptId);
@@ -37,7 +97,6 @@ export class OcrService {
 
     // Check if OCR is disabled
     if (config.ocr.disableOcr) {
-      logger.info({ receiptId }, 'OCR is disabled, creating placeholder job');
       const ocrJob = new OcrJob({
         status: OcrJobStatus.COMPLETED,
         provider: 'DISABLED',
@@ -93,13 +152,6 @@ export class OcrService {
         throw new Error('Receipt not found for OCR job');
       }
 
-      logger.info({
-        jobId,
-        receiptId: receiptPopulated._id,
-        storageKey: receiptPopulated.storageKey,
-        mimeType: receiptPopulated.mimeType,
-      }, 'Verifying receipt exists in S3');
-
       const bucket = getS3Bucket('receipts');
 
       // First, verify the object exists in S3
@@ -109,17 +161,12 @@ export class OcrService {
           Key: receiptPopulated.storageKey,
         });
         await s3Client.send(headCommand);
-        logger.info({
-          jobId,
-          storageKey: receiptPopulated.storageKey,
-        }, 'Receipt verified in S3');
       } catch (headError: any) {
         if (headError.name === 'NotFound' || headError.$metadata?.httpStatusCode === 404) {
           logger.error({
             jobId,
             receiptId: receiptPopulated._id,
-            storageKey: receiptPopulated.storageKey,
-          }, 'Receipt not found in S3 - upload may not have completed');
+          }, 'Receipt not found in S3');
           job.status = OcrJobStatus.FAILED;
           job.error = 'Receipt file not found in S3. Please ensure the upload completed successfully.';
           await job.save();
@@ -127,13 +174,6 @@ export class OcrService {
         }
         throw headError;
       }
-
-      logger.info({
-        jobId,
-        receiptId: receiptPopulated._id,
-        storageKey: receiptPopulated.storageKey,
-        mimeType: receiptPopulated.mimeType,
-      }, 'Downloading receipt from S3');
 
       // Download image from S3
       const command = new GetObjectCommand({
@@ -153,32 +193,12 @@ export class OcrService {
       
       const imageBuffer = await this.streamToBuffer(response.Body);
 
-      logger.info({ 
-        sizeBytes: imageBuffer.length,
-        jobId,
-      }, 'Receipt downloaded from S3');
-
       // Convert to base64
       const base64Image = imageBuffer.toString('base64');
-
-      logger.info({
-        model: getVisionModel(),
-        imageSize: base64Image.length,
-        mimeType: receiptPopulated.mimeType,
-        jobId,
-      }, 'Calling OpenAI Vision API')
 
       // Call OpenAI Vision API
       const result = await this.callOpenAIVision(base64Image, receiptPopulated.mimeType);
       
-      logger.info({
-        extractedFields: Object.keys(result),
-        hasVendor: !!result.vendor,
-        hasAmount: !!result.totalAmount,
-        hasDate: !!result.date,
-        jobId,
-      }, 'OpenAI Vision API call successful')
-
       // Save result to both result and resultJson for compatibility
       job.status = OcrJobStatus.COMPLETED;
       job.result = result;
@@ -191,8 +211,16 @@ export class OcrService {
       if (receiptDoc) {
         receiptDoc.parsedData = result;
         await receiptDoc.save();
-        logger.info({ receiptId: receiptDoc._id }, 'Receipt updated with parsed data');
       }
+
+      // Memory cleanup: nullify large objects to allow GC
+      (imageBuffer as any) = null;
+      (base64Image as any) = null;
+      
+      // Allow GC to run
+      process.nextTick(() => {
+        // Additional cleanup if needed
+      });
 
       // Auto-fill expense fields if expense exists and report is still DRAFT
       // Try to find expense by receiptPrimaryId or by receiptIds array
@@ -227,12 +255,11 @@ export class OcrService {
               if (DateUtils.isValidDateString(result.date)) {
                 expense.expenseDate = DateUtils.parseISTDate(result.date);
                 updated = true;
-                logger.info({ receiptId: receiptDoc?._id, date: result.date }, 'OCR date parsed successfully as IST date');
               } else {
-                logger.warn({ receiptId: receiptDoc?._id, date: result.date }, 'Invalid date format from OCR, skipping expense date update');
+                logger.warn({ receiptId: receiptDoc?._id }, 'Invalid date format from OCR');
               }
             } catch (e) {
-              logger.warn({ receiptId: receiptDoc?._id, date: result.date, error: (e as Error).message }, 'Error parsing OCR date');
+              logger.warn({ receiptId: receiptDoc?._id, error: (e as Error).message }, 'Error parsing OCR date');
             }
           }
           
@@ -253,19 +280,10 @@ export class OcrService {
             if (categoryMatch.bestMatch && categoryMatch.bestMatch.confidence >= 50) {
               expense.categoryId = categoryMatch.bestMatch.categoryId;
               updated = true;
-              logger.info({
-                receiptId: receiptDoc?._id,
-                matchedCategory: categoryMatch.bestMatch?.categoryName,
-                confidence: categoryMatch.bestMatch?.confidence
-              }, 'AI category matching successful');
         } else if (categoryMatch.fallbackCategory) {
           // Use fallback category if no good match
           expense.categoryId = categoryMatch.fallbackCategory.categoryId;
           updated = true;
-          logger.info({
-            receiptId: receiptDoc?._id,
-            fallbackCategory: categoryMatch.fallbackCategory.categoryName
-          }, 'Using fallback category due to low AI confidence');
         }
           } catch (error: any) {
             logger.warn({
@@ -300,7 +318,14 @@ export class OcrService {
         }
       }
 
-      logger.info({ jobId }, 'OCR job completed and expense updated');
+      // Final memory cleanup: clear result object reference after all processing
+      (result as any) = null;
+      
+      // Allow GC to run before returning
+      process.nextTick(() => {
+        // GC hint
+      });
+
       return job;
     } catch (error: any) {
       logger.error({
@@ -313,8 +338,6 @@ export class OcrService {
       job.error = error.message;
       job.errorJson = {
         message: error.message,
-        stack: error.stack,
-        name: error.name,
       };
       job.attempts = (job.attempts || 0) + 1;
       await job.save();
@@ -340,12 +363,6 @@ export class OcrService {
     const prompt = `Extract receipt data as JSON only. Fields: vendor (string), date (YYYY-MM-DD), totalAmount (number), currency (INR/USD/EUR), tax (number, optional), lineItems ([{description, amount}]), notes (string, optional). Return JSON only, no markdown. Do not suggest categories - that will be handled separately.`;
 
     try {
-      logger.info({
-        model,
-        imageSize: base64Image.length,
-        mimeType,
-      }, 'Preparing OpenAI API request')
-
       // OpenAI vision API format
       const response = await openaiClient.chat.completions.create({
         model,
@@ -372,12 +389,6 @@ export class OcrService {
         temperature: 0.0, // Zero temperature for fastest, most consistent results
       });
 
-      logger.info({
-        model,
-        usage: response.usage,
-        finishReason: response.choices[0]?.finish_reason,
-      }, 'OpenAI API call successful')
-
       const content = response.choices[0]?.message?.content;
       if (!content) {
         logger.error('OpenAI returned empty response');
@@ -397,40 +408,25 @@ export class OcrService {
         const result = JSON.parse(cleanedContent) as OcrResult;
         result.confidence = 0.85; // Default confidence, could be calculated
         
-        // Log successful extraction
-        logger.info({
-          vendor: result.vendor,
-          totalAmount: result.totalAmount,
-          date: result.date,
-          currency: result.currency,
-          hasLineItems: !!(result.lineItems && result.lineItems.length > 0),
-          lineItemsCount: result.lineItems?.length || 0,
-        }, 'OCR extraction successful')
-        
         // Validate that we got at least some data
         if (!result.vendor && !result.totalAmount && !result.date) {
-          logger.warn({ result }, 'OCR extraction returned minimal data');
+          logger.warn('OCR extraction returned minimal data');
         }
         
         return result;
       } catch (error) {
         // If not JSON, try to extract structured data
         logger.warn({
-          content: cleanedContent.substring(0, 200), // Log first 200 chars
           error: error instanceof Error ? error.message : String(error),
-        }, 'OpenAI response not in JSON format, attempting to parse:')
+        }, 'OpenAI response not in JSON format, attempting to parse')
         const parsed = this.parseUnstructuredResponse(cleanedContent);
-        logger.info({ parsed }, 'Parsed unstructured response');
         return parsed;
       }
     } catch (error: any) {
       logger.error({
         error: error.message,
-        name: error.name,
         status: error.status,
         code: error.code,
-        model,
-        stack: error.stack,
       }, 'OpenAI API call failed')
       
       // Provide more helpful error messages
@@ -470,11 +466,6 @@ export class OcrService {
   private static parseUnstructuredResponse(content: string): OcrResult {
     // Fallback parser for non-JSON responses
     const result: OcrResult = {};
-    
-    logger.warn({
-      contentLength: content.length,
-      preview: content.substring(0, 200),
-    }, 'Attempting to parse unstructured OCR response')
 
     // Try to extract vendor - multiple patterns
     const vendorPatterns = [
@@ -539,12 +530,6 @@ export class OcrService {
     }
     
     // Category matching is now handled separately via AI service
-
-    logger.info({
-      extractedFields: Object.keys(result),
-      hasVendor: !!result.vendor,
-      hasAmount: !!result.totalAmount,
-    }, 'Parsed unstructured response')
 
     return result;
   }

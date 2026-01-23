@@ -18,6 +18,7 @@ import { CompanySettingsService } from './companySettings.service';
 import { currencyService } from './currency.service';
 
 import { logger } from '@/config/logger';
+import { config } from '@/config/index';
 import { DateUtils } from '@/utils/dateUtils';
 
 export class ExpensesService {
@@ -445,8 +446,10 @@ export class ExpensesService {
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     
-    // Debug logging for pagination
-    console.log(`[ExpensesService] Pagination: page=${page}, pageSize=${pageSize}, skip=${(page - 1) * pageSize}`);
+    // Debug logging for pagination (only in non-production)
+    if (config.app.env !== 'production') {
+      logger.debug({ page, pageSize, skip: (page - 1) * pageSize }, '[ExpensesService] Pagination');
+    }
 
     // Build base query - expenses must belong to the user
     // Since expenses have a userId field, we can directly query by userId
@@ -519,7 +522,10 @@ export class ExpensesService {
       Expense.countDocuments(query).exec(),
     ]);
 
-    console.log(`[ExpensesService] Query result: ${expenses.length} expenses returned (total: ${total}, requested: ${pageSize})`);
+    // Query result logging (only in non-production)
+    if (config.app.env !== 'production') {
+      logger.debug({ count: expenses.length, total, requested: pageSize }, '[ExpensesService] Query result');
+    }
 
     // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
     const formattedExpenses = expenses.map((expense) => {

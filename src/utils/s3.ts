@@ -76,7 +76,38 @@ export const uploadToS3 = async (
   });
 
   await s3Client.send(command);
-  logger.info({ bucket, key, mimeType, size: buffer.length }, 'File uploaded to S3');
+};
+
+/**
+ * Upload file from disk path to S3 using streaming (memory efficient)
+ */
+export const uploadFileToS3 = async (
+  bucketType: 'receipts' | 'exports',
+  key: string,
+  filePath: string,
+  mimeType: string
+): Promise<number> => {
+  const fs = await import('fs');
+  const bucket = getS3Bucket(bucketType);
+  
+  // Get file size for logging
+  const stats = fs.statSync(filePath);
+  const fileSize = stats.size;
+  
+  // Create read stream from file
+  const fileStream = fs.createReadStream(filePath);
+  
+  const command = new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: fileStream,
+    ContentType: mimeType,
+  });
+
+  await s3Client.send(command);
+  
+  // File stream is automatically closed after upload
+  return fileSize;
 };
 
 /**

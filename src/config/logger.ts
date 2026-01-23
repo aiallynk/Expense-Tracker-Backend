@@ -8,12 +8,29 @@ import pino from 'pino';
  * - Log levels: debug, info, warn, error
  * 
  * Note: Reads directly from process.env to avoid circular dependency with config
+ * In production: Only ERROR and WARN logs are shown (INFO and DEBUG suppressed)
  */
-const logLevel = (process.env.LOG_LEVEL || 'info').toLowerCase() as pino.Level;
+// Check if production environment
+const isProduction = process.env.NODE_ENV === 'production' || process.env.APP_ENV === 'production';
+
+// Determine log level: suppress INFO in production unless explicitly set
+const logLevelEnv = process.env.LOG_LEVEL?.toLowerCase() as pino.Level | undefined;
+let logLevel: pino.Level;
+
+if (logLevelEnv) {
+  // Use explicit LOG_LEVEL if set
+  logLevel = logLevelEnv;
+} else if (isProduction) {
+  // Production default: only WARN and ERROR
+  logLevel = 'warn';
+} else {
+  // Development default: INFO
+  logLevel = 'info';
+}
 
 // Validate log level
 const validLevels: pino.Level[] = ['debug', 'info', 'warn', 'error', 'fatal'];
-const level = validLevels.includes(logLevel) ? logLevel : 'info';
+const level = validLevels.includes(logLevel) ? logLevel : (isProduction ? 'warn' : 'info');
 
 // Base logger configuration
 const loggerConfig: pino.LoggerOptions = {

@@ -8,6 +8,10 @@ import { config } from './index';
 
 export const connectDB = async (): Promise<void> => {
   try {
+    // Disable Mongoose debug logs and auto-index warnings
+    mongoose.set('debug', false);
+    mongoose.set('autoIndex', false);
+
     const uri = config.mongodb.uri.endsWith('/')
       ? `${config.mongodb.uri}${config.mongodb.dbName}`
       : `${config.mongodb.uri}/${config.mongodb.dbName}`;
