@@ -26,8 +26,8 @@ export const loginRateLimiter = rateLimit({
     trustProxy: false, // Disable trust proxy validation warning
   },
   skip: (req) => {
-    // Skip rate limiting for health checks
-    return req.path === '/health';
+    // Skip rate limiting for health checks and OPTIONS requests (CORS preflight)
+    return req.path === '/health' || req.method === 'OPTIONS';
   },
   // Use IP-based key generator for distributed rate limiting
   keyGenerator: (req) => {
@@ -133,8 +133,8 @@ export const apiRateLimiter = rateLimit({
     trustProxy: false, // Disable trust proxy validation warning
   },
   skip: (req) => {
-    // Skip rate limiting for health checks
-    return req.path === '/health';
+    // Skip rate limiting for health checks and OPTIONS requests (CORS preflight)
+    return req.path === '/health' || req.method === 'OPTIONS';
   },
   // Use IP-based key generator for distributed rate limiting
   keyGenerator: (req) => {

@@ -28,6 +28,9 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
       methods: ['GET', 'POST'],
     },
     path: '/socket.io',
+    pingTimeout: 60000, // 60 seconds
+    pingInterval: 25000, // 25 seconds
+    allowEIO3: true, // Allow Engine.IO v3 clients for compatibility
   });
 
   // Authentication middleware for socket connections
@@ -76,12 +79,18 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
       return;
     }
 
-    logger.info(`Socket connected: ${user.email} (${user.id})`);
+    // Only log socket connections in development to reduce spam
+    if (config.app.env === 'development') {
+      logger.debug(`Socket connected: ${user.email} (${user.id})`);
+    }
 
     // Join super admin room if user is super admin
     if (user.role === UserRole.SUPER_ADMIN) {
       socket.join('super-admin');
-      logger.debug(`Super admin ${user.email} joined super-admin room`);
+      // Only log in development to reduce spam
+      if (config.app.env === 'development') {
+        logger.debug(`Super admin ${user.email} joined super-admin room`);
+      }
 
       // Handle analytics requests from super admin
       socket.on('super-admin:system-analytics-request', async (filters = {}) => {
@@ -106,7 +115,10 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
         if (companyAdmin && companyAdmin.companyId) {
           const companyId = companyAdmin.companyId.toString();
           socket.join(`company-admin:${companyId}`);
-          logger.debug(`Company admin ${user.email} joined company-admin room: ${companyId}`);
+          // Only log in development to reduce spam
+          if (config.app.env === 'development') {
+            logger.debug(`Company admin ${user.email} joined company-admin room: ${companyId}`);
+          }
         }
       } catch (error) {
         logger.error({ error, email: user.email }, 'Error joining company admin room');
@@ -132,18 +144,26 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
     // This can be extended based on your needs
     socket.on('join-company', (companyId: string) => {
       socket.join(`company:${companyId}`);
-      logger.debug(`User ${user.email} joined company room: ${companyId}`);
+      // Only log in development to reduce spam
+      if (config.app.env === 'development') {
+        logger.debug(`User ${user.email} joined company room: ${companyId}`);
+      }
     });
 
     // Leave company room
     socket.on('leave-company', (companyId: string) => {
       socket.leave(`company:${companyId}`);
-      logger.debug(`User ${user.email} left company room: ${companyId}`);
+      // Only log in development to reduce spam
+      if (config.app.env === 'development') {
+        logger.debug(`User ${user.email} left company room: ${companyId}`);
+      }
     });
 
-    // Handle disconnection
+    // Handle disconnection - only log errors in production
     socket.on('disconnect', () => {
-      logger.info({ userId: user.id, email: user.email }, 'Socket disconnected');
+      if (config.app.env === 'development') {
+        logger.debug({ userId: user.id, email: user.email }, 'Socket disconnected');
+      }
     });
 
     // Error handling

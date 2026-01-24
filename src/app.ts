@@ -60,29 +60,53 @@ export const createApp = (): Express => {
 
   // Security middleware
   if (config.app.env === 'development') {
-    // Relaxed security in development
+    // Relaxed security in development - allow CORS
     app.use(
       helmet({
         contentSecurityPolicy: false, // Disable CSP in development
         crossOriginEmbedderPolicy: false,
+        crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow cross-origin requests
       })
     );
   } else {
     // Production security
-    app.use(helmet());
-  }
-
-  // CORS configuration
-  if (config.app.env === 'development') {
-    // In development, allow all origins for easier testing
     app.use(
-      cors({
-        origin: true, // Allow all origins in development
-        credentials: true,
-        methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'x-api-key'],
+      helmet({
+        crossOriginResourcePolicy: { policy: 'cross-origin' }, // Allow cross-origin requests
       })
     );
+  }
+
+  // CORS configuration - MUST be before routes
+  // Always allow CORS in development, check environment properly
+  const isDevelopment = config.app.env === 'development' || 
+                        process.env.NODE_ENV === 'development' || 
+                        process.env.NODE_ENV !== 'production';
+  
+  // Log CORS configuration for debugging
+  logger.info({ 
+    env: config.app.env, 
+    nodeEnv: process.env.NODE_ENV,
+    isDevelopment,
+    port: config.app.port
+  }, 'CORS Configuration');
+  
+  if (isDevelopment) {
+    // In development, allow all origins for easier testing
+    logger.info('CORS: Development mode - allowing all origins (including localhost:5173)');
+    
+    // Use simple CORS configuration that definitely works
+    // Apply CORS middleware globally
+    app.use(cors({
+      origin: true, // Allow all origins in development
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'x-api-key', 'Accept'],
+      exposedHeaders: ['Content-Type', 'Authorization'],
+      preflightContinue: false,
+      optionsSuccessStatus: 204,
+      maxAge: 86400, // 24 hours
+    }));
   } else {
     // In production, use specific origins
     const allowedOrigins = [
@@ -94,6 +118,7 @@ export const createApp = (): Express => {
       logger.warn('No frontend URLs configured for CORS in production');
     }
 
+    logger.info({ allowedOrigins }, 'CORS: Production mode - using configured origins');
     app.use(
       cors({
         origin: (origin, callback) => {
@@ -104,13 +129,17 @@ export const createApp = (): Express => {
           if (allowedOrigins.includes(origin)) {
             callback(null, true);
           } else {
-            logger.warn({ origin }, 'CORS blocked origin');
+            logger.warn({ origin, allowedOrigins }, 'CORS blocked origin');
             callback(new Error('Not allowed by CORS'));
           }
         },
         credentials: true,
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'x-api-key'],
+        allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID', 'x-api-key', 'Accept'],
+        exposedHeaders: ['Content-Type', 'Authorization'],
+        preflightContinue: false,
+        optionsSuccessStatus: 204,
+        maxAge: 86400,
       })
     );
   }
@@ -119,8 +148,13 @@ export const createApp = (): Express => {
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-  // Rate limiting
-  app.use('/api/v1', apiRateLimiter);
+  // Rate limiting (skip OPTIONS requests for CORS preflight)
+  app.use('/api/v1', (req, res, next) => {
+    if (req.method === 'OPTIONS') {
+      return next(); // Skip rate limiting for OPTIONS requests
+    }
+    return apiRateLimiter(req, res, next);
+  });
 
   // API request logging (for analytics) - after rate limiting but before routes
   app.use('/api/v1', apiLoggerMiddleware);
@@ -230,6 +264,11 @@ export const createApp = (): Express => {
     const testEmailRoutes = require('./routes/test-email.routes').default;
     app.use('/api/v1', testEmailRoutes);
   }
+
+  // Diagnostic routes (admin only - available in all environments)
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const diagnoseEmailNotificationsRoutes = require('./routes/diagnose-email-notifications.routes').default;
+  app.use('/api/v1/diagnose', diagnoseEmailNotificationsRoutes);
 
   // 404 handler
   app.use((_req, res) => {

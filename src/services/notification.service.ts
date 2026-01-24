@@ -992,13 +992,18 @@ export class NotificationService {
 
       const client = getResendClient();
       if (!client) {
-        logger.warn({ 
+        const errorMsg = config.resend.apiKey 
+          ? 'Resend client failed to initialize - check API key validity'
+          : 'RESEND_API_KEY not configured - email notifications are disabled';
+        logger.error({ 
           to: data.to, 
           subject: data.subject,
           apiKeyConfigured: !!config.resend.apiKey,
-          fromEmail: fromEmail 
-        }, 'Resend not configured - email not sent');
-        return;
+          fromEmail: fromEmail,
+          error: errorMsg
+        }, '❌ EMAIL FAILED: Resend not configured - email not sent');
+        // Throw error so calling code knows email failed
+        throw new Error(errorMsg);
       }
 
       logger.info({ 
