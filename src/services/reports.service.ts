@@ -23,7 +23,6 @@ import { ApprovalService } from './ApprovalService';
 import { AuditService } from './audit.service';
 import { BusinessHeadSelectionService } from './businessHeadSelection.service';
 import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
-import { DuplicateInvoiceService } from './duplicateInvoice.service';
 import { NotificationService } from './notification.service';
 
 import { logger } from '@/config/logger';
@@ -237,12 +236,24 @@ export class ReportsService {
 
     if (reports.length > 0) {
       const reportIds = reports.map((r) => r._id as mongoose.Types.ObjectId);
-      const expensesCounts = await Expense.aggregate([
-        { $match: { reportId: { $in: reportIds } } },
-        { $group: { _id: '$reportId', count: { $sum: 1 } } },
+      const [expensesCounts, flagsAgg] = await Promise.all([
+        Expense.aggregate([
+          { $match: { reportId: { $in: reportIds } } },
+          { $group: { _id: '$reportId', count: { $sum: 1 } } },
+        ]),
+        // §2 §3: Aggregate expense-level flags per report (duplicate_flagged, ocr_needs_review)
+        Expense.aggregate([
+          { $match: { reportId: { $in: reportIds } } },
+          {
+            $group: {
+              _id: '$reportId',
+              duplicate_flagged: { $max: { $cond: [{ $in: ['$duplicateFlag', ['POTENTIAL_DUPLICATE', 'STRONG_DUPLICATE']] }, 1, 0] } },
+              ocr_needs_review: { $max: { $cond: ['$needsReview', 1, 0] } },
+            },
+          },
+        ]),
       ]);
 
-      // Create a map of reportId -> expenses count
       const expensesCountMap = new Map<string, number>();
       expensesCounts.forEach((item) => {
         const reportId = item._id instanceof mongoose.Types.ObjectId
@@ -251,18 +262,41 @@ export class ReportsService {
         expensesCountMap.set(reportId, item.count);
       });
 
-      // Add expenses count to each report and format dates as strings
+      const flagsMap = new Map<string, { duplicate_flagged: boolean; ocr_needs_review: boolean }>();
+      flagsAgg.forEach((item) => {
+        const reportId = item._id instanceof mongoose.Types.ObjectId
+          ? item._id.toString()
+          : String(item._id);
+        flagsMap.set(reportId, {
+          duplicate_flagged: !!item.duplicate_flagged,
+          ocr_needs_review: !!item.ocr_needs_review,
+        });
+      });
+
+      // Add expenses count, flags (§2 §3), and format dates
       reportsWithExpenses = reports.map((report) => {
         const reportObj = report.toObject();
         const reportId = (report._id as mongoose.Types.ObjectId).toString();
         const expensesCount = expensesCountMap.get(reportId) || 0;
+        const expenseFlags = flagsMap.get(reportId) || { duplicate_flagged: false, ocr_needs_review: false };
+        const status = (report.status || '').toUpperCase();
+        const approvers = (report as any).approvers || reportObj.approvers || [];
+        const appliedVouchers = (report as any).appliedVouchers || reportObj.appliedVouchers || [];
+        const flags = {
+          changes_requested: status === 'CHANGES_REQUESTED',
+          rejected: status === 'REJECTED',
+          duplicate_flagged: expenseFlags.duplicate_flagged,
+          voucher_applied: Array.isArray(appliedVouchers) && appliedVouchers.length > 0,
+          additional_approver_added: Array.isArray(approvers) && approvers.some((a: any) => a.isAdditionalApproval === true),
+          ocr_needs_review: expenseFlags.ocr_needs_review,
+        };
         return {
           ...reportObj,
-          // Format dates as YYYY-MM-DD strings to prevent timezone conversion issues
           fromDate: report.fromDate ? DateUtils.backendDateToFrontend(report.fromDate) : reportObj.fromDate,
           toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
           expensesCount,
-          expenses: [], // Empty array for compatibility, but we have the count
+          expenses: [],
+          flags,
         };
       });
     }
@@ -459,8 +493,13 @@ export class ReportsService {
             
             // Get role names for this level
             const roleIds = level.approverRoleIds || [];
-            const roles = await Role.find({ _id: { $in: roleIds } }).select('name').exec();
-            const roleNames = roles.map(r => r.name);
+            let roleNames: string[] = [];
+            
+            // Fetch actual role names from Role model - this is the source of truth
+            if (roleIds.length > 0) {
+              const roles = await Role.find({ _id: { $in: roleIds } }).select('name').exec();
+              roleNames = roles.map(r => r.name).filter(Boolean); // Filter out any null/undefined names
+            }
             
             // Get approver details from history
             const approverHistory = levelHistory.find((h: any) => h.approverId);
@@ -479,23 +518,19 @@ export class ReportsService {
               action = approverHistory.status?.toLowerCase();
             }
             
-            // Use actual role names from approval matrix instead of hardcoded level names
-            // If we have role names, use them; otherwise fallback to level-based naming
-            const roleNameDisplay = roleNames.join(', ') || 'Approver';
+            // ALWAYS use actual role names from approval matrix - never use generic fallback names
+            // The role field should contain the actual role names from the Role model
+            const roleNameDisplay = roleNames.length > 0 ? roleNames.join(', ') : '';
             let stepName;
             
-            // Prioritize role names from approval matrix
-            if (roleNames.length > 0 && roleNameDisplay !== 'Approver') {
-              // Use the actual role name(s) from the approval matrix
+            // Prioritize actual role names from approval matrix
+            if (roleNames.length > 0) {
+              // Use the actual role name(s) from the approval matrix (e.g., "Finance Manager", "CTO", etc.)
               stepName = roleNameDisplay;
             } else {
-              // Fallback to level-based naming only if no role names available
+              // Only use generic level-based naming if NO roles are configured in the approval matrix
+              // This should rarely happen if approval matrix is properly configured
               stepName = `Level ${level.levelNumber} Approval`;
-              if (level.levelNumber === 1) {
-                stepName = 'Manager Approval';
-              } else if (level.levelNumber === 2) {
-                stepName = 'Business Head Approval';
-              }
             }
             
             // Map action to frontend expected format
@@ -526,15 +561,51 @@ export class ReportsService {
       // Continue without approval chain if there's an error
     }
 
-    // Convert to plain object and add expenses and approval chain
+    // Voucher breakdown (plan §2.5): appliedVouchers, voucherTotalUsed, employeePaidAmount
+    const appliedVouchers = (report as any).appliedVouchers || [];
+    const voucherTotalUsed = appliedVouchers.length > 0
+      ? appliedVouchers.reduce((s: number, a: any) => s + (a.amountUsed || 0), 0)
+      : (report.advanceAppliedAmount ?? 0);
+    const employeePaidAmount = Math.max(0, (report.totalAmount ?? 0) - voucherTotalUsed);
+
     const reportObj = report.toObject();
+    const approversFinal = approvalChain.length > 0 ? approvalChain : reportObj.approvers || [];
+    const status = (report.status || '').toUpperCase();
+    const flags = {
+      changes_requested: status === 'CHANGES_REQUESTED',
+      rejected: status === 'REJECTED',
+      duplicate_flagged: expensesWithSignedUrls.some(
+        (e: any) => e.duplicateFlag === 'POTENTIAL_DUPLICATE' || e.duplicateFlag === 'STRONG_DUPLICATE'
+      ),
+      voucher_applied: appliedVouchers.length > 0,
+      additional_approver_added: Array.isArray(approversFinal) && approversFinal.some((a: any) => a.isAdditionalApproval === true),
+      ocr_needs_review: expensesWithSignedUrls.some((e: any) => e.needsReview === true),
+    };
+
+    // §4: When CHANGES_REQUESTED, include affectedExpenseIds for highlighting on report detail
+    const affectedExpenseIds: string[] =
+      status === 'CHANGES_REQUESTED'
+        ? expensesWithSignedUrls
+            .filter(
+              (e: any) =>
+                (e.managerAction && String(e.managerAction).toLowerCase() === 'request_changes') ||
+                (e.managerComment && String(e.managerComment).trim().length > 0)
+            )
+            .map((e: any) => (e._id != null ? String(e._id) : ''))
+            .filter(Boolean)
+        : [];
+
     return {
       ...reportObj,
-      // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
       fromDate: report.fromDate ? DateUtils.backendDateToFrontend(report.fromDate) : reportObj.fromDate,
       toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
       expenses: expensesWithSignedUrls,
-      approvers: approvalChain.length > 0 ? approvalChain : reportObj.approvers || [],
+      approvers: approversFinal,
+      appliedVouchers: appliedVouchers.length > 0 ? appliedVouchers : reportObj.appliedVouchers,
+      voucherTotalUsed,
+      employeePaidAmount,
+      flags,
+      ...(affectedExpenseIds.length > 0 ? { affectedExpenseIds } : {}),
     };
   }
 
@@ -1104,17 +1175,14 @@ export class ReportsService {
       throw new Error('Report must have at least one expense');
     }
 
-    // Check for duplicate invoices
+    // Duplicate detection: flag-only, never block. Update expenses with duplicateFlag/duplicateReason.
     const reportUser = await User.findById(report.userId).select('companyId').exec();
     if (reportUser && reportUser.companyId) {
-      const duplicates = await DuplicateInvoiceService.checkReportDuplicates(
-        id,
-        reportUser.companyId
-      );
-
-      if (duplicates.length > 0) {
-        const duplicateMessages = duplicates.map(d => d.message).join('; ');
-        throw new Error(`Duplicate invoices detected: ${duplicateMessages}`);
+      try {
+        const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+        await DuplicateDetectionService.runReportDuplicateCheck(id, reportUser.companyId as mongoose.Types.ObjectId);
+      } catch (e) {
+        logger.warn({ err: e, reportId: id }, 'Report duplicate check failed; continuing');
       }
     }
 
@@ -1134,12 +1202,19 @@ export class ReportsService {
           amount: data.advanceAmount,
           userId,
         });
-
         logger.info({
           reportId: id,
           voucherId: data.advanceCashId,
           voucherAmount: data.advanceAmount,
         }, 'Voucher applied to report via VoucherService');
+        // Notify report owner: voucher applied (plan §6.2). Never block.
+        await NotificationService.ensureNotify(
+          async () => {
+            const r = await ExpenseReport.findById(id).exec();
+            if (r) await NotificationService.notifyVoucherApplied(r);
+          },
+          'voucher_applied'
+        );
       } catch (error: any) {
         logger.error({
           error: error.message,
@@ -1268,6 +1343,24 @@ export class ReportsService {
 
         logger.info({ reportId: saved._id }, '🔔 Calling notification service for report submission');
         await NotificationService.notifyReportSubmitted(reportForNotification);
+        // Notify additional approvers when budget/amount rules trigger (plan §6.2)
+        const additional = (reportForNotification.approvers || []).filter(
+          (a: any) => a.isAdditionalApproval && a.userId
+        );
+        if (additional.length > 0) {
+          await NotificationService.ensureNotify(
+            () =>
+              NotificationService.notifyAdditionalApproverAdded(
+                reportForNotification,
+                additional.map((a: any) => ({
+                  userId: (a.userId as any)?.toString?.() ?? String(a.userId),
+                  role: a.role,
+                  triggerReason: a.triggerReason,
+                }))
+              ),
+            'additional_approver_added'
+          );
+        }
         logger.info({ reportId: saved._id }, '✅ Notifications sent successfully');
       }
     } catch (error) {
@@ -1412,6 +1505,24 @@ export class ReportsService {
     if (action === 'reject') {
       report.status = ExpenseReportStatus.REJECTED;
       report.rejectedAt = new Date();
+
+      // Reverse all voucher usages for this report
+      try {
+        const { VoucherService } = await import('./voucher.service');
+        await VoucherService.reverseVoucherUsageForReport(
+          id,
+          userId,
+          comment || 'Report rejected by approver'
+        );
+        logger.info({ reportId: id }, 'Voucher usages reversed for rejected report');
+      } catch (error) {
+        logger.error(
+          { error, reportId: id },
+          'Failed to reverse voucher usages for rejected report'
+        );
+        // Don't fail report rejection if voucher reversal fails, but log the error
+        // The report will still be rejected, but vouchers may need manual correction
+      }
     } else if (action === 'approve') {
       // Check if this is the last approver
       const totalLevels = Math.max(...report.approvers.map(a => a.level));
@@ -1643,7 +1754,8 @@ export class ReportsService {
   }
 
   static async recalcTotals(reportId: string): Promise<void> {
-    const expenses = await Expense.find({ reportId });
+    // Exclude REJECTED expenses from totals; zero financial impact (plan §4.2)
+    const expenses = await Expense.find({ reportId, status: { $ne: ExpenseStatus.REJECTED } });
     const totalAmount = expenses.reduce((sum, exp) => sum + exp.amount, 0);
 
     await ExpenseReport.findByIdAndUpdate(reportId, { totalAmount });
@@ -1703,6 +1815,200 @@ export class ReportsService {
     }
 
     emitManagerDashboardUpdate(reportUserId);
+  }
+
+  /**
+   * Process settlement for an approved report
+   * Calculates employee paid amount and stores admin settlement decision
+   */
+  static async processSettlement(
+    reportId: string,
+    adminId: string,
+    decision: {
+      type: 'ISSUE_VOUCHER' | 'REIMBURSE' | 'CLOSE';
+      comment?: string;
+      voucherId?: string; // For ISSUE_VOUCHER - optional, will create new if not provided
+      reimbursementAmount?: number; // For REIMBURSE
+    }
+  ): Promise<IExpenseReport> {
+    if (!mongoose.Types.ObjectId.isValid(reportId)) {
+      throw new Error(`Invalid report ID format: ${reportId}`);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(adminId)) {
+      throw new Error(`Invalid admin ID format: ${adminId}`);
+    }
+
+    const reportObjectId = new mongoose.Types.ObjectId(reportId);
+    const adminObjectId = new mongoose.Types.ObjectId(adminId);
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      // Load report with lock
+      const report = await ExpenseReport.findById(reportObjectId)
+        .session(session)
+        .exec();
+
+      if (!report) {
+        throw new Error('Report not found');
+      }
+
+      // Only allow settlement for APPROVED reports
+      if (report.status !== ExpenseReportStatus.APPROVED) {
+        throw new Error('Settlement can only be processed for approved reports');
+      }
+
+      // Calculate voucher total used
+      const appliedVouchers = Array.isArray(report.appliedVouchers) ? report.appliedVouchers : [];
+      const voucherTotalUsed = appliedVouchers.reduce((sum, v) => sum + (v.amountUsed || 0), 0);
+
+      // Calculate employee paid amount
+      const employeePaidAmount = Math.max(0, (report.totalAmount || 0) - voucherTotalUsed);
+
+      // Update report with settlement information
+      report.employeePaidAmount = employeePaidAmount;
+      report.settlementDecision = {
+        type: decision.type,
+        decidedBy: adminObjectId,
+        decidedAt: new Date(),
+        comment: decision.comment,
+      };
+
+      // Handle settlement type-specific logic
+      if (decision.type === 'ISSUE_VOUCHER') {
+        // Create new voucher for employee if voucherId not provided
+        if (!decision.voucherId) {
+          const { VoucherService } = await import('./voucher.service');
+          const user = await User.findById(report.userId).select('companyId').exec();
+          if (!user || !user.companyId) {
+            throw new Error('User company not found');
+          }
+
+          const newVoucher = await VoucherService.createVoucher({
+            companyId: user.companyId.toString(),
+            employeeId: report.userId.toString(),
+            totalAmount: employeePaidAmount,
+            currency: report.currency || 'INR',
+            projectId: report.projectId?.toString(),
+            costCentreId: report.costCentreId?.toString(),
+            createdBy: adminId,
+          });
+
+          report.settlementDecision.voucherId = newVoucher._id as mongoose.Types.ObjectId;
+          report.settlementStatus = 'ISSUED_VOUCHER';
+
+          logger.info(
+            {
+              reportId,
+              voucherId: newVoucher._id,
+              amount: employeePaidAmount,
+            },
+            'Created new voucher for settlement'
+          );
+        } else {
+          // Use existing voucher
+          if (!mongoose.Types.ObjectId.isValid(decision.voucherId)) {
+            throw new Error('Invalid voucher ID format');
+          }
+          report.settlementDecision.voucherId = new mongoose.Types.ObjectId(decision.voucherId);
+          report.settlementStatus = 'ISSUED_VOUCHER';
+        }
+      } else if (decision.type === 'REIMBURSE') {
+        report.settlementDecision.reimbursementAmount = decision.reimbursementAmount || employeePaidAmount;
+        report.settlementStatus = 'REIMBURSED';
+      } else if (decision.type === 'CLOSE') {
+        report.settlementStatus = 'CLOSED';
+      }
+
+      await report.save({ session });
+
+      // Log audit entry
+      await AuditService.log(
+        adminId,
+        'ExpenseReport',
+        reportId,
+        AuditAction.UPDATE,
+        {
+          action: 'SETTLEMENT_PROCESSED',
+          settlementType: decision.type,
+          employeePaidAmount,
+          voucherTotalUsed,
+        }
+      );
+
+      await session.commitTransaction();
+
+      logger.info(
+        {
+          reportId,
+          settlementType: decision.type,
+          employeePaidAmount,
+        },
+        'Settlement processed successfully'
+      );
+
+      return report;
+    } catch (error) {
+      await session.abortTransaction();
+      logger.error({ error, reportId, adminId }, 'Error processing settlement');
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  /**
+   * Get settlement information for a report
+   * Calculates employee paid amount and voucher totals
+   */
+  static async getSettlementInfo(reportId: string): Promise<{
+    reportId: string;
+    totalAmount: number;
+    voucherTotalUsed: number;
+    employeePaidAmount: number;
+    currency: string;
+    appliedVouchers: Array<{
+      voucherId: string;
+      voucherCode: string;
+      amountUsed: number;
+      currency: string;
+    }>;
+    settlementStatus?: string;
+    settlementDecision?: any;
+  }> {
+    if (!mongoose.Types.ObjectId.isValid(reportId)) {
+      throw new Error('Invalid report ID');
+    }
+
+    const report = await ExpenseReport.findById(reportId)
+      .populate('appliedVouchers.voucherId', 'voucherCode')
+      .exec();
+
+    if (!report) {
+      throw new Error('Report not found');
+    }
+
+    const appliedVouchers = Array.isArray(report.appliedVouchers) ? report.appliedVouchers : [];
+    const voucherTotalUsed = appliedVouchers.reduce((sum, v) => sum + (v.amountUsed || 0), 0);
+    const employeePaidAmount = Math.max(0, (report.totalAmount || 0) - voucherTotalUsed);
+
+    return {
+      reportId,
+      totalAmount: report.totalAmount || 0,
+      voucherTotalUsed,
+      employeePaidAmount,
+      currency: report.currency || 'INR',
+      appliedVouchers: appliedVouchers.map((v) => ({
+        voucherId: (v.voucherId as mongoose.Types.ObjectId).toString(),
+        voucherCode: v.voucherCode,
+        amountUsed: v.amountUsed,
+        currency: v.currency,
+      })),
+      settlementStatus: report.settlementStatus,
+      settlementDecision: report.settlementDecision,
+    };
   }
 }
 

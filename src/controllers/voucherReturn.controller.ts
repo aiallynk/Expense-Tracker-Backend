@@ -157,4 +157,47 @@ export class VoucherReturnController {
       data: returnRequest,
     });
   });
+
+  /**
+   * Direct admin return of voucher (bypasses return request workflow)
+   * POST /api/v1/vouchers/:id/admin-return
+   */
+  static adminReturn = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const voucherId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const adminId = req.user!.id;
+    const actorRole = req.user!.role;
+
+    // Only COMPANY_ADMIN and ADMIN can directly return vouchers
+    if (actorRole !== UserRole.COMPANY_ADMIN && actorRole !== UserRole.ADMIN && actorRole !== UserRole.SUPER_ADMIN) {
+      res.status(403).json({
+        success: false,
+        message: 'You do not have permission to directly return vouchers',
+        code: 'INSUFFICIENT_PERMISSIONS',
+      });
+      return;
+    }
+
+    const { returnAmount, comment } = req.body;
+
+    if (!returnAmount) {
+      res.status(400).json({
+        success: false,
+        message: 'returnAmount is required',
+        code: 'MISSING_FIELDS',
+      });
+      return;
+    }
+
+    const voucher = await VoucherReturnService.adminReturnVoucher({
+      voucherId,
+      adminId,
+      returnAmount: Number(returnAmount),
+      comment,
+    });
+
+    res.status(200).json({
+      success: true,
+      data: voucher,
+    });
+  });
 }

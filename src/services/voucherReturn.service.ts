@@ -1,6 +1,6 @@
 import mongoose from 'mongoose';
 
-import { AdvanceCash, AdvanceCashStatus } from '../models/AdvanceCash';
+import { AdvanceCash, AdvanceCashStatus, IAdvanceCash } from '../models/AdvanceCash';
 import { VoucherReturnRequest, VoucherReturnRequestStatus, IVoucherReturnRequest } from '../models/VoucherReturnRequest';
 import { User } from '../models/User';
 import { AuditService } from './audit.service';
@@ -186,7 +186,7 @@ export class VoucherReturnService {
           entryType: LedgerEntryType.VOUCHER_RETURNED,
           voucherId: (voucher._id as mongoose.Types.ObjectId).toString(),
           userId: returnRequest.userId.toString(),
-          amount: returnRequest.returnAmount,
+          amount: returnRequest.returnAmount, // Use return amount from request
           currency: voucher.currency,
           debitAccount: 'EMPLOYEE_ADVANCE',
           creditAccount: 'ADVANCE_CASH_PAID',
@@ -198,6 +198,36 @@ export class VoucherReturnService {
       } catch (error) {
         logger.error({ error, requestId: params.requestId }, 'Failed to create ledger entry for voucher return');
         // Don't fail transaction if ledger entry fails
+      }
+
+      // Emit real-time update for voucher return (for liabilities update)
+      try {
+        const { emitVoucherUpdated, emitCompanyAdminDashboardUpdate } = await import('../socket/realtimeEvents');
+        const companyId = returnRequest.companyId.toString();
+        
+        // Emit voucher updated event
+        emitVoucherUpdated(companyId, {
+          id: (voucher._id as mongoose.Types.ObjectId).toString(),
+          _id: (voucher._id as mongoose.Types.ObjectId).toString(),
+          remainingAmount: voucher.remainingAmount,
+          returnedAmount: voucher.returnedAmount,
+          usedAmount: voucher.usedAmount,
+          status: voucher.status,
+          returnedAt: voucher.returnedAt,
+          returnedBy: voucher.returnedBy,
+        });
+        
+        // Emit dashboard update to refresh liabilities in real-time
+        try {
+          const { CompanyAdminDashboardService } = await import('./companyAdminDashboard.service');
+          const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+          emitCompanyAdminDashboardUpdate(companyId, stats);
+        } catch (dashboardError) {
+          logger.error({ error: dashboardError, companyId }, 'Failed to emit dashboard update after voucher return approval');
+        }
+      } catch (error) {
+        logger.error({ error, requestId: params.requestId }, 'Failed to emit voucher updated event');
+        // Don't fail transaction if real-time update fails
       }
 
       // Log audit entry
@@ -327,5 +357,199 @@ export class VoucherReturnService {
       .exec();
 
     return { requests, total };
+  }
+
+  /**
+   * Direct admin return of voucher (bypasses return request workflow)
+   * Admin can directly mark remaining balance as returned
+   */
+  static async adminReturnVoucher(params: {
+    voucherId: string;
+    adminId: string;
+    returnAmount: number;
+    comment?: string;
+  }): Promise<IAdvanceCash> {
+    if (!mongoose.Types.ObjectId.isValid(params.voucherId)) {
+      throw new Error('Invalid voucher ID');
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(params.adminId)) {
+      throw new Error('Invalid admin ID');
+    }
+
+    const voucherObjectId = new mongoose.Types.ObjectId(params.voucherId);
+    const adminObjectId = new mongoose.Types.ObjectId(params.adminId);
+
+    const returnAmount = Number(params.returnAmount);
+    if (!isFinite(returnAmount) || returnAmount <= 0) {
+      throw new Error('Return amount must be greater than 0');
+    }
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      // Load voucher with lock
+      const voucher = await AdvanceCash.findById(voucherObjectId)
+        .session(session)
+        .exec();
+
+      if (!voucher) {
+        throw new Error('Voucher not found');
+      }
+
+      // Validate return amount
+      if (returnAmount > voucher.remainingAmount) {
+        throw new Error(
+          `Return amount exceeds voucher balance. Available: ${voucher.remainingAmount} ${voucher.currency}`
+        );
+      }
+
+      // Validate voucher status
+      if (voucher.status === AdvanceCashStatus.EXHAUSTED) {
+        throw new Error('Cannot return from an exhausted voucher');
+      }
+
+      if (voucher.status === AdvanceCashStatus.RETURNED) {
+        throw new Error('Voucher is already fully returned');
+      }
+
+      // CRITICAL: When admin marks as returned, use the FULL remaining amount
+      // This ensures remainingAmount becomes exactly 0
+      // Get the actual remaining amount (handle both remainingAmount and legacy balance field)
+      const currentRemaining = voucher.remainingAmount ?? voucher.balance ?? 0;
+      const actualReturnAmount = returnAmount >= currentRemaining 
+        ? currentRemaining 
+        : returnAmount;
+
+      // Update voucher - set remainingAmount to exactly 0 if returning full amount
+      // CRITICAL: Ensure remainingAmount is set to exactly 0 when returning full amount
+      voucher.remainingAmount = Math.max(0, currentRemaining - actualReturnAmount);
+      // Sync legacy balance field
+      voucher.balance = voucher.remainingAmount;
+      voucher.returnedAmount = (voucher.returnedAmount || 0) + actualReturnAmount;
+      voucher.returnedBy = adminObjectId;
+      voucher.returnedAt = new Date();
+
+      // If fully returned (remainingAmount is 0), mark as RETURNED
+      if (voucher.remainingAmount === 0) {
+        voucher.status = AdvanceCashStatus.RETURNED;
+      } else {
+        // Update status based on remaining amount
+        voucher.status = VoucherService.calculateVoucherStatus(voucher);
+      }
+      
+      // CRITICAL: Double-check that remainingAmount is exactly 0 if we returned the full amount
+      if (actualReturnAmount >= currentRemaining && voucher.remainingAmount !== 0) {
+        logger.warn(
+          { 
+            voucherId: params.voucherId, 
+            currentRemaining, 
+            actualReturnAmount, 
+            remainingAfterReturn: voucher.remainingAmount 
+          },
+          'Remaining amount should be 0 after full return, forcing to 0'
+        );
+        voucher.remainingAmount = 0;
+        voucher.balance = 0;
+        voucher.status = AdvanceCashStatus.RETURNED;
+      }
+
+      await voucher.save({ session });
+
+      // Create ledger entry
+      try {
+        const employee = await User.findById(voucher.employeeId)
+          .select('name email')
+          .session(session)
+          .exec();
+        const employeeName = (employee as any)?.name || (employee as any)?.email || 'Employee';
+
+        await LedgerService.createEntry({
+          companyId: voucher.companyId.toString(),
+          entryType: LedgerEntryType.VOUCHER_RETURNED,
+          voucherId: params.voucherId,
+          userId: voucher.employeeId.toString(),
+          amount: actualReturnAmount, // Use actual return amount (may be adjusted to full remaining)
+          currency: voucher.currency,
+          debitAccount: 'EMPLOYEE_ADVANCE',
+          creditAccount: 'ADVANCE_CASH_PAID',
+          description: `Voucher return by admin for ${employeeName}${voucher.voucherCode ? ` (Voucher: ${voucher.voucherCode})` : ''}${params.comment ? `. ${params.comment}` : ''}`,
+          referenceId: voucher.voucherCode || params.voucherId,
+          entryDate: new Date(),
+          createdBy: params.adminId,
+        });
+      } catch (error) {
+        logger.error({ error, voucherId: params.voucherId }, 'Failed to create ledger entry for admin return');
+        // Don't fail transaction if ledger entry fails
+      }
+
+      // Log audit entry
+      await AuditService.log(
+        params.adminId,
+        'AdvanceCash',
+        params.voucherId,
+        AuditAction.UPDATE,
+        {
+          action: 'ADMIN_RETURN',
+          returnAmount: actualReturnAmount,
+          requestedReturnAmount: returnAmount,
+          remainingAmount: voucher.remainingAmount,
+          status: voucher.status,
+          comment: params.comment,
+        }
+      );
+
+      await session.commitTransaction();
+
+      logger.info(
+        {
+          voucherId: params.voucherId,
+          returnAmount: actualReturnAmount,
+          requestedReturnAmount: returnAmount,
+          remainingAmount: voucher.remainingAmount,
+          status: voucher.status,
+        },
+        'Admin return processed successfully'
+      );
+
+      // Emit real-time update for voucher return (for liabilities update)
+      try {
+        const { emitVoucherUpdated, emitCompanyAdminDashboardUpdate } = await import('../socket/realtimeEvents');
+        const companyId = voucher.companyId.toString();
+        
+        // Emit voucher updated event
+        emitVoucherUpdated(companyId, {
+          id: (voucher._id as mongoose.Types.ObjectId).toString(),
+          _id: (voucher._id as mongoose.Types.ObjectId).toString(),
+          remainingAmount: voucher.remainingAmount,
+          returnedAmount: voucher.returnedAmount,
+          usedAmount: voucher.usedAmount,
+          status: voucher.status,
+          returnedAt: voucher.returnedAt,
+          returnedBy: voucher.returnedBy,
+        });
+        
+        // Emit dashboard update to refresh liabilities in real-time
+        try {
+          const { CompanyAdminDashboardService } = await import('./companyAdminDashboard.service');
+          const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
+          emitCompanyAdminDashboardUpdate(companyId, stats);
+        } catch (dashboardError) {
+          logger.error({ error: dashboardError, companyId }, 'Failed to emit dashboard update after voucher return');
+        }
+      } catch (error) {
+        logger.error({ error, voucherId: params.voucherId }, 'Failed to emit voucher updated event');
+        // Don't fail transaction if real-time update fails
+      }
+
+      return voucher;
+    } catch (error) {
+      await session.abortTransaction();
+      logger.error({ error, voucherId: params.voucherId }, 'Error processing admin return');
+      throw error;
+    } finally {
+      session.endSession();
+    }
   }
 }

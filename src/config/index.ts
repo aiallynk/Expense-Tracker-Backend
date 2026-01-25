@@ -75,6 +75,8 @@ export const config = {
     timeoutMs: parseInt(process.env.OCR_TIMEOUT_MS || '30000', 10),
     // Demo mode: silently ignore OCR failures
     demoMode: process.env.OCR_DEMO_MODE === 'true',
+    // Below this → "Needs Review"; no auto category/date (plan §5)
+    confidenceThreshold: parseFloat(process.env.OCR_CONFIDENCE_THRESHOLD || '0.75'),
   },
   ai: {
     disableCategoryMatching: process.env.DISABLE_AI_CATEGORY_MATCHING === 'true',

@@ -173,8 +173,50 @@ export class AdminController {
 
   // Expenses
   static getAllExpenses = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const filters = expenseFiltersSchema.parse(req.query);
-    const result = await ExpensesService.adminListExpenses(filters, req);
+    // #region agent log
+    const fs = require('fs');
+    const logPath = 'd:\\APPs\\Expence Track\\.cursor\\debug.log';
+    const logEntry = JSON.stringify({location:'admin.controller.ts:175',message:'getAllExpenses entry',data:{query:req.query,userId:req.user?.id,role:req.user?.role},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n';
+    fs.appendFileSync(logPath, logEntry);
+    // #endregion
+    
+    let filters;
+    try {
+      // #region agent log
+      const logEntry2 = JSON.stringify({location:'admin.controller.ts:178',message:'Before schema parse',data:{queryKeys:Object.keys(req.query)},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n';
+      fs.appendFileSync(logPath, logEntry2);
+      // #endregion
+      filters = expenseFiltersSchema.parse(req.query);
+      // #region agent log
+      const logEntry3 = JSON.stringify({location:'admin.controller.ts:180',message:'After schema parse',data:{filters},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n';
+      fs.appendFileSync(logPath, logEntry3);
+      // #endregion
+    } catch (parseError: any) {
+      // #region agent log
+      const logEntry4 = JSON.stringify({location:'admin.controller.ts:183',message:'Schema parse error',data:{error:parseError.message,query:req.query},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'B'})+'\n';
+      fs.appendFileSync(logPath, logEntry4);
+      // #endregion
+      throw parseError;
+    }
+    
+    let result;
+    try {
+      // #region agent log
+      const logEntry5 = JSON.stringify({location:'admin.controller.ts:191',message:'Before adminListExpenses',data:{filters},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n';
+      fs.appendFileSync(logPath, logEntry5);
+      // #endregion
+      result = await ExpensesService.adminListExpenses(filters, req);
+      // #region agent log
+      const logEntry6 = JSON.stringify({location:'admin.controller.ts:194',message:'After adminListExpenses',data:{resultCount:result?.expenses?.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n';
+      fs.appendFileSync(logPath, logEntry6);
+      // #endregion
+    } catch (serviceError: any) {
+      // #region agent log
+      const logEntry7 = JSON.stringify({location:'admin.controller.ts:197',message:'adminListExpenses error',data:{error:serviceError.message,stack:serviceError.stack},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n';
+      fs.appendFileSync(logPath, logEntry7);
+      // #endregion
+      throw serviceError;
+    }
 
     res.status(200).json({
       success: true,

@@ -31,13 +31,26 @@ export class AuthController {
   });
 
   static login = asyncHandler(async (req: Request, res: Response) => {
-    const data = loginSchema.parse(req.body);
-    const result = await AuthService.login(data.email, data.password);
+    try {
+      const data = loginSchema.parse(req.body);
+      const result = await AuthService.login(data.email, data.password);
 
-    res.status(200).json({
-      success: true,
-      data: result,
-    });
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    } catch (error: any) {
+      // Log the error for debugging
+      const { logger } = require('../config/logger');
+      logger.error({ 
+        error: error?.message || error, 
+        stack: error?.stack,
+        email: req.body?.email 
+      }, 'Login endpoint error');
+      
+      // Re-throw to be handled by error middleware
+      throw error;
+    }
   });
 
   static refresh = asyncHandler(async (req: Request, res: Response) => {

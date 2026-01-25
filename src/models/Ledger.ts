@@ -31,23 +31,19 @@ const ledgerSchema = new Schema<ILedger>(
       type: Schema.Types.ObjectId,
       ref: 'Company',
       required: true,
-      index: true,
     },
     entryType: {
       type: String,
       enum: Object.values(LedgerEntryType),
       required: true,
-      index: true,
     },
     voucherId: {
       type: Schema.Types.ObjectId,
       ref: 'AdvanceCash',
-      index: true,
     },
     reportId: {
       type: Schema.Types.ObjectId,
       ref: 'ExpenseReport',
-      index: true,
     },
     userId: {
       type: Schema.Types.ObjectId,
@@ -105,9 +101,11 @@ const ledgerSchema = new Schema<ILedger>(
 );
 
 // Indexes for queries
+ledgerSchema.index({ companyId: 1 }); // Company lookup
 ledgerSchema.index({ companyId: 1, financialYear: 1, entryDate: -1 }); // Financial year reports
 ledgerSchema.index({ voucherId: 1 }); // Voucher ledger entries
 ledgerSchema.index({ reportId: 1 }); // Report ledger entries
+ledgerSchema.index({ entryType: 1 }); // Entry type lookup
 ledgerSchema.index({ entryType: 1, entryDate: -1 }); // Entry type queries
 
 export const Ledger = mongoose.model<ILedger>('Ledger', ledgerSchema);

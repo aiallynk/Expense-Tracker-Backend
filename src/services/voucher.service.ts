@@ -24,6 +24,7 @@ export class VoucherService {
     projectId?: string;
     costCentreId?: string;
     voucherCode?: string;
+    expiry?: Date;
     createdBy: string;
   }): Promise<IAdvanceCash> {
     const companyObjectId = new mongoose.Types.ObjectId(params.companyId);
@@ -36,11 +37,37 @@ export class VoucherService {
 
     const currency = (params.currency || 'INR').toUpperCase();
 
-    // Check if voucher code already exists
-    if (params.voucherCode) {
-      const existing = await AdvanceCash.findOne({ voucherCode: params.voucherCode }).exec();
+    // Helper function to generate 5-8 digit voucher code
+    const generateVoucherCode = (): string => {
+      const digits = Math.floor(Math.random() * 4) + 5; // 5-8 digits
+      const code = Math.floor(Math.random() * Math.pow(10, digits))
+        .toString()
+        .padStart(digits, '0');
+      return `VCH-${code}`;
+    };
+
+    // Mandatory identifier: voucherCode or auto-generated (plan §2.1)
+    let voucherCode = (params.voucherCode || '').trim();
+    if (voucherCode) {
+      // Validate format: should be VCH- followed by 5-8 digits
+      const codePattern = /^VCH-\d{5,8}$/;
+      if (!codePattern.test(voucherCode)) {
+        throw new Error('Voucher code must be in format VCH-XXXXX (5-8 digits)');
+      }
+      const existing = await AdvanceCash.findOne({ voucherCode }).exec();
       if (existing) {
         throw new Error('Voucher code already exists');
+      }
+    } else {
+      // Auto-generate 5-8 digit code
+      let unique = false;
+      for (let attempts = 0; !unique && attempts < 20; attempts++) {
+        voucherCode = generateVoucherCode();
+        const exists = await AdvanceCash.findOne({ voucherCode }).exec();
+        if (!exists) unique = true;
+      }
+      if (!unique) {
+        throw new Error('Could not generate unique voucher code; please provide voucherCode');
       }
     }
 
@@ -54,7 +81,8 @@ export class VoucherService {
       projectId: params.projectId ? new mongoose.Types.ObjectId(params.projectId) : undefined,
       costCentreId: params.costCentreId ? new mongoose.Types.ObjectId(params.costCentreId) : undefined,
       status: AdvanceCashStatus.ACTIVE,
-      voucherCode: params.voucherCode,
+      voucherCode,
+      expiry: params.expiry,
       createdBy: new mongoose.Types.ObjectId(params.createdBy),
     });
 
@@ -74,8 +102,8 @@ export class VoucherService {
         currency,
         debitAccount: 'ADVANCE_CASH_PAID',
         creditAccount: 'EMPLOYEE_ADVANCE',
-        description: `Voucher issued to ${employeeName}${params.voucherCode ? ` (Code: ${params.voucherCode})` : ''}`,
-        referenceId: params.voucherCode || (saved._id as mongoose.Types.ObjectId).toString(),
+        description: `Voucher issued to ${employeeName} (Code: ${voucherCode})`,
+        referenceId: voucherCode,
         entryDate: new Date(),
         createdBy: params.createdBy,
       });
@@ -94,7 +122,7 @@ export class VoucherService {
         totalAmount,
         currency,
         employeeId: params.employeeId,
-        voucherCode: params.voucherCode,
+        voucherCode,
       }
     );
 
@@ -112,17 +140,13 @@ export class VoucherService {
     projectId?: string;
     costCentreId?: string;
   }): Promise<IAdvanceCash[]> {
-    // Build base query - be lenient with status and amount checks
+    // Build base query; exclude expired vouchers (plan §2.1)
     const query: any = {
-      companyId: new mongoose.Types.ObjectId(params.companyId),
-      employeeId: new mongoose.Types.ObjectId(params.employeeId),
-      // Check status - include ACTIVE and PARTIAL
-      status: { $in: [AdvanceCashStatus.ACTIVE, AdvanceCashStatus.PARTIAL] },
-      // Handle both new (remainingAmount) and legacy (balance) field names
-      // Show vouchers where either remainingAmount > 0 OR balance > 0
-      $or: [
-        { remainingAmount: { $gt: 0 } },
-        { balance: { $gt: 0 } },
+      $and: [
+        { companyId: new mongoose.Types.ObjectId(params.companyId), employeeId: new mongoose.Types.ObjectId(params.employeeId) },
+        { status: { $in: [AdvanceCashStatus.ACTIVE, AdvanceCashStatus.PARTIAL] } },
+        { $or: [{ remainingAmount: { $gt: 0 } }, { balance: { $gt: 0 } }] },
+        { $or: [{ expiry: { $exists: false } }, { expiry: null }, { expiry: { $gt: new Date() } }] },
       ],
     };
 
@@ -292,29 +316,18 @@ export class VoucherService {
         throw new Error(`Amount exceeds voucher balance. Available: ${voucher.remainingAmount} ${voucher.currency}`);
       }
 
-      // Check if voucher is already used in this report
+      // Check if this voucher is already used in this report (same voucher twice = no)
       const existingUsage = await VoucherUsage.findOne({
         voucherId: voucherObjectId,
-        reportId: reportObjectId,
-      })
-        .session(session)
-        .exec();
-
-      if (existingUsage) {
-        throw new Error('Voucher is already applied to this report');
-      }
-
-      // Check if report already has a voucher
-      const existingReportUsage = await VoucherUsage.findOne({
         reportId: reportObjectId,
         status: VoucherUsageStatus.APPLIED,
       })
         .session(session)
         .exec();
-
-      if (existingReportUsage) {
-        throw new Error('Report already has a voucher applied');
+      if (existingUsage) {
+        throw new Error('Voucher is already applied to this report');
       }
+      // 1-to-N: report may have other vouchers; no "report already has a voucher" block (plan §2.3)
 
       // Get company ID from user
       const user = await User.findById(userObjectId).select('companyId').session(session).exec();
@@ -346,13 +359,16 @@ export class VoucherService {
       
       await voucher.save({ session });
 
-      // Update report
-      report.advanceCashId = voucherObjectId;
-      report.advanceAppliedAmount = amount;
+      // Update report: legacy fields + appliedVouchers (plan §2.2)
+      const code = (voucher.voucherCode || (voucher._id as mongoose.Types.ObjectId).toString()).trim();
+      const newEntry = { voucherId: voucherObjectId, voucherCode: code, amountUsed: amount, currency: voucher.currency };
+      const existingApplied = Array.isArray(report.appliedVouchers) ? report.appliedVouchers : [];
+      report.appliedVouchers = [...existingApplied, newEntry];
+      report.advanceCashId = report.advanceCashId ?? voucherObjectId;
+      report.advanceAppliedAmount = (report.advanceAppliedAmount ?? 0) + amount;
       report.advanceCurrency = voucher.currency;
       report.voucherLockedAt = new Date();
       report.voucherLockedBy = userObjectId;
-      
       await report.save({ session });
 
       // Create ledger entry
@@ -413,7 +429,7 @@ export class VoucherService {
     return VoucherUsage.find({
       voucherId: new mongoose.Types.ObjectId(voucherId),
     })
-      .populate('reportId', 'name status totalAmount currency')
+      .populate('reportId', 'name status totalAmount currency employeePaidAmount settlementStatus settlementDecision')
       .populate('appliedBy', 'name email')
       .sort({ createdAt: -1 })
       .exec();
@@ -436,6 +452,155 @@ export class VoucherService {
     }
 
     return AdvanceCashStatus.ACTIVE;
+  }
+
+  /**
+   * Reverse all voucher usages for a rejected report
+   * Restores voucher amounts and creates reversal ledger entries
+   */
+  static async reverseVoucherUsageForReport(
+    reportId: string,
+    reversedBy: string,
+    reason: string
+  ): Promise<void> {
+    if (!mongoose.Types.ObjectId.isValid(reportId)) {
+      throw new Error(`Invalid report ID format: ${reportId}`);
+    }
+
+    if (!mongoose.Types.ObjectId.isValid(reversedBy)) {
+      throw new Error(`Invalid user ID format: ${reversedBy}`);
+    }
+
+    const reportObjectId = new mongoose.Types.ObjectId(reportId);
+    const reversedByObjectId = new mongoose.Types.ObjectId(reversedBy);
+
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+      // Find all APPLIED voucher usages for this report
+      const voucherUsages = await VoucherUsage.find({
+        reportId: reportObjectId,
+        status: VoucherUsageStatus.APPLIED,
+      })
+        .session(session)
+        .exec();
+
+      if (voucherUsages.length === 0) {
+        // No voucher usages to reverse
+        await session.commitTransaction();
+        return;
+      }
+
+      logger.info(
+        {
+          reportId,
+          usageCount: voucherUsages.length,
+        },
+        'Reversing voucher usages for rejected report'
+      );
+
+      // Reverse each voucher usage
+      for (const usage of voucherUsages) {
+        // Load voucher with lock
+        const voucher = await AdvanceCash.findById(usage.voucherId)
+          .session(session)
+          .exec();
+
+        if (!voucher) {
+          logger.warn(
+            { voucherId: usage.voucherId, usageId: usage._id },
+            'Voucher not found for reversal, skipping'
+          );
+          continue;
+        }
+
+        // Restore voucher amounts
+        voucher.remainingAmount = (voucher.remainingAmount || 0) + usage.amountUsed;
+        voucher.usedAmount = Math.max(0, (voucher.usedAmount || 0) - usage.amountUsed);
+        voucher.status = this.calculateVoucherStatus(voucher);
+
+        await voucher.save({ session });
+
+        // Mark usage as reversed
+        usage.status = VoucherUsageStatus.REVERSED;
+        usage.reversedAt = new Date();
+        usage.reversedBy = reversedByObjectId;
+        usage.reversalReason = reason || 'Report rejected';
+
+        await usage.save({ session });
+
+        // Create reversal ledger entry
+        try {
+          await LedgerService.createEntry({
+            companyId: usage.companyId.toString(),
+            entryType: LedgerEntryType.VOUCHER_REVERSED,
+            voucherId: usage.voucherId.toString(),
+            reportId: reportId,
+            userId: usage.userId.toString(),
+            amount: usage.amountUsed,
+            currency: usage.currency,
+            debitAccount: 'EXPENSE_REPORT_ADVANCE',
+            creditAccount: 'EMPLOYEE_ADVANCE',
+            description: `Voucher usage reversed due to report rejection${voucher.voucherCode ? ` (Voucher: ${voucher.voucherCode})` : ''}`,
+            referenceId: voucher.voucherCode || usage.voucherId.toString(),
+            entryDate: new Date(),
+            createdBy: reversedBy,
+          });
+        } catch (error) {
+          logger.error(
+            { error, voucherId: usage.voucherId, reportId },
+            'Failed to create ledger entry for voucher reversal'
+          );
+          // Don't fail transaction if ledger entry fails
+        }
+
+        // Log audit entry
+        await AuditService.log(
+          reversedBy,
+          'VoucherUsage',
+          (usage._id as mongoose.Types.ObjectId).toString(),
+          AuditAction.UPDATE,
+          {
+            action: 'REVERSED',
+            reason: reason || 'Report rejected',
+            voucherId: usage.voucherId.toString(),
+            reportId: reportId,
+            amountReversed: usage.amountUsed,
+          }
+        );
+      }
+
+      // Update report: clear appliedVouchers array
+      const report = await ExpenseReport.findById(reportObjectId)
+        .session(session)
+        .exec();
+
+      if (report) {
+        report.appliedVouchers = [];
+        report.advanceCashId = undefined;
+        report.advanceAppliedAmount = 0;
+        report.voucherLockedAt = undefined;
+        report.voucherLockedBy = undefined;
+        await report.save({ session });
+      }
+
+      await session.commitTransaction();
+
+      logger.info(
+        {
+          reportId,
+          reversedCount: voucherUsages.length,
+        },
+        'Successfully reversed all voucher usages for report'
+      );
+    } catch (error) {
+      await session.abortTransaction();
+      logger.error({ error, reportId }, 'Error reversing voucher usages for report');
+      throw error;
+    } finally {
+      session.endSession();
+    }
   }
 
   /**

@@ -28,13 +28,11 @@ const voucherUsageSchema = new Schema<IVoucherUsage>(
       type: Schema.Types.ObjectId,
       ref: 'AdvanceCash',
       required: true,
-      index: true,
     },
     reportId: {
       type: Schema.Types.ObjectId,
       ref: 'ExpenseReport',
       required: true,
-      index: true,
     },
     userId: {
       type: Schema.Types.ObjectId,
@@ -46,7 +44,6 @@ const voucherUsageSchema = new Schema<IVoucherUsage>(
       type: Schema.Types.ObjectId,
       ref: 'Company',
       required: true,
-      index: true,
     },
     amountUsed: {
       type: Number,
@@ -95,8 +92,10 @@ const voucherUsageSchema = new Schema<IVoucherUsage>(
 voucherUsageSchema.index({ voucherId: 1, reportId: 1 }, { unique: true });
 
 // Indexes for queries
+voucherUsageSchema.index({ voucherId: 1 }); // Voucher lookup
 voucherUsageSchema.index({ voucherId: 1, createdAt: -1 }); // Usage history per voucher
 voucherUsageSchema.index({ reportId: 1 }); // Report's voucher usage
+voucherUsageSchema.index({ companyId: 1 }); // Company lookup
 voucherUsageSchema.index({ companyId: 1, createdAt: -1 }); // Company-wide usage tracking
 
 export const VoucherUsage = mongoose.model<IVoucherUsage>('VoucherUsage', voucherUsageSchema);

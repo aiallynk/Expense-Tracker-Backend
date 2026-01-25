@@ -113,6 +113,10 @@ export class DuplicateInvoiceService {
         baseQuery.userId = { $in: userIds };
       }
 
+      // Exclude expenses from REJECTED reports
+      // We'll filter by report status in the populate query
+      // This is more efficient than loading all report IDs
+
       // Prefer fingerprint match (fast path). Also include a legacy-safe match for older rows
       // that may not yet have invoiceFingerprint populated.
       const legacyInvoiceId = invoiceId.trim();
@@ -132,9 +136,20 @@ export class DuplicateInvoiceService {
         ],
       };
 
+      // Find duplicate expense
+      // We'll filter out REJECTED reports in the populate match
+      const { ExpenseReportStatus } = await import('../utils/enums');
+      
       const duplicateExpense = await Expense.findOne(query)
-        .populate('userId', 'name email')
-        .populate('reportId', 'name status')
+        .populate({
+          path: 'userId',
+          select: 'name email',
+        })
+        .populate({
+          path: 'reportId',
+          select: 'name status',
+          match: { status: { $ne: ExpenseReportStatus.REJECTED } }, // Exclude REJECTED reports
+        })
         .sort({ createdAt: -1 })
         .exec();
 
@@ -142,6 +157,11 @@ export class DuplicateInvoiceService {
         const report = duplicateExpense.reportId as any;
         const user = duplicateExpense.userId as any;
         const expenseId = (duplicateExpense._id as mongoose.Types.ObjectId).toString();
+
+        // If report is null (filtered out) or REJECTED, don't consider it a duplicate
+        if (!report || report.status === ExpenseReportStatus.REJECTED) {
+          return { isDuplicate: false };
+        }
 
         return {
           isDuplicate: true,
@@ -175,6 +195,17 @@ export class DuplicateInvoiceService {
     reportId: string,
     companyId?: mongoose.Types.ObjectId
   ): Promise<Array<{ expenseId: string; message: string }>> {
+    // Only check duplicates for expenses in non-REJECTED reports
+    const { ExpenseReport } = await import('../models/ExpenseReport');
+    const { ExpenseReportStatus } = await import('../utils/enums');
+    
+    // First, check if the current report is REJECTED - if so, skip duplicate check
+    const currentReport = await ExpenseReport.findById(reportId).select('status').exec();
+    if (currentReport && currentReport.status === ExpenseReportStatus.REJECTED) {
+      // Don't check duplicates for REJECTED reports
+      return [];
+    }
+
     const expenses = await Expense.find({ reportId })
       .select('invoiceId vendor invoiceDate amount _id')
       .exec();

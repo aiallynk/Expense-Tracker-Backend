@@ -17,6 +17,7 @@ import { ExpenseStatus } from '../utils/enums';
 import { ReportsService } from './reports.service';
 
 import { logger } from '@/config/logger';
+import { DateUtils } from '@/utils/dateUtils';
 
 // PDF parse result interface
 interface PdfParseResult {
@@ -203,53 +204,36 @@ export class DocumentProcessingService {
       
       result.receipts = receipts;
 
-      // Create expense drafts for each extracted receipt
+      // Create expense drafts for each extracted receipt. Duplicate detection is flag-only (no skip).
       for (let i = 0; i < receipts.length; i++) {
         const receipt = receipts[i];
         try {
-          // Duplicate detection must happen immediately after OCR (extraction) and before saving any draft.
-          const invoiceId = receipt.invoiceId?.toString().trim();
-          const vendor = receipt.vendor?.toString().trim();
-          const amount = receipt.totalAmount;
-          const dateStr = receipt.date;
-
-          if (invoiceId && vendor && dateStr && typeof amount === 'number') {
-            const invoiceDate = new Date(dateStr);
-            if (!isNaN(invoiceDate.getTime())) {
-              const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
-              const dup = await DuplicateInvoiceService.checkDuplicate(
-                invoiceId,
-                vendor,
-                invoiceDate,
-                amount,
-                undefined,
-                companyId
-              );
-              if (dup.isDuplicate) {
-                result.expensesCreated.push(null);
-                result.results?.push({
-                  index: i,
-                  status: 'duplicate',
-                  duplicateExpense: dup.duplicateExpense,
-                  message: dup.message || 'Duplicate invoice detected',
-                });
-                continue;
-              }
-            }
-          }
-
-            if (!skipExpenseCreation) {
-              const expenseId = await this.createExpenseDraft(
-                receipt,
-                reportId,
-                userId,
-                documentReceiptId, // Pass document receipt ID for linking
-                'pdf', // Source document type
-                i + 1 // Sequence number (1-indexed)
-              );
-              result.expensesCreated.push(expenseId);
-              result.results?.push({ index: i, status: 'created', expenseId });
-            } else {
+          if (!skipExpenseCreation) {
+            const expenseId = await this.createExpenseDraft(
+              receipt,
+              reportId,
+              userId,
+              documentReceiptId, // Pass document receipt ID for linking
+              'pdf', // Source document type
+              i + 1 // Sequence number (1-indexed)
+            );
+            result.expensesCreated.push(expenseId);
+            // Flag-only duplicate check: updates expense.duplicateFlag/duplicateReason; never blocks
+            let duplicateFlag: string | null = null;
+            let duplicateReason: string | null = null;
+            try {
+              const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+              const dr = await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
+              duplicateFlag = dr.duplicateFlag;
+              duplicateReason = dr.duplicateReason;
+            } catch (_) { /* non-blocking */ }
+            result.results?.push({
+              index: i,
+              status: 'created',
+              expenseId,
+              ...(duplicateFlag && duplicateReason ? { duplicateFlag, duplicateReason } : {}),
+            });
+          } else {
               // Skip expense creation - user will create expenses manually
               result.expensesCreated.push(null);
               result.results?.push({ index: i, status: 'extracted', expenseId: null });
@@ -805,40 +789,10 @@ Rules:
 
       result.totalPages = result.receipts.length;
 
-      // Create expense drafts for each extracted receipt
+      // Create expense drafts for each extracted receipt. Duplicate detection is flag-only (no skip).
       for (let i = 0; i < result.receipts.length; i++) {
         const receipt = result.receipts[i];
         try {
-          const invoiceId = receipt.invoiceId?.toString().trim();
-          const vendor = receipt.vendor?.toString().trim();
-          const amount = receipt.totalAmount;
-          const dateStr = receipt.date;
-
-          if (invoiceId && vendor && dateStr && typeof amount === 'number') {
-            const invoiceDate = new Date(dateStr);
-            if (!isNaN(invoiceDate.getTime())) {
-              const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
-              const dup = await DuplicateInvoiceService.checkDuplicate(
-                invoiceId,
-                vendor,
-                invoiceDate,
-                amount,
-                undefined,
-                companyId
-              );
-              if (dup.isDuplicate) {
-                result.expensesCreated.push(null);
-                result.results?.push({
-                  index: i,
-                  status: 'duplicate',
-                  duplicateExpense: dup.duplicateExpense,
-                  message: dup.message || 'Duplicate invoice detected',
-                });
-                continue;
-              }
-            }
-          }
-
           if (!skipExpenseCreation) {
             const expenseId = await this.createExpenseDraft(
               receipt,
@@ -849,7 +803,20 @@ Rules:
               i + 1 // Row number (1-indexed, excluding header)
             );
             result.expensesCreated.push(expenseId);
-            result.results?.push({ index: i, status: 'created', expenseId });
+            let duplicateFlag: string | null = null;
+            let duplicateReason: string | null = null;
+            try {
+              const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+              const dr = await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
+              duplicateFlag = dr.duplicateFlag;
+              duplicateReason = dr.duplicateReason;
+            } catch (_) { /* non-blocking */ }
+            result.results?.push({
+              index: i,
+              status: 'created',
+              expenseId,
+              ...(duplicateFlag && duplicateReason ? { duplicateFlag, duplicateReason } : {}),
+            });
           } else {
             // Skip expense creation - user will create expenses manually
             result.expensesCreated.push(null);
@@ -1171,40 +1138,10 @@ Rules:
           result.results?.push({ index: 0, status: 'error', message: error.message });
         }
       } else {
-        // Create expense drafts for each extracted receipt
+        // Create expense drafts for each extracted receipt. Duplicate detection is flag-only (no skip).
         for (let i = 0; i < result.receipts.length; i++) {
           const receipt = result.receipts[i];
           try {
-            const invoiceId = receipt.invoiceId?.toString().trim();
-            const vendor = receipt.vendor?.toString().trim();
-            const amount = receipt.totalAmount;
-            const dateStr = receipt.date;
-
-            if (invoiceId && vendor && dateStr && typeof amount === 'number') {
-              const invoiceDate = new Date(dateStr);
-              if (!isNaN(invoiceDate.getTime())) {
-                const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
-                const dup = await DuplicateInvoiceService.checkDuplicate(
-                  invoiceId,
-                  vendor,
-                  invoiceDate,
-                  amount,
-                  undefined,
-                  companyId
-                );
-                if (dup.isDuplicate) {
-                  result.expensesCreated.push(null);
-                  result.results?.push({
-                    index: i,
-                    status: 'duplicate',
-                    duplicateExpense: dup.duplicateExpense,
-                    message: dup.message || 'Duplicate invoice detected',
-                  });
-                  continue;
-                }
-              }
-            }
-
             if (!skipExpenseCreation) {
               const expenseId = await this.createExpenseDraft(
                 receipt,
@@ -1215,7 +1152,20 @@ Rules:
                 i + 1 // Sequence number (1-indexed)
               );
               result.expensesCreated.push(expenseId);
-              result.results?.push({ index: i, status: 'created', expenseId });
+              let duplicateFlag: string | null = null;
+              let duplicateReason: string | null = null;
+              try {
+                const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+                const dr = await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
+                duplicateFlag = dr.duplicateFlag;
+                duplicateReason = dr.duplicateReason;
+              } catch (_) { /* non-blocking */ }
+              result.results?.push({
+                index: i,
+                status: 'created',
+                expenseId,
+                ...(duplicateFlag && duplicateReason ? { duplicateFlag, duplicateReason } : {}),
+              });
             } else {
               // Skip expense creation - user will create expenses manually
               result.expensesCreated.push(null);
@@ -1261,35 +1211,45 @@ Rules:
     receipt: ExtractedReceipt,
     reportId: string,
     userId: string,
-    documentReceiptId?: string, // Receipt ID of the source PDF/Excel/image
+    documentReceiptId?: string,
     sourceDocumentType?: 'pdf' | 'excel' | 'image',
-    sourceDocumentSequence?: number // Receipt number in the source document
+    sourceDocumentSequence?: number
   ): Promise<string> {
-    // Try to find matching category
+    const report = await ExpenseReport.findById(reportId).select('fromDate toDate').exec();
+    if (!report) throw new Error('Report not found');
+
+    const confidence = typeof receipt.confidence === 'number' ? receipt.confidence : 0;
+    const threshold = (config.ocr as any).confidenceThreshold ?? 0.75;
+    const needsReview = confidence < threshold;
+
+    // Below threshold: do NOT auto-assign category/date; mark Needs Review (plan §5)
     let categoryId: mongoose.Types.ObjectId | undefined;
-    if (receipt.categorySuggestion) {
-      const category = await Category.findOne({
-        name: { $regex: new RegExp(`^${receipt.categorySuggestion}$`, 'i') }
-      });
-      if (category) {
-        categoryId = category._id as mongoose.Types.ObjectId;
+    let expenseDate: Date;
+    if (needsReview) {
+      categoryId = undefined;
+      expenseDate = report.fromDate;
+    } else {
+      if (receipt.categorySuggestion) {
+        const category = await Category.findOne({
+          name: { $regex: new RegExp(`^${receipt.categorySuggestion}$`, 'i') }
+        });
+        if (category) categoryId = category._id as mongoose.Types.ObjectId;
+      }
+      if (!categoryId) {
+        const defaultCategory = await Category.findOne({ name: 'Others' }) || await Category.findOne({});
+        if (defaultCategory) categoryId = defaultCategory._id as mongoose.Types.ObjectId;
+      }
+      const invoiceDate = receipt.date ? new Date(receipt.date) : undefined;
+      expenseDate = invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : new Date();
+      if (!DateUtils.isDateInReportRange(expenseDate, report.fromDate, report.toDate)) {
+        throw new Error(
+          `Extracted date outside report range (${DateUtils.backendDateToFrontend(report.fromDate)}–${DateUtils.backendDateToFrontend(report.toDate)})`
+        );
       }
     }
 
-    // If no category matched, try to get a default one
-    if (!categoryId) {
-      const defaultCategory = await Category.findOne({ name: 'Others' }) || 
-                              await Category.findOne({});
-      if (defaultCategory) {
-        categoryId = defaultCategory._id as mongoose.Types.ObjectId;
-      }
-    }
-
-    // Prepare receipt IDs array - link to source document if provided
     const receiptIds: mongoose.Types.ObjectId[] = [];
-    if (documentReceiptId) {
-      receiptIds.push(new mongoose.Types.ObjectId(documentReceiptId));
-    }
+    if (documentReceiptId) receiptIds.push(new mongoose.Types.ObjectId(documentReceiptId));
 
     const invoiceDate = receipt.date ? new Date(receipt.date) : undefined;
     const invoiceId = receipt.invoiceId?.toString().trim() || undefined;
@@ -1311,21 +1271,21 @@ Rules:
       categoryId,
       amount: receipt.totalAmount || 0,
       currency: receipt.currency || 'INR',
-      expenseDate: invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : new Date(),
+      expenseDate,
       status: ExpenseStatus.DRAFT,
       source: receipt.sourceType === 'excel' ? 'MANUAL' : 'SCANNED',
-      notes: receipt.notes || (receipt.lineItems 
+      notes: receipt.notes || (receipt.lineItems
         ? receipt.lineItems.map(item => `${item.description}: ${item.amount}`).join('\n')
         : undefined),
       receiptIds,
       receiptPrimaryId: documentReceiptId ? new mongoose.Types.ObjectId(documentReceiptId) : undefined,
-      // Invoice fields for duplicate detection
       invoiceId,
       invoiceDate: invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : undefined,
       invoiceFingerprint,
-      // Bulk upload tracking
       sourceDocumentType,
       sourceDocumentSequence,
+      needsReview: needsReview || undefined,
+      ocrConfidence: needsReview ? confidence : undefined,
     });
 
     const saved = await expense.save();

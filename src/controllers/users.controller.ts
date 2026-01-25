@@ -12,58 +12,85 @@ import { logger } from '@/config/logger';
 
 export class UsersController {
   static getMe = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const user = await UsersService.getCurrentUser(req.user!.id, req.user!.role);
-
-    if (!user) {
-      res.status(404).json({
+    // Validate that req.user exists (should be set by auth middleware)
+    if (!req.user || !req.user.id) {
+      logger.error({ path: req.path, method: req.method }, 'getMe - req.user is missing');
+      res.status(401).json({
         success: false,
-        message: 'User not found',
-        code: 'USER_NOT_FOUND',
+        message: 'Authentication required',
+        code: 'UNAUTHORIZED',
       });
       return;
     }
 
-    // Return user data with the role from the token (selected role), not the primary role
-    const userData = user.toObject ? user.toObject() : user;
-    
-    // Generate signed URL for profile image if it exists
-    let profileImageUrl = (userData as any).profileImage;
-    if (profileImageUrl && typeof profileImageUrl === 'string') {
-      try {
-        // Check if it's already a full URL or just a storage key
-        if (profileImageUrl.startsWith('profiles/') || !profileImageUrl.includes('http')) {
-          // It's a storage key, generate signed URL
-          const signedUrl = await getPresignedDownloadUrl('receipts', profileImageUrl, 7 * 24 * 60 * 60); // 7 days
-          profileImageUrl = signedUrl;
-        } else if (profileImageUrl.includes('s3.amazonaws.com') && !profileImageUrl.includes('X-Amz-Signature')) {
-          // It's a direct S3 URL without signature, convert to signed URL
-          // Extract key from URL: https://bucket.s3.region.amazonaws.com/key
-          const keyMatch = profileImageUrl.match(/\.com\/(.+)$/);
-          if (keyMatch && keyMatch[1]) {
-            const storageKey = decodeURIComponent(keyMatch[1]);
-            const signedUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60);
-            profileImageUrl = signedUrl;
-          }
-        }
-        // If it already has a signature, use it as-is
-      } catch (error) {
-        logger.warn({ error, userId: req.user!.id }, 'Failed to generate signed URL for profile image');
-        // Continue without signed URL - frontend will handle gracefully
-      }
-    }
-    
-    const responseData = {
-      ...userData,
-      profileImage: profileImageUrl,
-      role: req.user!.role, // Use role from token (selected role)
-      id: req.user!.id,
-      email: req.user!.email,
-    };
+    try {
+      const user = await UsersService.getCurrentUser(req.user.id, req.user.role);
 
-    res.status(200).json({
-      success: true,
-      data: responseData,
-    });
+      if (!user) {
+        logger.warn({ userId: req.user.id }, 'getMe - User not found');
+        res.status(404).json({
+          success: false,
+          message: 'User not found',
+          code: 'USER_NOT_FOUND',
+        });
+        return;
+      }
+
+      // Return user data with the role from the token (selected role), not the primary role
+      const userData = user.toObject ? user.toObject() : user;
+      
+      // Generate signed URL for profile image if it exists
+      let profileImageUrl = (userData as any).profileImage;
+      if (profileImageUrl && typeof profileImageUrl === 'string') {
+        try {
+          // Check if it's already a full URL or just a storage key
+          if (profileImageUrl.startsWith('profiles/') || !profileImageUrl.includes('http')) {
+            // It's a storage key, generate signed URL
+            const signedUrl = await getPresignedDownloadUrl('receipts', profileImageUrl, 7 * 24 * 60 * 60); // 7 days
+            profileImageUrl = signedUrl;
+          } else if (profileImageUrl.includes('s3.amazonaws.com') && !profileImageUrl.includes('X-Amz-Signature')) {
+            // It's a direct S3 URL without signature, convert to signed URL
+            // Extract key from URL: https://bucket.s3.region.amazonaws.com/key
+            const keyMatch = profileImageUrl.match(/\.com\/(.+)$/);
+            if (keyMatch && keyMatch[1]) {
+              const storageKey = decodeURIComponent(keyMatch[1]);
+              const signedUrl = await getPresignedDownloadUrl('receipts', storageKey, 7 * 24 * 60 * 60);
+              profileImageUrl = signedUrl;
+            }
+          }
+          // If it already has a signature, use it as-is
+        } catch (error: any) {
+          logger.warn({ 
+            error: error?.message || error, 
+            userId: req.user.id,
+            stack: error?.stack 
+          }, 'Failed to generate signed URL for profile image');
+          // Continue without signed URL - frontend will handle gracefully
+        }
+      }
+      
+      const responseData = {
+        ...userData,
+        profileImage: profileImageUrl,
+        role: req.user.role, // Use role from token (selected role)
+        id: req.user.id,
+        email: req.user.email,
+      };
+
+      res.status(200).json({
+        success: true,
+        data: responseData,
+      });
+    } catch (error: any) {
+      logger.error({ 
+        error: error?.message || error, 
+        stack: error?.stack,
+        userId: req.user?.id 
+      }, 'getMe - Error fetching user');
+      
+      // Re-throw to be handled by error middleware
+      throw error;
+    }
   });
 
   static updateProfile = asyncHandler(async (req: AuthRequest, res: Response) => {

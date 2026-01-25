@@ -12,7 +12,7 @@ import { Company } from '../models/Company';
 import { CompanySettings } from '../models/CompanySettings';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
-import { ExportFormat } from '../utils/enums';
+import { ExportFormat, ExpenseStatus } from '../utils/enums';
 import { getObjectUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
@@ -73,13 +73,13 @@ export class ExportService {
       throw new Error('Report not found after recalculation');
     }
 
-    const expenses = await Expense.find({ reportId })
+    // Exclude REJECTED expenses from export (plan §7.1, §4.2)
+    const expenses = await Expense.find({ reportId, status: { $ne: ExpenseStatus.REJECTED } })
       .populate('categoryId', 'name')
       .populate('receiptPrimaryId', 'storageUrl storageKey mimeType')
       .sort({ expenseDate: 1 })
       .exec();
 
-    // Handle empty data case
     if (!expenses || expenses.length === 0) {
       throw new Error('No data available for selected filters');
     }
@@ -90,12 +90,12 @@ export class ExportService {
 
     switch (format) {
       case ExportFormat.XLSX:
-        buffer = await this.generateXLSX(report as any, expenses);
+        buffer = await this.generateXLSX(updatedReport as any, expenses);
         mimeType = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
         fileExtension = 'xlsx';
         break;
       case ExportFormat.PDF:
-        buffer = await this.generatePDF(report as any, expenses);
+        buffer = await this.generatePDF(updatedReport as any, expenses);
         mimeType = 'application/pdf';
         fileExtension = 'pdf';
         break;
@@ -108,7 +108,6 @@ export class ExportService {
       return buffer;
     }
 
-    // Upload to S3
     const storageKey = `exports/${reportId}/${randomUUID()}.${fileExtension}`;
     const bucket = getS3Bucket('exports');
 
@@ -360,9 +359,8 @@ export class ExportService {
     // Create workbook
     const workbook = new ExcelJS.Workbook();
 
-    // Process each report and create a worksheet
     for (const report of reports) {
-      const expenses = await Expense.find({ reportId: report._id })
+      const expenses = await Expense.find({ reportId: report._id, status: { $ne: ExpenseStatus.REJECTED } })
         .populate('categoryId', 'name')
         .populate('receiptPrimaryId', 'storageUrl storageKey')
         .sort({ expenseDate: 1 })
@@ -451,7 +449,23 @@ export class ExportService {
       worksheet.addRow(['Purpose of Expense', report.notes || report.name || 'N/A']);
       worksheet.addRow([]);
 
-      // Expense Details Table Header
+      // Voucher breakdown and liability (plan §7.1)
+      const appliedVouchers = report.appliedVouchers || [];
+      const voucherTotalUsed = appliedVouchers.length > 0
+        ? appliedVouchers.reduce((s: number, a: any) => s + (a.amountUsed || 0), 0)
+        : (report.advanceAppliedAmount ?? 0);
+      const employeePaid = Math.max(0, (report.totalAmount ?? 0) - voucherTotalUsed);
+      if (voucherTotalUsed > 0) {
+        worksheet.addRow(['Voucher Applied', 'Yes']);
+        appliedVouchers.forEach((v: any) => {
+          worksheet.addRow(['Voucher', `${v.voucherCode || 'N/A'}: ${v.amountUsed ?? 0} ${v.currency ?? 'INR'}`]);
+        });
+        worksheet.addRow(['Voucher total used', `${report.currency ?? 'INR'} ${voucherTotalUsed.toFixed(2)}`]);
+        worksheet.addRow(['Employee paid', `${report.currency ?? 'INR'} ${employeePaid.toFixed(2)}`]);
+        worksheet.addRow([]);
+      }
+
+      // Expense Details Table Header (plan §7.1: duplicate columns)
       const headerRow = worksheet.addRow([
         'S. No',
         'Bill / Invoice No',
@@ -462,6 +476,8 @@ export class ExportService {
         'Amount',
         'Receipt Attached',
         'Description',
+        'Duplicate',
+        'Duplicate Reason',
       ]);
       headerRow.font = { bold: true };
       headerRow.fill = {
@@ -479,24 +495,24 @@ export class ExportService {
         };
       });
 
-      // Expense rows
+      // Expense rows (plan §7.1: duplicate flags)
       let serialNumber = 1;
       expenses.forEach((exp) => {
         const category = (exp.categoryId as any)?.name || 'Other';
         const hasReceipt = !!(exp.receiptPrimaryId || (exp.receiptIds && exp.receiptIds.length > 0));
-        
         const row = worksheet.addRow([
           serialNumber++,
           exp.invoiceId || exp.vendor || 'N/A',
           formatDate(exp.invoiceDate || exp.expenseDate),
           category,
-          'N/A', // Payment Method
+          'N/A',
           exp.currency || 'INR',
           exp.amount || 0,
           hasReceipt ? 'Yes' : 'No',
           exp.notes || exp.vendor || '',
+          exp.duplicateFlag || '',
+          exp.duplicateReason || '',
         ]);
-        
         row.eachCell((cell, colNumber) => {
           cell.border = {
             top: { style: 'thin' },
@@ -504,14 +520,13 @@ export class ExportService {
             bottom: { style: 'thin' },
             right: { style: 'thin' },
           };
-          if (colNumber === 7) { // Amount column
+          if (colNumber === 7) {
             cell.numFmt = '#,##0.00';
             cell.alignment = { horizontal: 'right' };
           }
         });
       });
 
-      // Totals Row
       const total = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
       const currency = report.currency || expenses[0]?.currency || 'INR';
       const totalRow = worksheet.addRow([
@@ -522,6 +537,8 @@ export class ExportService {
         '',
         currency,
         total,
+        '',
+        '',
         '',
         '',
       ]);
@@ -536,6 +553,14 @@ export class ExportService {
           right: { style: 'thin' },
         };
       });
+      if (voucherTotalUsed > 0) {
+        const liabRow = worksheet.addRow(['Voucher used', '', '', '', '', currency, voucherTotalUsed, '', '', '', '']);
+        liabRow.getCell(7).numFmt = '#,##0.00';
+        liabRow.getCell(7).alignment = { horizontal: 'right' };
+        const empRow = worksheet.addRow(['Employee paid', '', '', '', '', currency, employeePaid, '', '', '', '']);
+        empRow.getCell(7).numFmt = '#,##0.00';
+        empRow.getCell(7).alignment = { horizontal: 'right' };
+      }
       worksheet.addRow([]);
 
       // Footer
@@ -544,16 +569,17 @@ export class ExportService {
       worksheet.addRow(['Employee Signature:', '']);
       worksheet.addRow(['Date of Submission:', formatDate(report.submittedAt || report.updatedAt || new Date())]);
 
-      // Set column widths
-      worksheet.getColumn(1).width = 10; // S. No
-      worksheet.getColumn(2).width = 20; // Bill/Invoice No
-      worksheet.getColumn(3).width = 18; // Bill/Invoice Date
-      worksheet.getColumn(4).width = 25; // Type of Reimbursement
-      worksheet.getColumn(5).width = 18; // Payment Method
-      worksheet.getColumn(6).width = 12; // Currency
-      worksheet.getColumn(7).width = 15; // Amount
-      worksheet.getColumn(8).width = 18; // Receipt Attached
-      worksheet.getColumn(9).width = 30; // Description
+      worksheet.getColumn(1).width = 10;
+      worksheet.getColumn(2).width = 20;
+      worksheet.getColumn(3).width = 18;
+      worksheet.getColumn(4).width = 25;
+      worksheet.getColumn(5).width = 18;
+      worksheet.getColumn(6).width = 12;
+      worksheet.getColumn(7).width = 15;
+      worksheet.getColumn(8).width = 18;
+      worksheet.getColumn(9).width = 30;
+      worksheet.getColumn(10).width = 14;
+      worksheet.getColumn(11).width = 24;
     }
 
     return Buffer.from(await workbook.xlsx.writeBuffer());
@@ -650,11 +676,22 @@ export class ExportService {
           doc.text(`Rejected Date: ${new Date(report.rejectedAt).toLocaleDateString()}`);
         }
 
-        // Currency and amount with proper symbol
         const currencySymbol = this.getCurrencySymbol(report.currency || 'INR');
-        // Recalculate total from expenses to ensure accuracy
         const calculatedTotal = expenses.reduce((sum, exp) => sum + (exp.amount || 0), 0);
         doc.text(`Total Amount: ${currencySymbol}${calculatedTotal.toFixed(2)}`);
+        const appliedVouchers = report.appliedVouchers || [];
+        const voucherTotalUsed = appliedVouchers.length > 0
+          ? appliedVouchers.reduce((s: number, a: any) => s + (a.amountUsed || 0), 0)
+          : (report.advanceAppliedAmount ?? 0);
+        const employeePaid = Math.max(0, calculatedTotal - voucherTotalUsed);
+        if (voucherTotalUsed > 0) {
+          doc.text(`Voucher Applied: Yes`);
+          appliedVouchers.forEach((v: any) => {
+            doc.text(`  ${v.voucherCode || 'N/A'}: ${currencySymbol}${(v.amountUsed ?? 0).toFixed(2)}`);
+          });
+          doc.text(`Voucher total used: ${currencySymbol}${voucherTotalUsed.toFixed(2)}`);
+          doc.text(`Employee paid: ${currencySymbol}${employeePaid.toFixed(2)}`);
+        }
         doc.moveDown();
 
         // Add approver information
@@ -684,7 +721,6 @@ export class ExportService {
         doc.moveDown(0.5);
         doc.fontSize(10);
 
-        // Table header
         const tableTop = doc.y;
         doc.fontSize(8);
         doc.text('Date', 50, tableTop);
@@ -692,7 +728,8 @@ export class ExportService {
         doc.text('Category', 200, tableTop);
         doc.text('Amount', 280, tableTop);
         doc.text('Invoice ID', 350, tableTop);
-        doc.text('Notes', 420, tableTop);
+        doc.text('Dup', 420, tableTop);
+        doc.text('Notes', 455, tableTop);
 
         let y = tableTop + 20;
         expenses.forEach((exp) => {
@@ -704,13 +741,11 @@ export class ExportService {
           doc.text(exp.expenseDate.toISOString().split('T')[0], 50, y);
           doc.text(exp.vendor.substring(0, 25), 100, y);
           doc.text((exp.categoryId?.name || 'N/A').substring(0, 15), 200, y);
-
-          // Use proper currency symbol
-          const currencySymbol = this.getCurrencySymbol(exp.currency || 'INR');
-          doc.text(`${currencySymbol}${exp.amount}`, 280, y);
-
+          const sym = this.getCurrencySymbol(exp.currency || 'INR');
+          doc.text(`${sym}${exp.amount}`, 280, y);
           doc.text((exp.invoiceId || 'N/A').substring(0, 15), 350, y);
-          doc.text((exp.notes || '').substring(0, 20), 420, y);
+          doc.text((exp.duplicateFlag || '').substring(0, 6), 420, y);
+          doc.text((exp.notes || '').substring(0, 20), 455, y);
           y += 20;
         });
 
@@ -766,13 +801,12 @@ export class ExportService {
       throw new Error('Report must be submitted or approved to export');
     }
 
-    const expenses = await Expense.find({ reportId })
+    const expenses = await Expense.find({ reportId, status: { $ne: ExpenseStatus.REJECTED } })
       .populate('categoryId', 'name')
       .populate('receiptPrimaryId', 'storageUrl storageKey')
       .sort({ expenseDate: 1 })
       .exec();
 
-    // Only support XLSX format now
     return await this.generateStructuredXLSX(report as any, expenses);
   }
 
@@ -855,6 +889,21 @@ export class ExportService {
 
     headerData.push(['Purpose of Expense', report.notes || report.name || 'N/A']);
 
+    const appliedVouchers = report.appliedVouchers || [];
+    const voucherTotalUsed = appliedVouchers.length > 0
+      ? appliedVouchers.reduce((s: number, a: any) => s + (a.amountUsed || 0), 0)
+      : (report.advanceAppliedAmount ?? 0);
+    const reportTotal = report.totalAmount ?? expenses.reduce((s: number, e: any) => s + (e.amount || 0), 0);
+    const employeePaid = Math.max(0, reportTotal - voucherTotalUsed);
+    if (voucherTotalUsed > 0) {
+      headerData.push(['Voucher Applied', 'Yes']);
+      appliedVouchers.forEach((v: any) => {
+        headerData.push(['Voucher', `${v.voucherCode || 'N/A'}: ${v.amountUsed ?? 0} ${v.currency ?? 'INR'}`]);
+      });
+      headerData.push(['Voucher total used', `${report.currency ?? 'INR'} ${voucherTotalUsed.toFixed(2)}`]);
+      headerData.push(['Employee paid', `${report.currency ?? 'INR'} ${employeePaid.toFixed(2)}`]);
+    }
+
     headerData.forEach(([label, value]) => {
       const labelCell = worksheet.getCell(`A${currentRow}`);
       labelCell.value = label;
@@ -882,7 +931,6 @@ export class ExportService {
 
     currentRow += 1; // Empty row
 
-    // Table Header (Row 11)
     const headers = [
       'S. No',
       'Bill / Invoice No',
@@ -893,6 +941,8 @@ export class ExportService {
       'Amount',
       'Receipt Attached',
       'Description',
+      'Duplicate',
+      'Duplicate Reason',
     ];
 
     headers.forEach((header, index) => {
@@ -922,14 +972,16 @@ export class ExportService {
       
       const rowData = [
         serialNumber++,
-        exp.invoiceId || exp.vendor || 'N/A', // Bill/Invoice No
-        formatDate(exp.invoiceDate || exp.expenseDate), // Bill/Invoice Date
-        category, // Type of Reimbursement
-        'N/A', // Payment Method (not stored in current schema)
-        exp.currency || 'INR', // Currency
-        exp.amount || 0, // Amount
-        hasReceipt ? 'Yes' : 'No', // Receipt Attached
-        exp.notes || exp.vendor || '', // Description
+        exp.invoiceId || exp.vendor || 'N/A',
+        formatDate(exp.invoiceDate || exp.expenseDate),
+        category,
+        'N/A',
+        exp.currency || 'INR',
+        exp.amount || 0,
+        hasReceipt ? 'Yes' : 'No',
+        exp.notes || exp.vendor || '',
+        exp.duplicateFlag || '',
+        exp.duplicateReason || '',
       ];
 
       rowData.forEach((value, index) => {
@@ -990,7 +1042,43 @@ export class ExportService {
       bottom: { style: 'thin' },
       right: { style: 'thin' },
     };
-    currentRow += 2;
+    currentRow++;
+    if (voucherTotalUsed > 0) {
+      const border = { top: { style: 'thin' as const }, left: { style: 'thin' as const }, bottom: { style: 'thin' as const }, right: { style: 'thin' as const } };
+      worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
+      const vLab = worksheet.getCell(`A${currentRow}`);
+      vLab.value = 'Voucher used';
+      vLab.font = { bold: true };
+      vLab.alignment = { horizontal: 'right' };
+      vLab.border = border;
+      const g1 = worksheet.getCell(`G${currentRow}`);
+      g1.value = report.currency ?? 'INR';
+      g1.font = { bold: true };
+      g1.border = border;
+      const h1 = worksheet.getCell(`H${currentRow}`);
+      h1.value = voucherTotalUsed;
+      h1.numFmt = '#,##0.00';
+      h1.font = { bold: true };
+      h1.border = border;
+      currentRow++;
+      worksheet.mergeCells(`A${currentRow}:F${currentRow}`);
+      const eLab = worksheet.getCell(`A${currentRow}`);
+      eLab.value = 'Employee paid';
+      eLab.font = { bold: true };
+      eLab.alignment = { horizontal: 'right' };
+      eLab.border = border;
+      const g2 = worksheet.getCell(`G${currentRow}`);
+      g2.value = report.currency ?? 'INR';
+      g2.font = { bold: true };
+      g2.border = border;
+      const h2 = worksheet.getCell(`H${currentRow}`);
+      h2.value = employeePaid;
+      h2.numFmt = '#,##0.00';
+      h2.font = { bold: true };
+      h2.border = border;
+      currentRow++;
+    }
+    currentRow++;
 
     // Footer note
     worksheet.mergeCells(`A${currentRow}:H${currentRow}`);
@@ -1028,18 +1116,18 @@ export class ExportService {
       bottom: { style: 'thin' },
     };
 
-    // Set column widths
-    worksheet.getColumn(1).width = 8; // S. No
-    worksheet.getColumn(2).width = 20; // Bill/Invoice No
-    worksheet.getColumn(3).width = 18; // Bill/Invoice Date
-    worksheet.getColumn(4).width = 25; // Type of Reimbursement
-    worksheet.getColumn(5).width = 18; // Payment Method
-    worksheet.getColumn(6).width = 12; // Currency
-    worksheet.getColumn(7).width = 15; // Amount
-    worksheet.getColumn(8).width = 18; // Receipt Attached
-    worksheet.getColumn(9).width = 30; // Description
+    worksheet.getColumn(1).width = 8;
+    worksheet.getColumn(2).width = 20;
+    worksheet.getColumn(3).width = 18;
+    worksheet.getColumn(4).width = 25;
+    worksheet.getColumn(5).width = 18;
+    worksheet.getColumn(6).width = 12;
+    worksheet.getColumn(7).width = 15;
+    worksheet.getColumn(8).width = 18;
+    worksheet.getColumn(9).width = 30;
+    worksheet.getColumn(10).width = 12;
+    worksheet.getColumn(11).width = 22;
 
-    // Generate buffer
     const buffer = await workbook.xlsx.writeBuffer();
     return Buffer.from(buffer);
   }

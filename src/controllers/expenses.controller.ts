@@ -65,7 +65,8 @@ export class ExpensesController {
 
   static getAll = asyncHandler(async (req: AuthRequest, res: Response) => {
     const filters = expenseFiltersSchema.parse(req.query);
-    const result = await ExpensesService.listExpensesForUser(req.user!.id, filters);
+    // Pass req for company-wide filtering (important for duplicate detection)
+    const result = await ExpensesService.listExpensesForUser(req.user!.id, filters, req);
 
     res.status(200).json({
       success: true,

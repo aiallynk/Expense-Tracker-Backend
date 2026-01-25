@@ -50,38 +50,21 @@ export class ExpensesService {
 
     const invoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
     let invoiceFingerprint: string | undefined = undefined;
-
-    // Rule 1: Detect original currency (from OCR, manual input, or existing expense)
-    const originalCurrency = (data.currency || 'INR').toUpperCase();
-    const originalAmount = data.amount;
-
-    // Check for duplicate invoice if invoice fields are provided
-    // Use original amount for duplicate detection (not converted amount)
+    // Keep fingerprint for legacy indexes; duplicate detection is flag-only via DuplicateDetectionService
     if (data.invoiceId && invoiceDate) {
       const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
-      const user = await User.findById(userId).select('companyId').exec();
+      const originalAmount = data.amount;
       invoiceFingerprint = DuplicateInvoiceService.computeFingerprint(
         data.invoiceId,
         data.vendor,
         invoiceDate,
-        originalAmount // Use original amount for duplicate detection
+        originalAmount
       );
-      
-      if (user && user.companyId) {
-        const duplicateCheck = await DuplicateInvoiceService.checkDuplicate(
-          data.invoiceId,
-          data.vendor,
-          invoiceDate,
-          originalAmount, // Use original amount for duplicate detection
-          undefined, // No excludeExpenseId for new expenses
-          user.companyId
-        );
-
-        if (duplicateCheck.isDuplicate) {
-          throw new Error(duplicateCheck.message || 'Duplicate invoice detected');
-        }
-      }
     }
+
+    // Rule 1: Detect original currency (from OCR, manual input, or existing expense)
+    const originalCurrency = (data.currency || 'INR').toUpperCase();
+    const originalAmount = data.amount;
 
     // Validate project access if projectId is provided
     if (data.projectId) {
@@ -110,6 +93,14 @@ export class ExpensesService {
       // Note: We'll validate against converted amount after conversion
     }
 
+    // Expense date must be within report [fromDate, toDate] (plan §4.1)
+    const expenseDateBackend = DateUtils.frontendDateToBackend(data.expenseDate);
+    if (!DateUtils.isDateInReportRange(expenseDateBackend, report.fromDate, report.toDate)) {
+      throw new Error(
+        `Expense date must be within report date range (${DateUtils.backendDateToFrontend(report.fromDate)} to ${DateUtils.backendDateToFrontend(report.toDate)})`
+      );
+    }
+
     // Rule 3 & 4: Process currency conversion
     const conversionMetadata = await this.processCurrencyConversion(
       originalAmount,
@@ -129,7 +120,7 @@ export class ExpensesService {
       // Store converted amount in selected currency (Rule 3)
       amount: conversionMetadata.convertedAmount,
       currency: selectedCurrency, // Always store in selected currency
-      expenseDate: DateUtils.frontendDateToBackend(data.expenseDate),
+      expenseDate: expenseDateBackend,
       status: ExpenseStatus.DRAFT,
       source: data.source,
       notes: data.notes,
@@ -162,6 +153,19 @@ export class ExpensesService {
     // Recalculate report total
     await ReportsService.recalcTotals(reportId);
 
+    // Duplicate detection: flag-only, never block (updates expense.duplicateFlag / duplicateReason)
+    try {
+      const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+      const user = await User.findById(userId).select('companyId').exec();
+      const companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+      await DuplicateDetectionService.runDuplicateCheck(
+        (saved._id as mongoose.Types.ObjectId).toString(),
+        companyId
+      );
+    } catch (e) {
+      logger.warn({ err: e, expenseId: saved._id }, 'Duplicate check failed; continuing');
+    }
+
     await AuditService.log(
       userId,
       'Expense',
@@ -182,12 +186,17 @@ export class ExpensesService {
       logger.error({ error }, 'Error emitting company admin dashboard update');
     }
 
-    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
-    const savedObj = saved.toObject();
+    // Refetch to include duplicateFlag / duplicateReason set by DuplicateDetectionService
+    const updated = await Expense.findById(saved._id).exec();
+    const out = (updated ?? saved).toObject();
     return {
-      ...savedObj,
-      expenseDate: saved.expenseDate ? DateUtils.backendDateToFrontend(saved.expenseDate) : savedObj.expenseDate,
-      invoiceDate: saved.invoiceDate ? DateUtils.backendDateToFrontend(saved.invoiceDate) : savedObj.invoiceDate,
+      ...out,
+      expenseDate: (updated ?? saved).expenseDate
+        ? DateUtils.backendDateToFrontend((updated ?? saved).expenseDate!)
+        : (out as any).expenseDate,
+      invoiceDate: (updated ?? saved).invoiceDate
+        ? DateUtils.backendDateToFrontend((updated ?? saved).invoiceDate!)
+        : (out as any).invoiceDate,
     } as any;
   }
 
@@ -222,6 +231,9 @@ export class ExpensesService {
     if (!canUpdate) {
       throw new Error('Can only update expenses in draft reports, reports with changes requested, or expenses with pending/rejected status');
     }
+
+    const priorCategoryId = expense.categoryId?.toString?.();
+    const priorExpenseDate = expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : null;
 
     if (data.vendor !== undefined) {
       expense.vendor = data.vendor;
@@ -303,7 +315,13 @@ export class ExpensesService {
     }
 
     if (data.expenseDate !== undefined) {
-      expense.expenseDate = DateUtils.frontendDateToBackend(data.expenseDate);
+      const newExpenseDate = DateUtils.frontendDateToBackend(data.expenseDate);
+      if (!DateUtils.isDateInReportRange(newExpenseDate, report.fromDate, report.toDate)) {
+        throw new Error(
+          `Expense date must be within report date range (${DateUtils.backendDateToFrontend(report.fromDate)} to ${DateUtils.backendDateToFrontend(report.toDate)})`
+        );
+      }
+      expense.expenseDate = newExpenseDate;
     }
 
     if (data.notes !== undefined) {
@@ -317,7 +335,7 @@ export class ExpensesService {
     if (data.invoiceDate !== undefined) {
       expense.invoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
     }
-    // Keep invoiceFingerprint consistent with invoice fields
+    // Keep invoiceFingerprint consistent with invoice fields (legacy indexes)
     if (expense.invoiceId && expense.invoiceDate) {
       const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
       expense.invoiceFingerprint = DuplicateInvoiceService.computeFingerprint(
@@ -329,44 +347,48 @@ export class ExpensesService {
     } else {
       expense.invoiceFingerprint = undefined;
     }
-
-    // Check for duplicate invoice if invoice fields are being updated
-    if ((data.invoiceId !== undefined || data.invoiceDate !== undefined) && 
-        expense.invoiceId && expense.invoiceDate) {
-      const { DuplicateInvoiceService } = await import('./duplicateInvoice.service');
-      const user = await User.findById(userId).select('companyId').exec();
-      
-      if (user && user.companyId) {
-        const expenseId = (expense._id as mongoose.Types.ObjectId).toString();
-        const duplicateCheck = await DuplicateInvoiceService.checkDuplicate(
-          expense.invoiceId,
-          expense.vendor,
-          expense.invoiceDate,
-          expense.amount,
-          expenseId, // Exclude current expense
-          user.companyId
-        );
-
-        if (duplicateCheck.isDuplicate) {
-          throw new Error(duplicateCheck.message || 'Duplicate invoice detected');
-        }
-      }
-    }
+    // Duplicate detection is flag-only via DuplicateDetectionService (no throw)
 
     // If expense status was PENDING or REJECTED, update it back to DRAFT
-    // This indicates the employee has made the requested changes
     if (expense.status === ExpenseStatus.PENDING || expense.status === ExpenseStatus.REJECTED) {
       expense.status = ExpenseStatus.DRAFT;
-      // Clear manager feedback since employee has addressed the issue
       expense.managerComment = undefined;
       expense.managerAction = undefined;
       expense.managerActionAt = undefined;
+    }
+
+    // Manual correction of "Needs Review" expense: clear needsReview, log for training (plan §5)
+    const didCorrectCategory = expense.needsReview && data.categoryId !== undefined;
+    const didCorrectDate = expense.needsReview && data.expenseDate !== undefined;
+    if (expense.needsReview && (didCorrectCategory || didCorrectDate)) {
+      expense.needsReview = false;
+      expense.ocrConfidence = undefined;
+      if (didCorrectCategory) {
+        await AuditService.log(userId, 'Expense', id, AuditAction.UPDATE, {
+          ocrCorrection: { field: 'categoryId', prior: priorCategoryId, new: data.categoryId ?? null, source: 'manual' },
+        });
+      }
+      if (didCorrectDate) {
+        await AuditService.log(userId, 'Expense', id, AuditAction.UPDATE, {
+          ocrCorrection: { field: 'expenseDate', prior: priorExpenseDate, new: data.expenseDate ?? null, source: 'manual' },
+        });
+      }
     }
 
     const saved = await expense.save();
 
     // Recalculate report total
     await ReportsService.recalcTotals(report._id.toString());
+
+    // Duplicate detection: flag-only, never block
+    try {
+      const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+      const user = await User.findById(userId).select('companyId').exec();
+      const companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+      await DuplicateDetectionService.runDuplicateCheck(id, companyId);
+    } catch (e) {
+      logger.warn({ err: e, expenseId: id }, 'Duplicate check failed; continuing');
+    }
 
     await AuditService.log(userId, 'Expense', id, AuditAction.UPDATE, data);
 
@@ -391,12 +413,17 @@ export class ExpensesService {
       }
     }
 
-    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
-    const savedObj = saved.toObject();
+    // Refetch to include duplicateFlag / duplicateReason
+    const updated = await Expense.findById(id).exec();
+    const out = (updated ?? saved).toObject();
     return {
-      ...savedObj,
-      expenseDate: saved.expenseDate ? DateUtils.backendDateToFrontend(saved.expenseDate) : savedObj.expenseDate,
-      invoiceDate: saved.invoiceDate ? DateUtils.backendDateToFrontend(saved.invoiceDate) : savedObj.invoiceDate,
+      ...out,
+      expenseDate: (updated ?? saved).expenseDate
+        ? DateUtils.backendDateToFrontend((updated ?? saved).expenseDate!)
+        : (out as any).expenseDate,
+      invoiceDate: (updated ?? saved).invoiceDate
+        ? DateUtils.backendDateToFrontend((updated ?? saved).invoiceDate!)
+        : (out as any).invoiceDate,
     } as any;
   }
 
@@ -431,18 +458,54 @@ export class ExpensesService {
       throw new Error('Access denied');
     }
 
+    // FORENSIC: Log raw expense from database (before transformation)
+    logger.debug({
+      expenseId: expense._id,
+      rawExpenseFromDB: {
+        hasExpenseDate: !!expense.expenseDate,
+        expenseDateType: expense.expenseDate ? typeof expense.expenseDate : 'missing',
+        expenseDateValue: expense.expenseDate,
+        expenseDateIsDate: expense.expenseDate instanceof Date
+      }
+    }, 'FORENSIC (User Flow): Raw expense from database (before toObject)');
+    
     // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
     const expenseObj = expense.toObject();
-    return {
+    
+    // FORENSIC: Log after toObject() conversion
+    logger.debug({
+      expenseId: expense._id,
+      afterToObject: {
+        hasExpenseDate: !!expenseObj.expenseDate,
+        expenseDateType: expenseObj.expenseDate ? typeof expenseObj.expenseDate : 'missing',
+        expenseDateValue: expenseObj.expenseDate,
+        expenseDateIsDate: expenseObj.expenseDate instanceof Date
+      }
+    }, 'FORENSIC (User Flow): After toObject() conversion');
+    
+    const finalExpense = {
       ...expenseObj,
       expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
       invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
     } as any;
+    
+    // FORENSIC: Log final returned object
+    logger.debug({
+      expenseId: expense._id,
+      finalReturned: {
+        hasExpenseDate: !!finalExpense.expenseDate,
+        expenseDateType: finalExpense.expenseDate ? typeof finalExpense.expenseDate : 'missing',
+        expenseDateValue: finalExpense.expenseDate
+      }
+    }, 'FORENSIC (User Flow): Final returned object (after DateUtils transformation)');
+    
+    return finalExpense;
   }
 
   static async listExpensesForUser(
     userId: string,
-    filters: ExpenseFiltersDto
+    filters: ExpenseFiltersDto,
+    req?: any // Optional AuthRequest for company-wide filtering
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     
@@ -451,12 +514,44 @@ export class ExpensesService {
       logger.debug({ page, pageSize, skip: (page - 1) * pageSize }, '[ExpensesService] Pagination');
     }
 
-    // Build base query - expenses must belong to the user
-    // Since expenses have a userId field, we can directly query by userId
-    // This ensures all expenses created by the user (from phone or web) are included
-    const query: any = {
-      userId: new mongoose.Types.ObjectId(userId),
-    };
+    // Build base query
+    // For company-wide duplicate detection, we need to check all expenses in the company
+    // If req is provided, use company-wide filtering; otherwise, filter by specific userId
+    let query: any = {};
+    
+    if (req) {
+      // Use company-wide filtering for duplicate detection
+      // This ensures we check expenses from all users in the company, not just the current user
+      const { buildCompanyQuery } = await import('../utils/companyAccess');
+      const companyQuery = await buildCompanyQuery(req, {}, 'users');
+      
+      // buildCompanyQuery returns { userId: { $in: userIds } } for company users
+      // If it returns empty array, fall back to user-specific query
+      if (companyQuery.userId && Array.isArray(companyQuery.userId.$in)) {
+        if (companyQuery.userId.$in.length > 0) {
+          // Use company-wide filtering (all users in company)
+          query = companyQuery;
+        } else {
+          // No users in company, fall back to user-specific
+          query = {
+            userId: new mongoose.Types.ObjectId(userId),
+          };
+        }
+      } else if (companyQuery._id && Array.isArray(companyQuery._id.$in) && companyQuery._id.$in.length === 0) {
+        // Company query returned empty result query, fall back to user-specific
+        query = {
+          userId: new mongoose.Types.ObjectId(userId),
+        };
+      } else {
+        // Use company query as-is
+        query = companyQuery;
+      }
+    } else {
+      // Default: filter by specific userId (backward compatibility)
+      query = {
+        userId: new mongoose.Types.ObjectId(userId),
+      };
+    }
 
     // Filter by specific reportId if provided
     if (filters.reportId) {
@@ -528,19 +623,65 @@ export class ExpensesService {
     }
 
     // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
-    const formattedExpenses = expenses.map((expense) => {
+    const formattedExpenses = expenses.map((expense, index) => {
+      // FORENSIC: Log first expense only to avoid log spam
+      if (index === 0 && expenses.length > 0) {
+        logger.debug({
+          expenseId: expense._id,
+          rawExpenseFromDB: {
+            hasExpenseDate: !!expense.expenseDate,
+            expenseDateType: expense.expenseDate ? typeof expense.expenseDate : 'missing',
+            expenseDateValue: expense.expenseDate,
+            expenseDateIsDate: expense.expenseDate instanceof Date
+          }
+        }, 'FORENSIC (User Flow - listExpensesForUser): Raw expense from database');
+      }
+      
       const expenseObj = expense.toObject();
-      return {
+      
+      if (index === 0 && expenses.length > 0) {
+        logger.debug({
+          expenseId: expense._id,
+          afterToObject: {
+            hasExpenseDate: !!expenseObj.expenseDate,
+            expenseDateType: expenseObj.expenseDate ? typeof expenseObj.expenseDate : 'missing',
+            expenseDateValue: expenseObj.expenseDate,
+            expenseDateIsDate: expenseObj.expenseDate instanceof Date
+          }
+        }, 'FORENSIC (User Flow - listExpensesForUser): After toObject() conversion');
+      }
+      
+      const formatted = {
         ...expenseObj,
         expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
         invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
       };
+      
+      if (index === 0 && expenses.length > 0) {
+        logger.debug({
+          expenseId: expense._id,
+          finalReturned: {
+            hasExpenseDate: !!formatted.expenseDate,
+            expenseDateType: formatted.expenseDate ? typeof formatted.expenseDate : 'missing',
+            expenseDateValue: formatted.expenseDate
+          }
+        }, 'FORENSIC (User Flow - listExpensesForUser): Final returned object');
+      }
+      
+      return formatted;
     });
 
     return createPaginatedResult(formattedExpenses, total, page, pageSize);
   }
 
   static async adminListExpenses(filters: ExpenseFiltersDto, req: AuthRequest): Promise<any> {
+    // #region agent log
+    const fs = require('fs');
+    const logPath = 'd:\\APPs\\Expence Track\\.cursor\\debug.log';
+    const logEntry = JSON.stringify({location:'expenses.service.ts:570',message:'adminListExpenses entry',data:{filters,userId:req.user?.id},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'C'})+'\n';
+    fs.appendFileSync(logPath, logEntry);
+    // #endregion
+    
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     const baseQuery: any = {};
 
@@ -557,8 +698,24 @@ export class ExpensesService {
     }
 
     if (filters.from) {
-      const dateRange = DateUtils.createDateRangeQuery(filters.from, filters.to || filters.from);
-      baseQuery.expenseDate = dateRange;
+      // #region agent log
+      const logEntry2 = JSON.stringify({location:'expenses.service.ts:586',message:'Before date range query',data:{from:filters.from,to:filters.to},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n';
+      fs.appendFileSync(logPath, logEntry2);
+      // #endregion
+      try {
+        const dateRange = DateUtils.createDateRangeQuery(filters.from, filters.to || filters.from);
+        baseQuery.expenseDate = dateRange;
+        // #region agent log
+        const logEntry3 = JSON.stringify({location:'expenses.service.ts:590',message:'After date range query',data:{dateRange},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n';
+        fs.appendFileSync(logPath, logEntry3);
+        // #endregion
+      } catch (dateError: any) {
+        // #region agent log
+        const logEntry4 = JSON.stringify({location:'expenses.service.ts:593',message:'Date range error',data:{error:dateError.message},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'D'})+'\n';
+        fs.appendFileSync(logPath, logEntry4);
+        // #endregion
+        throw dateError;
+      }
     }
 
     if (filters.to) {
@@ -623,17 +780,35 @@ export class ExpensesService {
 
     const skip = (page - 1) * pageSize;
 
-    const [expenses, total] = await Promise.all([
-      Expense.find(query)
-        .populate('reportId', 'name status userId projectId costCentreId')
-        .populate('categoryId', 'name code')
-        .populate('costCentreId', 'name code')
-        .sort({ expenseDate: -1 })
-        .skip(skip)
-        .limit(pageSize)
-        .exec(),
-      Expense.countDocuments(query).exec(),
-    ]);
+    // #region agent log
+    const logEntry13 = JSON.stringify({location:'expenses.service.ts:651',message:'Before Expense.find',data:{query,skip,pageSize},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})+'\n';
+    fs.appendFileSync(logPath, logEntry13);
+    // #endregion
+    
+    let expenses, total;
+    try {
+      [expenses, total] = await Promise.all([
+        Expense.find(query)
+          .populate('reportId', 'name status userId projectId costCentreId')
+          .populate('categoryId', 'name code')
+          .populate('costCentreId', 'name code')
+          .sort({ expenseDate: -1 })
+          .skip(skip)
+          .limit(pageSize)
+          .exec(),
+        Expense.countDocuments(query).exec(),
+      ]);
+      // #region agent log
+      const logEntry14 = JSON.stringify({location:'expenses.service.ts:663',message:'After Expense.find',data:{expensesCount:expenses.length,total},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})+'\n';
+      fs.appendFileSync(logPath, logEntry14);
+      // #endregion
+    } catch (queryError: any) {
+      // #region agent log
+      const logEntry15 = JSON.stringify({location:'expenses.service.ts:666',message:'Expense.find error',data:{error:queryError.message,stack:queryError.stack},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'G'})+'\n';
+      fs.appendFileSync(logPath, logEntry15);
+      // #endregion
+      throw queryError;
+    }
 
     // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
     const formattedExpenses = expenses.map((expense) => {
@@ -696,6 +871,16 @@ export class ExpensesService {
 
     const report = expense.reportId as any;
 
+    // Check if report exists
+    if (!report) {
+      throw new Error('Expense report not found');
+    }
+
+    // Check if report has required fields
+    if (!report._id || !report.userId) {
+      throw new Error('Invalid expense report data');
+    }
+
     // Check access: owner or admin
     if (
       report.userId.toString() !== userId &&
@@ -723,10 +908,20 @@ export class ExpensesService {
     // Delete the expense
     await Expense.findByIdAndDelete(id);
 
-    // Recalculate report total
-    await ReportsService.recalcTotals(reportId);
+    // Recalculate report total (handle potential errors)
+    try {
+      await ReportsService.recalcTotals(reportId);
+    } catch (recalcError: any) {
+      console.error('Error recalculating report totals after expense deletion:', recalcError);
+      // Don't throw - expense is already deleted, recalc can be retried
+    }
 
-    await AuditService.log(userId, 'Expense', id, AuditAction.DELETE);
+    try {
+      await AuditService.log(userId, 'Expense', id, AuditAction.DELETE);
+    } catch (auditError: any) {
+      console.error('Error logging audit trail:', auditError);
+      // Don't throw - expense deletion succeeded, audit is secondary
+    }
   }
 
   /**

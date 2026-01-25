@@ -9,6 +9,7 @@ import { ExpenseReportStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
 import { config } from '@/config/index';
+import { DateUtils } from '../utils/dateUtils';
 // NOTE: Keep ApprovalService fully functional for matrix-based approvals.
 // Employee-level chains can be integrated later without breaking ApprovalInstance flow.
 
@@ -211,12 +212,187 @@ export class ApprovalService {
               .exec();
           }
           if (!requestDetails) continue;
+          
+          // FORENSIC STEP 1: Database verification query - verify expenseDate exists in DB
+          const dbCheck = await Expense.findOne({ reportId: instance.requestId })
+            .select('_id expenseDate')
+            .lean()
+            .exec();
+          
+          if (dbCheck) {
+            logger.debug({
+              reportId: instance.requestId,
+              expenseId: dbCheck._id,
+              hasExpenseDate: !!dbCheck.expenseDate,
+              expenseDateType: dbCheck.expenseDate ? typeof dbCheck.expenseDate : 'missing',
+              expenseDateValue: dbCheck.expenseDate,
+              expenseDateIsDate: dbCheck.expenseDate instanceof Date
+            }, 'FORENSIC: Direct DB check for expenseDate');
+          }
+          
+          // FORENSIC STEP 2: Before expense query - log reportId and query parameters
+          logger.debug({
+            reportId: instance.requestId,
+            requestType: instance.requestType,
+            instanceId: instance._id
+          }, 'FORENSIC: About to fetch expenses for approval');
+          
+          // CRITICAL: Fetch expenses with all fields (expenseDate is required in schema)
+          // Using .lean() returns plain objects with all fields by default
           const expenses = await Expense.find({ reportId: instance.requestId })
             .populate('categoryId', 'name')
             .populate('receiptPrimaryId', '_id storageUrl mimeType filename')
             .populate('receiptIds', '_id storageUrl mimeType filename')
-            .lean().exec();
-          const mappedExpenses = expenses.map((exp: any) => ({ ...exp, receiptUrl: exp.receiptPrimaryId?.storageUrl || null }));
+            .lean()
+            .exec();
+          
+          // FORENSIC STEP 3: After expense query - log raw expense objects from database
+          if (expenses.length > 0) {
+            const firstExpense = expenses[0];
+            logger.debug({ 
+              reportId: instance.requestId, 
+              expensesCount: expenses.length,
+              expensesWithDate: expenses.filter(e => e.expenseDate).length,
+              rawExpenseFromDB: {
+                id: firstExpense._id,
+                hasExpenseDate: !!firstExpense.expenseDate,
+                expenseDateType: firstExpense.expenseDate ? typeof firstExpense.expenseDate : 'missing',
+                expenseDateValue: firstExpense.expenseDate,
+                expenseDateIsDate: firstExpense.expenseDate instanceof Date,
+                hasInvoiceDate: !!firstExpense.invoiceDate,
+                invoiceDateType: firstExpense.invoiceDate ? typeof firstExpense.invoiceDate : 'missing',
+                hasCreatedAt: !!firstExpense.createdAt,
+                createdAtType: firstExpense.createdAt ? typeof firstExpense.createdAt : 'missing',
+                hasUpdatedAt: !!firstExpense.updatedAt,
+                updatedAtType: firstExpense.updatedAt ? typeof firstExpense.updatedAt : 'missing',
+                allKeys: Object.keys(firstExpense || {})
+              }
+            }, 'FORENSIC: Raw expenses from database (after .lean())');
+          } else {
+            logger.warn({ reportId: instance.requestId }, 'FORENSIC: No expenses found for report in approval');
+          }
+          // FORENSIC STEP 4: Map expenses with corrected logic to preserve expenseDate
+          // BUG ROOT CAUSE: The previous code set expenseDate: expenseDate where expenseDate could be undefined,
+          // which would overwrite the valid exp.expenseDate from the spread operator with undefined.
+          // FIX: Preserve original value first, only override if we have a valid converted value.
+          const mappedExpenses = expenses.map((exp: any) => {
+            // CRITICAL: Preserve original values first to ensure dates are never lost
+            // This matches the logic in ExpensesService.getExpenseById for consistency
+            let expenseDate: string | Date | undefined = exp.expenseDate;
+            let invoiceDate: string | Date | undefined = exp.invoiceDate;
+            
+            // Convert Date objects to YYYY-MM-DD strings (consistent with user flow)
+            // Using DateUtils.backendDateToFrontend ensures consistency with ExpensesService
+            if (exp.expenseDate instanceof Date) {
+              expenseDate = DateUtils.backendDateToFrontend(exp.expenseDate);
+            } else if (exp.expenseDate && typeof exp.expenseDate === 'string') {
+              // Already a string - could be ISO or YYYY-MM-DD
+              // If it's ISO, convert to YYYY-MM-DD for consistency with user flow
+              if (exp.expenseDate.includes('T') || exp.expenseDate.includes('Z')) {
+                const dateObj = new Date(exp.expenseDate);
+                if (!isNaN(dateObj.getTime())) {
+                  expenseDate = DateUtils.backendDateToFrontend(dateObj);
+                }
+              }
+              // If already YYYY-MM-DD, keep as is
+            }
+            
+            // Same logic for invoiceDate - preserve original, convert if Date object or ISO string
+            if (exp.invoiceDate instanceof Date) {
+              invoiceDate = DateUtils.backendDateToFrontend(exp.invoiceDate);
+            } else if (exp.invoiceDate && typeof exp.invoiceDate === 'string') {
+              // If it's ISO, convert to YYYY-MM-DD for consistency
+              if (exp.invoiceDate.includes('T') || exp.invoiceDate.includes('Z')) {
+                const dateObj = new Date(exp.invoiceDate);
+                if (!isNaN(dateObj.getTime())) {
+                  invoiceDate = DateUtils.backendDateToFrontend(dateObj);
+                }
+              }
+              // If already YYYY-MM-DD, keep as is
+            }
+            
+            // createdAt and updatedAt - convert to ISO strings for timestamps
+            let createdAt: string | Date | undefined = exp.createdAt;
+            if (exp.createdAt instanceof Date) {
+              createdAt = exp.createdAt.toISOString();
+            } else if (exp.createdAt && typeof exp.createdAt === 'string') {
+              createdAt = exp.createdAt;
+            }
+            
+            let updatedAt: string | Date | undefined = exp.updatedAt;
+            if (exp.updatedAt instanceof Date) {
+              updatedAt = exp.updatedAt.toISOString();
+            } else if (exp.updatedAt && typeof exp.updatedAt === 'string') {
+              updatedAt = exp.updatedAt;
+            }
+            
+            // CRITICAL: Always include expenseDate and invoiceDate if they exist in original
+            // Use converted value if available, otherwise preserve original
+            // This ensures dates are never lost even if conversion fails
+            return {
+              ...exp, // Preserves all original fields
+              receiptUrl: exp.receiptPrimaryId?.storageUrl || null,
+              // Always include expenseDate and invoiceDate if they exist in original
+              // Use converted value if available, otherwise preserve original from exp
+              expenseDate: expenseDate !== undefined ? expenseDate : exp.expenseDate,
+              invoiceDate: invoiceDate !== undefined ? invoiceDate : exp.invoiceDate,
+              createdAt: createdAt !== undefined ? createdAt : exp.createdAt,
+              updatedAt: updatedAt !== undefined ? updatedAt : exp.updatedAt,
+            };
+          });
+          
+          // FORENSIC STEP 5: After mapping - log mapped expense objects
+          if (mappedExpenses.length > 0) {
+            const firstMapped = mappedExpenses[0];
+            logger.debug({
+              reportId: instance.requestId,
+              mappedExpense: {
+                id: firstMapped._id,
+                hasExpenseDate: !!firstMapped.expenseDate,
+                expenseDateType: firstMapped.expenseDate ? typeof firstMapped.expenseDate : 'missing',
+                expenseDateValue: firstMapped.expenseDate,
+                hasInvoiceDate: !!firstMapped.invoiceDate,
+                invoiceDateType: firstMapped.invoiceDate ? typeof firstMapped.invoiceDate : 'missing',
+                hasCreatedAt: !!firstMapped.createdAt,
+                createdAtType: firstMapped.createdAt ? typeof firstMapped.createdAt : 'missing',
+                hasUpdatedAt: !!firstMapped.updatedAt,
+                updatedAtType: firstMapped.updatedAt ? typeof firstMapped.updatedAt : 'missing',
+                allKeys: Object.keys(firstMapped || {})
+              }
+            }, 'FORENSIC: Mapped expenses (after transformation)');
+          }
+          // FORENSIC STEP 6: Response validation - validate all expenses have expenseDate before returning
+          const expensesWithoutDate = mappedExpenses.filter(e => !e.expenseDate);
+          if (expensesWithoutDate.length > 0) {
+            logger.error({
+              reportId: instance.requestId,
+              missingCount: expensesWithoutDate.length,
+              expenseIds: expensesWithoutDate.map(e => e._id || e.id),
+              sampleMissing: expensesWithoutDate[0] ? {
+                id: expensesWithoutDate[0]._id,
+                allKeys: Object.keys(expensesWithoutDate[0] || {}),
+                hasExpenseDate: !!expensesWithoutDate[0].expenseDate,
+                expenseDateValue: expensesWithoutDate[0].expenseDate
+              } : null
+            }, 'FORENSIC ERROR: Expenses missing expenseDate in final response');
+          }
+          
+          // FORENSIC STEP 7: Before response - log final expense objects in response
+          if (mappedExpenses.length > 0) {
+            const firstFinal = mappedExpenses[0];
+            logger.debug({
+              reportId: instance.requestId,
+              finalExpenseInResponse: {
+                id: firstFinal._id,
+                hasExpenseDate: !!firstFinal.expenseDate,
+                expenseDateType: firstFinal.expenseDate ? typeof firstFinal.expenseDate : 'missing',
+                expenseDateValue: firstFinal.expenseDate,
+                vendor: firstFinal.vendor,
+                amount: firstFinal.amount
+              }
+            }, 'FORENSIC: Final expense object in response (before returning)');
+          }
+          
           pendingForUser.push({
             instanceId: instance._id,
             approvalStatus: instance.status,
@@ -233,6 +409,8 @@ export class ApprovalService {
               employeeEmail: requestDetails.userId?.email,
               projectName: requestDetails.projectId?.name,
               projectCode: requestDetails.projectId?.code,
+              // CRITICAL: Always include expenses array (even if empty)
+              // Each expense should have expenseDate as ISO string
               expenses: mappedExpenses,
               dateRange: { from: requestDetails.fromDate, to: requestDetails.toDate }
             },
@@ -642,6 +820,10 @@ export class ApprovalService {
                 notes: 1,
                 amount: 1,
                 currency: 1,
+                // CRITICAL: Include expenseDate and invoiceDate (required for date display)
+                // These fields were missing, causing "Date: NA" in approval history flows
+                expenseDate: 1,
+                invoiceDate: 1,
                 category: { $arrayElemAt: ['$category.name', 0] },
                 categoryId: 1,
               },
@@ -684,6 +866,10 @@ export class ApprovalService {
                   category: '$$exp.category',
                   categoryId: '$$exp.categoryId',
                   currency: '$$exp.currency',
+                  // CRITICAL: Include expenseDate and invoiceDate (required for date display)
+                  // These fields were missing, causing "Date: NA" in approval history flows
+                  expenseDate: '$$exp.expenseDate',
+                  invoiceDate: '$$exp.invoiceDate',
                 }
               }
             },
@@ -699,6 +885,10 @@ export class ApprovalService {
                   category: '$$exp.category',
                   categoryId: '$$exp.categoryId',
                   currency: '$$exp.currency',
+                  // CRITICAL: Include expenseDate and invoiceDate (required for date display)
+                  // These fields were missing, causing "Date: NA" in approval history flows
+                  expenseDate: '$$exp.expenseDate',
+                  invoiceDate: '$$exp.invoiceDate',
                 }
               }
             },

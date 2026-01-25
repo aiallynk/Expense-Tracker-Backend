@@ -97,4 +97,15 @@ export class DateUtils {
       end: dateIST.endOf('day').toDate(),
     };
   }
+
+  /**
+   * Check if expense date (IST calendar day) is within report [fromDate, toDate] inclusive.
+   * Used for API validation (plan §4.1).
+   */
+  static isDateInReportRange(expenseDate: Date, fromDate: Date, toDate: Date): boolean {
+    const exp = moment(expenseDate).tz(IST_TIMEZONE).format('YYYY-MM-DD');
+    const from = moment(fromDate).tz(IST_TIMEZONE).format('YYYY-MM-DD');
+    const to = moment(toDate).tz(IST_TIMEZONE).format('YYYY-MM-DD');
+    return exp >= from && exp <= to;
+  }
 }

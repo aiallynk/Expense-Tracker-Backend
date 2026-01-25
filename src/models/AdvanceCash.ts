@@ -18,7 +18,8 @@ export interface IAdvanceCash extends Document {
   projectId?: mongoose.Types.ObjectId;
   costCentreId?: mongoose.Types.ObjectId;
   status: AdvanceCashStatus;
-  voucherCode?: string; // Optional unique identifier
+  voucherCode?: string; // User-facing identifier; mandatory for new vouchers (or auto-generated)
+  expiry?: Date; // Optional expiry; vouchers past expiry are not selectable
   returnRequestId?: mongoose.Types.ObjectId; // Reference to return request if any
   returnedAmount?: number; // Amount returned from this voucher
   returnedBy?: mongoose.Types.ObjectId; // Who returned the remaining amount
@@ -86,8 +87,12 @@ const advanceCashSchema = new Schema<IAdvanceCash>(
     voucherCode: {
       type: String,
       trim: true,
-      sparse: true, // Allows null/undefined but enforces uniqueness when present
+      sparse: true,
       unique: true,
+    },
+    expiry: {
+      type: Date,
+      index: true,
     },
     returnRequestId: {
       type: Schema.Types.ObjectId,
@@ -128,7 +133,7 @@ const advanceCashSchema = new Schema<IAdvanceCash>(
   { timestamps: true }
 );
 
-// Pre-save hook to sync legacy fields and calculate status
+// Pre-save hook to sync legacy fields, enforce voucherCode, and calculate status
 advanceCashSchema.pre('save', function (next) {
   // Sync legacy fields for backward compatibility
   if (this.totalAmount !== undefined && this.amount === undefined) {
@@ -136,6 +141,16 @@ advanceCashSchema.pre('save', function (next) {
   }
   if (this.remainingAmount !== undefined && this.balance === undefined) {
     this.balance = this.remainingAmount;
+  }
+  
+  // Enforce voucherCode: auto-generate if missing
+  if (!this.voucherCode || this.voucherCode.trim() === '') {
+    // Generate 5-8 digit code
+    const digits = Math.floor(Math.random() * 4) + 5; // 5-8 digits
+    const code = Math.floor(Math.random() * Math.pow(10, digits))
+      .toString()
+      .padStart(digits, '0');
+    this.voucherCode = `VCH-${code}`;
   }
   
   // Auto-calculate status based on remainingAmount

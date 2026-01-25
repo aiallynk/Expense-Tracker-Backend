@@ -8,6 +8,8 @@ export enum NotificationType {
   REPORT_REJECTED = 'report_rejected',
   REPORT_CHANGES_REQUESTED = 'report_changes_requested',
   REPORT_PENDING_APPROVAL = 'report_pending_approval',
+  VOUCHER_APPLIED = 'voucher_applied',
+  ADDITIONAL_APPROVER_ADDED = 'additional_approver_added',
   EXPENSE_CREATED = 'expense_created',
   EXPENSE_APPROVED = 'expense_approved',
   EXPENSE_REJECTED = 'expense_rejected',

@@ -113,6 +113,7 @@ export const emitMaintenanceModeLogout = (userId?: string) => {
 export enum CompanyAdminEvent {
   DASHBOARD_STATS_UPDATE = 'company-admin:dashboard-stats-update',
   USER_CREATED = 'company-admin:user-created',
+  VOUCHER_UPDATED = 'company-admin:voucher-updated',
   USER_UPDATED = 'company-admin:user-updated',
   USER_DELETED = 'company-admin:user-deleted',
   REPORT_CREATED = 'company-admin:report-created',
@@ -176,6 +177,12 @@ export const emitUserUpdated = (companyId: string, user: any) => {
 export const emitUserDeleted = (companyId: string, userId: string) => {
   emitToCompanyAdmin(companyId, CompanyAdminEvent.USER_DELETED, { userId });
   logger.debug(`Emitted user deleted event for company ${companyId}, user: ${userId}`);
+};
+
+// Emit voucher updated event to company admin
+export const emitVoucherUpdated = (companyId: string, voucher: any) => {
+  emitToCompanyAdmin(companyId, CompanyAdminEvent.VOUCHER_UPDATED, voucher);
+  logger.debug(`Emitted voucher updated event for company ${companyId}, voucher: ${voucher.id || voucher._id}`);
 };
 
 // Helper to emit to a specific manager's socket

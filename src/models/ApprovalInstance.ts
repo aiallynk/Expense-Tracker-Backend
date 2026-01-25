@@ -57,7 +57,6 @@ const ApprovalInstanceSchema = new Schema<IApprovalInstance>(
         requestId: {
             type: Schema.Types.ObjectId,
             required: true,
-            index: true,
         },
         requestType: {
             type: String,
@@ -72,7 +71,6 @@ const ApprovalInstanceSchema = new Schema<IApprovalInstance>(
             type: String,
             enum: Object.values(ApprovalStatus),
             default: ApprovalStatus.PENDING,
-            index: true,
         },
         history: [ApprovalHistorySchema],
     },
@@ -88,5 +86,6 @@ ApprovalInstanceSchema.index({ companyId: 1, status: 1 });
 ApprovalInstanceSchema.index({ 'history.approverId': 1, 'history.timestamp': -1 });
 ApprovalInstanceSchema.index({ 'history.approverId': 1, 'history.status': 1, 'history.timestamp': -1 });
 ApprovalInstanceSchema.index({ requestId: 1 }); // For joining with expense reports
+ApprovalInstanceSchema.index({ status: 1 }); // Status queries
 
 export const ApprovalInstance = mongoose.model<IApprovalInstance>('ApprovalInstance', ApprovalInstanceSchema);

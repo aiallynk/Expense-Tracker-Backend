@@ -439,32 +439,61 @@ export class NotificationService {
   }
 
   static async notifyReportSubmitted(report: any): Promise<void> {
-    // Notify Level 1 approvers (managers) using role-based topic
-    if (!report.approvers || report.approvers.length === 0) {
+    let level1Approvers: Array<{ userId: any; level?: number; role?: string; decidedAt?: any }> = [];
+
+    if (report.approvers && report.approvers.length > 0) {
+      level1Approvers = report.approvers.filter(
+        (a: any) => a.level === 1 && !a.decidedAt
+      );
+    }
+
+    // Matrix flow: report.approvers cleared; derive from ApprovalInstance + matrix (plan §6.2)
+    if (level1Approvers.length === 0) {
+      try {
+        const { ApprovalInstance } = await import('../models/ApprovalInstance');
+        const instance = await ApprovalInstance.findOne({
+          requestId: report._id,
+          requestType: 'EXPENSE_REPORT',
+          status: 'PENDING',
+        })
+          .populate('matrixId')
+          .exec();
+        const matrix = instance?.matrixId as any;
+        if (instance && matrix?.levels) {
+          const levelConfig = matrix.levels.find(
+            (l: any) => l.levelNumber === instance.currentLevel && l.enabled !== false
+          );
+          if (levelConfig) {
+            let userIds: string[] = [];
+            if (levelConfig.approverUserIds?.length) {
+              userIds = levelConfig.approverUserIds.map((id: any) => id._id?.toString?.() ?? id?.toString?.()).filter(Boolean);
+            } else if (levelConfig.approverRoleIds?.length) {
+              const users = await User.find({
+                roles: { $in: levelConfig.approverRoleIds },
+                status: 'ACTIVE',
+                companyId: instance.companyId,
+              })
+                .select('_id')
+                .exec();
+              userIds = users.map((u) => (u._id as mongoose.Types.ObjectId).toString());
+            }
+            level1Approvers = userIds.map((uid) => ({ userId: uid, level: 1, role: 'Approver' }));
+          }
+        }
+      } catch (e: any) {
+        logger.warn({ err: e?.message ?? e, reportId: report._id }, 'notifyReportSubmitted: derive approvers failed');
+      }
+    }
+
+    if (level1Approvers.length === 0) {
       logger.warn({ reportId: report._id }, 'No approvers found for report, skipping notification');
       return;
     }
 
     logger.info({
       reportId: report._id,
-      approversCount: report.approvers.length,
-      approvers: report.approvers.map((a: any) => ({
-        level: a.level,
-        userId: a.userId?.toString(),
-        role: a.role,
-        decidedAt: a.decidedAt
-      }))
+      approversCount: level1Approvers.length,
     }, '🔔 STARTING NOTIFICATIONS FOR REPORT SUBMISSION');
-
-    // Get Level 1 approvers (managers) for DB records and emails
-    const level1Approvers = report.approvers.filter(
-      (approver: any) => approver.level === 1 && !approver.decidedAt
-    );
-
-    if (level1Approvers.length === 0) {
-      logger.warn({ reportId: report._id }, 'No Level 1 approvers found for report (or all have decided)');
-      return;
-    }
 
     // Get report owner for context
     const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
@@ -598,6 +627,77 @@ export class NotificationService {
         }, '❌ Unexpected error in notification flow');
       }
     }
+  }
+
+  /** Centralised helper: catch, log, never throw (plan §6.3). Use in submit/approve flows. */
+  static async ensureNotify(fn: () => Promise<void>, context: string): Promise<void> {
+    try {
+      await fn();
+    } catch (e: any) {
+      logger.warn({ err: e?.message ?? e, context }, 'ensureNotify: notification failed');
+    }
+  }
+
+  /** Notify users added as additional approvers (budget/amount rules) (plan §6.2). In-app + push. */
+  static async notifyAdditionalApproverAdded(
+    report: any,
+    additionalApprovers: Array<{ userId: string; role?: string; triggerReason?: string }>
+  ): Promise<void> {
+    if (!additionalApprovers?.length) return;
+    const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
+    if (!reportOwner?.companyId) return;
+    const { NotificationDataService } = await import('./notificationData.service');
+    const { NotificationType } = await import('../models/Notification');
+    for (const a of additionalApprovers) {
+      const approverId = typeof a.userId === 'string' ? a.userId : (a.userId as any)?.toString?.();
+      if (!approverId) continue;
+      try {
+        await NotificationDataService.createNotification({
+          userId: approverId,
+          companyId: reportOwner.companyId.toString(),
+          type: NotificationType.ADDITIONAL_APPROVER_ADDED,
+          title: 'Additional approval required',
+          description: a.triggerReason
+            ? `Report "${report.name}" requires your approval: ${a.triggerReason}`
+            : `Report "${report.name}" requires your additional approval.`,
+          link: `/manager/approvals/${report._id.toString()}`,
+          metadata: { reportId: report._id.toString(), reportName: report.name, triggerReason: a.triggerReason },
+        });
+        await this.sendPushToUser(approverId, {
+          title: 'Additional approval required',
+          body: a.triggerReason ?? `Report "${report.name}" requires your approval.`,
+          data: { type: 'ADDITIONAL_APPROVER_ADDED', reportId: report._id.toString(), action: 'ADDITIONAL_APPROVER_ADDED' },
+        });
+      } catch (e: any) {
+        logger.warn({ err: e?.message ?? e, approverId, reportId: report._id }, 'notifyAdditionalApproverAdded failed');
+      }
+    }
+  }
+
+  /** Notify report owner when voucher(s) applied (plan §6.2). In-app + push. */
+  static async notifyVoucherApplied(report: any): Promise<void> {
+    const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
+    if (!reportOwner) return;
+    const { NotificationDataService } = await import('./notificationData.service');
+    const { NotificationType } = await import('../models/Notification');
+    try {
+      await NotificationDataService.createNotification({
+        userId: report.userId.toString(),
+        companyId: reportOwner.companyId?.toString(),
+        type: NotificationType.VOUCHER_APPLIED,
+        title: 'Voucher Applied',
+        description: `Voucher(s) applied to report "${report.name}".`,
+        link: `/reports/${report._id.toString()}`,
+        metadata: { reportId: report._id.toString(), reportName: report.name },
+      });
+    } catch (e: any) {
+      logger.warn({ err: e?.message ?? e, reportId: report._id }, 'notifyVoucherApplied: create failed');
+    }
+    await this.sendPushToUser(report.userId.toString(), {
+      title: 'Voucher Applied',
+      body: `Voucher(s) applied to report "${report.name}".`,
+      data: { type: 'VOUCHER_APPLIED', reportId: report._id.toString(), action: 'VOUCHER_APPLIED' },
+    });
   }
 
   static async notifyReportStatusChanged(

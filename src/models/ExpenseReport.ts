@@ -31,12 +31,30 @@ export interface IExpenseReport extends Document {
   approvedAt?: Date;
   rejectedAt?: Date;
   // Advance cash (report-level) - voucher-based
-  advanceCashId?: mongoose.Types.ObjectId; // Reference to the advance cash voucher used for this report
-  advanceAppliedAmount?: number; // Amount used from the voucher for this report
-  advanceCurrency?: string; // Currency of advance application
-  advanceAppliedAt?: Date; // When advance was actually applied (on approval)
-  voucherLockedAt?: Date; // Timestamp when voucher was locked to this report
-  voucherLockedBy?: mongoose.Types.ObjectId; // User who locked the voucher
+  advanceCashId?: mongoose.Types.ObjectId; // Legacy: first voucher; use appliedVouchers for 1-to-N
+  advanceAppliedAmount?: number; // Legacy: amount from first voucher
+  advanceCurrency?: string;
+  advanceAppliedAt?: Date;
+  voucherLockedAt?: Date;
+  voucherLockedBy?: mongoose.Types.ObjectId;
+  /** 1-to-N vouchers per report (plan §2). Company liability = sum of amountUsed. */
+  appliedVouchers?: Array<{
+    voucherId: mongoose.Types.ObjectId;
+    voucherCode: string;
+    amountUsed: number;
+    currency: string;
+  }>;
+  // Settlement fields
+  settlementStatus?: 'PENDING' | 'ISSUED_VOUCHER' | 'REIMBURSED' | 'CLOSED';
+  employeePaidAmount?: number; // Calculated: totalAmount - voucherTotalUsed
+  settlementDecision?: {
+    type: 'ISSUE_VOUCHER' | 'REIMBURSE' | 'CLOSE';
+    decidedBy: mongoose.Types.ObjectId;
+    decidedAt: Date;
+    comment?: string;
+    voucherId?: mongoose.Types.ObjectId; // If type is ISSUE_VOUCHER
+    reimbursementAmount?: number; // If type is REIMBURSE
+  };
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -162,6 +180,34 @@ const expenseReportSchema = new Schema<IExpenseReport>(
     voucherLockedBy: {
       type: Schema.Types.ObjectId,
       ref: 'User',
+    },
+    appliedVouchers: [
+      {
+        voucherId: { type: Schema.Types.ObjectId, ref: 'AdvanceCash', required: true },
+        voucherCode: { type: String, required: true, trim: true },
+        amountUsed: { type: Number, required: true, min: 0 },
+        currency: { type: String, required: true, trim: true, uppercase: true },
+      },
+    ],
+    settlementStatus: {
+      type: String,
+      enum: ['PENDING', 'ISSUED_VOUCHER', 'REIMBURSED', 'CLOSED'],
+      default: 'PENDING',
+    },
+    employeePaidAmount: {
+      type: Number,
+      min: 0,
+    },
+    settlementDecision: {
+      type: {
+        type: String,
+        enum: ['ISSUE_VOUCHER', 'REIMBURSE', 'CLOSE'],
+      },
+      decidedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+      decidedAt: Date,
+      comment: String,
+      voucherId: { type: Schema.Types.ObjectId, ref: 'AdvanceCash' },
+      reimbursementAmount: Number,
     },
     updatedBy: {
       type: Schema.Types.ObjectId,

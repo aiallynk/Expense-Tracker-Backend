@@ -38,6 +38,8 @@ router.patch('/:id', validate(updateReportSchema), ReportsController.update);
 router.delete('/:id', ReportsController.delete);
 router.post('/:id/submit', ReportsController.submit);
 router.post('/:id/action', validate(reportActionSchema), ReportsController.action);
+router.post('/:id/settlement', ReportsController.processSettlement);
+router.get('/:id/settlement-info', ReportsController.getSettlementInfo);
 
 export default router;
 

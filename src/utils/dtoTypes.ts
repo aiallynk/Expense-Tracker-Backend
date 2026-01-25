@@ -369,8 +369,8 @@ export const expenseFiltersSchema = paginationBaseSchema.extend({
   status: z.nativeEnum(ExpenseStatus).optional(),
   categoryId: z.string().optional(),
   costCentreId: z.string().optional(), // Filter by cost centre
-  from: z.string().datetime().optional(),
-  to: z.string().datetime().optional(),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), // YYYY-MM-DD format
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), // YYYY-MM-DD format
   q: z.string().optional(),
   reportId: z.string().optional(),
 }).transform((data) => {

@@ -40,6 +40,12 @@ export interface IExpense extends Document {
   managerComment?: string; // Comment from manager when rejecting/requesting changes
   managerAction?: 'approve' | 'reject' | 'request_changes'; // Last manager action
   managerActionAt?: Date; // When manager took action
+  // Duplicate detection (flag-only; never blocks submission)
+  duplicateFlag?: 'POTENTIAL_DUPLICATE' | 'STRONG_DUPLICATE';
+  duplicateReason?: string; // e.g. "vendor + amount + date" or "invoice_id"
+  // OCR / handwritten: below confidence threshold → needs manual review
+  needsReview?: boolean;
+  ocrConfidence?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -185,6 +191,24 @@ const expenseSchema = new Schema<IExpense>(
     managerActionAt: {
       type: Date,
     },
+    duplicateFlag: {
+      type: String,
+      enum: ['POTENTIAL_DUPLICATE', 'STRONG_DUPLICATE'],
+      trim: true,
+    },
+    duplicateReason: {
+      type: String,
+      trim: true,
+    },
+    needsReview: {
+      type: Boolean,
+      default: false,
+    },
+    ocrConfidence: {
+      type: Number,
+      min: 0,
+      max: 1,
+    },
   },
   {
     timestamps: true,
@@ -202,6 +226,8 @@ expenseSchema.index({ vendor: 1, expenseDate: 1 });
 expenseSchema.index({ expenseDate: -1 });
 // Index for duplicate invoice detection
 expenseSchema.index({ invoiceId: 1, vendor: 1, invoiceDate: 1, amount: 1 }, { sparse: true });
+// Index for duplicate flag filters (approver / company admin)
+expenseSchema.index({ duplicateFlag: 1 }, { sparse: true });
 // Fast lookup index for normalized fingerprint, excluding drafts (drafts are intentionally ignored)
 expenseSchema.index(
   { invoiceFingerprint: 1 },

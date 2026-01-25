@@ -125,152 +125,191 @@ export class AuthService {
 
   static async login(email: string, password: string): Promise<AuthResult> {
     const normalizedEmail = email.toLowerCase().trim();
-
-    // Try to find user first
-    const user = await User.findOne({ email: normalizedEmail });
-    let companyAdmin: ICompanyAdmin | null = null;
-
-    // If not found in User collection, check CompanyAdmin collection
-    if (!user) {
-      companyAdmin = await CompanyAdmin.findOne({ email: normalizedEmail });
-    }
-
-    if (!user && !companyAdmin) {
-      logger.debug({ email: normalizedEmail }, 'Login attempt failed - User/Admin not found');
-      const error: any = new Error('Invalid credentials');
-      error.statusCode = 401;
-      error.code = 'INVALID_CREDENTIALS';
-      throw error;
-    }
-
-    // Check status
-    if (user && user.status !== 'ACTIVE') {
-      logger.debug({ email: normalizedEmail }, 'Login attempt failed - Account inactive');
-      const error: any = new Error('Your account is deactivated. Contact admin.');
-      error.statusCode = 403;
-      error.code = 'ACCOUNT_INACTIVE';
-      throw error;
-    }
-
-    if (companyAdmin && companyAdmin.status !== CompanyAdminStatus.ACTIVE) {
-      logger.debug({ email: normalizedEmail }, 'Login attempt failed - Company admin account inactive');
-      const error: any = new Error('Your account is deactivated. Contact admin.');
-      error.statusCode = 403;
-      error.code = 'ACCOUNT_INACTIVE';
-      throw error;
-    }
-
-    // Verify password
-    let isPasswordValid = false;
-    if (user) {
-      isPasswordValid = await user.comparePassword(password);
-    } else if (companyAdmin) {
-      isPasswordValid = await companyAdmin.comparePassword(password);
-    }
-
-    if (!isPasswordValid) {
-      logger.debug({ email: normalizedEmail }, 'Login attempt failed - Invalid password');
-      const error: any = new Error('Invalid credentials');
-      error.statusCode = 401;
-      error.code = 'INVALID_CREDENTIALS';
-      throw error;
-    }
-
-    // Check maintenance mode - block non-super-admin login
-    // CompanyAdmin doesn't have a role field - they are always COMPANY_ADMIN
-    const userRole = user?.role || (companyAdmin ? 'COMPANY_ADMIN' : 'EMPLOYEE');
-    if (userRole !== 'SUPER_ADMIN') {
-      const { SettingsService } = await import('./settings.service');
-      const settings = await SettingsService.getSettings();
-      
-      if (settings.features?.maintenanceMode === true) {
-        logger.warn(
-          { email: normalizedEmail, role: userRole },
-          'Login blocked - Maintenance mode active'
-        );
-        const error: any = new Error('System is under maintenance. Only super administrators can access the system at this time.');
-        error.statusCode = 503;
-        error.code = 'MAINTENANCE_MODE';
+    
+    try {
+      // Validate inputs
+      if (!email || !password) {
+        const error: any = new Error('Email and password are required');
+        error.statusCode = 400;
+        error.code = 'MISSING_CREDENTIALS';
         throw error;
       }
-    }
 
-    // Update last login and generate tokens
-    if (user) {
-      // Get all roles: primary role + additional roles from roles array (for approvals)
-      const allRoles: string[] = [user.role];
-      if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
-        user.roles.forEach((roleRef) => {
-          const roleStr = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
-          if (roleStr && !allRoles.includes(roleStr)) {
-            allRoles.push(roleStr);
-          }
-        });
+      // Check database connection
+      const mongoose = await import('mongoose');
+      if (mongoose.default.connection.readyState !== 1) {
+        logger.error('Database connection not ready');
+        const error: any = new Error('Database connection error. Please try again later.');
+        error.statusCode = 503;
+        error.code = 'DATABASE_ERROR';
+        throw error;
       }
 
-      // Always use the primary role for access level
-      // Additional roles are used for approval workflow only
-      const roleToUse: string = user.role;
+      // Try to find user first
+      const user = await User.findOne({ email: normalizedEmail }).exec();
+      let companyAdmin: ICompanyAdmin | null = null;
 
-      logger.info({ email: normalizedEmail, role: roleToUse, additionalRoles: allRoles.slice(1) }, 'Login successful');
-      user.lastLoginAt = new Date();
-      await user.save();
+      // If not found in User collection, check CompanyAdmin collection
+      if (!user) {
+        companyAdmin = await CompanyAdmin.findOne({ email: normalizedEmail }).exec();
+      }
 
-      // Generate tokens with primary role
-      const tokens = this.generateTokensForUserWithRole(user, roleToUse);
-      const userId = (user._id as mongoose.Types.ObjectId).toString();
+      if (!user && !companyAdmin) {
+        logger.debug({ email: normalizedEmail }, 'Login attempt failed - User/Admin not found');
+        const error: any = new Error('Invalid credentials');
+        error.statusCode = 401;
+        error.code = 'INVALID_CREDENTIALS';
+        throw error;
+      }
 
-      await AuditService.log(
-        userId,
-        'User',
-        userId,
-        AuditAction.UPDATE,
-        { lastLoginAt: user.lastLoginAt }
-      );
+      // Check status
+      if (user && user.status !== 'ACTIVE') {
+        logger.debug({ email: normalizedEmail }, 'Login attempt failed - Account inactive');
+        const error: any = new Error('Your account is deactivated. Contact admin.');
+        error.statusCode = 403;
+        error.code = 'ACCOUNT_INACTIVE';
+        throw error;
+      }
 
-      return {
-        user: {
-          id: userId,
-          email: user.email,
-          name: user.name,
-          role: roleToUse,
-          roles: allRoles.length > 1 ? allRoles : undefined, // Include for reference
-          ...(user.companyId && { companyId: (user.companyId as mongoose.Types.ObjectId).toString() }),
-        },
-        tokens,
-      };
-    } else if (companyAdmin) {
-      logger.info({ email: normalizedEmail, role: 'COMPANY_ADMIN' }, 'Login successful');
-      companyAdmin.lastLoginAt = new Date();
-      await companyAdmin.save();
+      if (companyAdmin && companyAdmin.status !== CompanyAdminStatus.ACTIVE) {
+        logger.debug({ email: normalizedEmail }, 'Login attempt failed - Company admin account inactive');
+        const error: any = new Error('Your account is deactivated. Contact admin.');
+        error.statusCode = 403;
+        error.code = 'ACCOUNT_INACTIVE';
+        throw error;
+      }
 
-      const tokens = this.generateTokensForCompanyAdmin(companyAdmin);
-      const adminId = (companyAdmin._id as mongoose.Types.ObjectId).toString();
+      // Verify password
+      let isPasswordValid = false;
+      if (user) {
+        isPasswordValid = await user.comparePassword(password);
+      } else if (companyAdmin) {
+        isPasswordValid = await companyAdmin.comparePassword(password);
+      }
 
-      await AuditService.log(
-        adminId,
-        'CompanyAdmin',
-        adminId,
-        AuditAction.UPDATE,
-        { lastLoginAt: companyAdmin.lastLoginAt }
-      );
+      if (!isPasswordValid) {
+        logger.debug({ email: normalizedEmail }, 'Login attempt failed - Invalid password');
+        const error: any = new Error('Invalid credentials');
+        error.statusCode = 401;
+        error.code = 'INVALID_CREDENTIALS';
+        throw error;
+      }
 
-      return {
-        user: {
-          id: adminId,
-          email: companyAdmin.email,
-          name: companyAdmin.name,
-          role: UserRole.COMPANY_ADMIN,
-        },
-        tokens,
-      };
+      // Check maintenance mode - block non-super-admin login
+      // CompanyAdmin doesn't have a role field - they are always COMPANY_ADMIN
+      const userRole = user?.role || (companyAdmin ? 'COMPANY_ADMIN' : 'EMPLOYEE');
+      if (userRole !== 'SUPER_ADMIN') {
+        const { SettingsService } = await import('./settings.service');
+        const settings = await SettingsService.getSettings();
+        
+        if (settings.features?.maintenanceMode === true) {
+          logger.warn(
+            { email: normalizedEmail, role: userRole },
+            'Login blocked - Maintenance mode active'
+          );
+          const error: any = new Error('System is under maintenance. Only super administrators can access the system at this time.');
+          error.statusCode = 503;
+          error.code = 'MAINTENANCE_MODE';
+          throw error;
+        }
+      }
+
+      // Update last login and generate tokens
+      if (user) {
+        // Get all roles: primary role + additional roles from roles array (for approvals)
+        const allRoles: string[] = [user.role];
+        if (user.roles && Array.isArray(user.roles) && user.roles.length > 0) {
+          user.roles.forEach((roleRef) => {
+            const roleStr = (roleRef as any)._id ? (roleRef as any)._id.toString() : roleRef.toString();
+            if (roleStr && !allRoles.includes(roleStr)) {
+              allRoles.push(roleStr);
+            }
+          });
+        }
+
+        // Always use the primary role for access level
+        // Additional roles are used for approval workflow only
+        const roleToUse: string = user.role;
+
+        logger.info({ email: normalizedEmail, role: roleToUse, additionalRoles: allRoles.slice(1) }, 'Login successful');
+        user.lastLoginAt = new Date();
+        await user.save();
+
+        // Generate tokens with primary role
+        const tokens = this.generateTokensForUserWithRole(user, roleToUse);
+        const userId = (user._id as mongoose.Types.ObjectId).toString();
+
+        await AuditService.log(
+          userId,
+          'User',
+          userId,
+          AuditAction.UPDATE,
+          { lastLoginAt: user.lastLoginAt }
+        );
+
+        return {
+          user: {
+            id: userId,
+            email: user.email,
+            name: user.name,
+            role: roleToUse,
+            roles: allRoles.length > 1 ? allRoles : undefined, // Include for reference
+            ...(user.companyId && { companyId: (user.companyId as mongoose.Types.ObjectId).toString() }),
+          },
+          tokens,
+        };
+      } else if (companyAdmin) {
+        logger.info({ email: normalizedEmail, role: 'COMPANY_ADMIN' }, 'Login successful');
+        companyAdmin.lastLoginAt = new Date();
+        await companyAdmin.save();
+
+        const tokens = this.generateTokensForCompanyAdmin(companyAdmin);
+        const adminId = (companyAdmin._id as mongoose.Types.ObjectId).toString();
+
+        await AuditService.log(
+          adminId,
+          'CompanyAdmin',
+          adminId,
+          AuditAction.UPDATE,
+          { lastLoginAt: companyAdmin.lastLoginAt }
+        );
+
+        return {
+          user: {
+            id: adminId,
+            email: companyAdmin.email,
+            name: companyAdmin.name,
+            role: UserRole.COMPANY_ADMIN,
+          },
+          tokens,
+        };
+      }
+
+      // This should never happen, but TypeScript needs it
+      const error: any = new Error('Invalid credentials');
+      error.statusCode = 401;
+      error.code = 'INVALID_CREDENTIALS';
+      throw error;
+    } catch (error: any) {
+      // If it's already a properly formatted error, re-throw it
+      if (error.statusCode && error.code) {
+        throw error;
+      }
+      
+      // Log unexpected errors
+      logger.error({ 
+        error: error?.message || error, 
+        stack: error?.stack,
+        email: normalizedEmail 
+      }, 'Login service - Unexpected error');
+      
+      // Wrap in a generic error
+      const wrappedError: any = new Error('An error occurred during login. Please try again.');
+      wrappedError.statusCode = 500;
+      wrappedError.code = 'LOGIN_ERROR';
+      wrappedError.originalError = error?.message;
+      throw wrappedError;
     }
-
-    // This should never happen, but TypeScript needs it
-    const error: any = new Error('Invalid credentials');
-    error.statusCode = 401;
-    error.code = 'INVALID_CREDENTIALS';
-    throw error;
   }
 
   static async refresh(refreshToken: string): Promise<{ accessToken: string }> {

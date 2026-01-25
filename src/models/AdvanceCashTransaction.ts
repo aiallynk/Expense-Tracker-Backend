@@ -37,7 +37,6 @@ const advanceCashTransactionSchema = new Schema<IAdvanceCashTransaction>(
       type: Schema.Types.ObjectId,
       ref: 'ExpenseReport',
       required: true,
-      index: true,
     },
     amount: {
       type: Number,

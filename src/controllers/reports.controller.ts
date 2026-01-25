@@ -298,5 +298,81 @@ export class ReportsController {
     res.status(200).send(buffer);
   });
 
+  /**
+   * Process settlement for an approved report
+   * POST /api/v1/reports/:id/settlement
+   */
+  static processSettlement = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const adminId = req.user!.id;
+    const userRole = req.user!.role;
+
+    // Only COMPANY_ADMIN and ADMIN can process settlements
+    if (userRole !== 'COMPANY_ADMIN' && userRole !== 'ADMIN' && userRole !== 'SUPER_ADMIN') {
+      res.status(403).json({
+        success: false,
+        message: 'You do not have permission to process settlements',
+        code: 'INSUFFICIENT_PERMISSIONS',
+      });
+      return;
+    }
+
+    const { type, comment, voucherId, reimbursementAmount } = req.body;
+
+    if (!type || !['ISSUE_VOUCHER', 'REIMBURSE', 'CLOSE'].includes(type)) {
+      res.status(400).json({
+        success: false,
+        message: 'Invalid settlement type. Must be ISSUE_VOUCHER, REIMBURSE, or CLOSE',
+        code: 'INVALID_SETTLEMENT_TYPE',
+      });
+      return;
+    }
+
+    try {
+      const report = await ReportsService.processSettlement(reportId, adminId, {
+        type,
+        comment,
+        voucherId,
+        reimbursementAmount,
+      });
+
+      res.status(200).json({
+        success: true,
+        data: report,
+      });
+    } catch (error: any) {
+      logger.error({ error, reportId, adminId }, 'Error processing settlement');
+      res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || 'Failed to process settlement',
+        code: error.code || 'SETTLEMENT_ERROR',
+      });
+    }
+  });
+
+  /**
+   * Get settlement information for a report
+   * GET /api/v1/reports/:id/settlement-info
+   */
+  static getSettlementInfo = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+
+    try {
+      const settlementInfo = await ReportsService.getSettlementInfo(reportId);
+
+      res.status(200).json({
+        success: true,
+        data: settlementInfo,
+      });
+    } catch (error: any) {
+      logger.error({ error, reportId }, 'Error getting settlement info');
+      res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || 'Failed to get settlement information',
+        code: error.code || 'SETTLEMENT_INFO_ERROR',
+      });
+    }
+  });
+
 }
 

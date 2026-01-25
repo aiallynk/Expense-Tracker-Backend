@@ -315,6 +315,34 @@ export class OcrService {
       // Don't auto-update expenses - user must click submit to save
       // Expenses will only be created/updated when user explicitly saves them
 
+      // Run duplicate detection if expense exists and has required data
+      if (receiptDocUpdated && receiptDocUpdated.expenseId) {
+        try {
+          const expense = receiptDocUpdated.expenseId as any;
+          const expenseId = (expense._id as mongoose.Types.ObjectId).toString();
+          
+          // Check if expense has vendor and amount (required for duplicate detection)
+          if (expense.vendor && expense.amount) {
+            // Get companyId for scoped duplicate detection
+            const report = expense.reportId as any;
+            let companyId: mongoose.Types.ObjectId | undefined;
+            if (report && report.userId) {
+              const { User } = await import('../models/User');
+              const user = await User.findById(report.userId).select('companyId').exec();
+              companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+            }
+            
+            // Run duplicate detection (non-blocking)
+            const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+            await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
+            logger.debug({ expenseId, receiptId: receiptIdStr }, 'OCR: Duplicate detection completed after OCR');
+          }
+        } catch (dupError) {
+          // Non-blocking - log but don't fail OCR
+          logger.warn({ error: dupError, receiptId: receiptIdStr }, 'OCR: Duplicate detection failed after OCR completion');
+        }
+      }
+
       // Emit socket event for successful OCR completion
       if (userId && receiptIdStr) {
         emitReceiptProcessed(userId, receiptIdStr, {
