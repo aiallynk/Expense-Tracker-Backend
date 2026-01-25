@@ -520,31 +520,44 @@ export class ExpensesService {
     let query: any = {};
     
     if (req) {
-      // Use company-wide filtering for duplicate detection
-      // This ensures we check expenses from all users in the company, not just the current user
-      const { buildCompanyQuery } = await import('../utils/companyAccess');
-      const companyQuery = await buildCompanyQuery(req, {}, 'users');
-      
-      // buildCompanyQuery returns { userId: { $in: userIds } } for company users
-      // If it returns empty array, fall back to user-specific query
-      if (companyQuery.userId && Array.isArray(companyQuery.userId.$in)) {
-        if (companyQuery.userId.$in.length > 0) {
-          // Use company-wide filtering (all users in company)
-          query = companyQuery;
+      try {
+        // Use company-wide filtering for duplicate detection
+        // This ensures we check expenses from all users in the company, not just the current user
+        const { buildCompanyQuery } = await import('../utils/companyAccess');
+        const companyQuery = await buildCompanyQuery(req, {}, 'users');
+        
+        // buildCompanyQuery returns { userId: { $in: userIds } } for company users
+        // If it returns empty array, fall back to user-specific query
+        if (companyQuery && companyQuery.userId && Array.isArray(companyQuery.userId.$in)) {
+          if (companyQuery.userId.$in.length > 0) {
+            // Use company-wide filtering (all users in company)
+            query = { ...companyQuery };
+          } else {
+            // No users in company, fall back to user-specific
+            query = {
+              userId: new mongoose.Types.ObjectId(userId),
+            };
+          }
+        } else if (companyQuery && companyQuery._id && Array.isArray(companyQuery._id.$in) && companyQuery._id.$in.length === 0) {
+          // Company query returned empty result query, fall back to user-specific
+          query = {
+            userId: new mongoose.Types.ObjectId(userId),
+          };
+        } else if (companyQuery && Object.keys(companyQuery).length > 0) {
+          // Use company query as-is (but make a copy to avoid mutations)
+          query = { ...companyQuery };
         } else {
-          // No users in company, fall back to user-specific
+          // Fallback to user-specific query if company query is invalid
           query = {
             userId: new mongoose.Types.ObjectId(userId),
           };
         }
-      } else if (companyQuery._id && Array.isArray(companyQuery._id.$in) && companyQuery._id.$in.length === 0) {
-        // Company query returned empty result query, fall back to user-specific
+      } catch (error) {
+        // If company query fails, fall back to user-specific query
+        logger.error({ error, userId }, 'Error building company query, falling back to user-specific query');
         query = {
           userId: new mongoose.Types.ObjectId(userId),
         };
-      } else {
-        // Use company query as-is
-        query = companyQuery;
       }
     } else {
       // Default: filter by specific userId (backward compatibility)
@@ -577,8 +590,13 @@ export class ExpensesService {
 
     // Date range filters
     if (filters.from || filters.to) {
-      const dateRange = DateUtils.createDateRangeQuery(filters.from || filters.to!, filters.to || filters.from!);
-      query.expenseDate = dateRange;
+      try {
+        const dateRange = DateUtils.createDateRangeQuery(filters.from || filters.to!, filters.to || filters.from!);
+        query.expenseDate = dateRange;
+      } catch (error) {
+        logger.error({ error, from: filters.from, to: filters.to }, 'Error creating date range query');
+        // Don't add date filter if it fails - continue with other filters
+      }
     }
 
     // Search query - add as $and condition to preserve existing $or
@@ -605,25 +623,32 @@ export class ExpensesService {
 
     const skip = (page - 1) * pageSize;
 
-    const [expenses, total] = await Promise.all([
-      Expense.find(query)
-        .populate('reportId', 'name status')
-        .populate('categoryId', 'name code')
-        .populate('costCentreId', 'name code')
-        .sort({ expenseDate: -1 })
-        .skip(skip)
-        .limit(pageSize)
-        .exec(),
-      Expense.countDocuments(query).exec(),
-    ]);
+    // Validate query before executing
+    try {
+      // Log query in non-production for debugging
+      if (config.app.env !== 'production') {
+        logger.debug({ query, filters, userId }, '[ExpensesService] Executing query');
+      }
 
-    // Query result logging (only in non-production)
-    if (config.app.env !== 'production') {
-      logger.debug({ count: expenses.length, total, requested: pageSize }, '[ExpensesService] Query result');
-    }
+      const [expenses, total] = await Promise.all([
+        Expense.find(query)
+          .populate('reportId', 'name status')
+          .populate('categoryId', 'name code')
+          .populate('costCentreId', 'name code')
+          .sort({ expenseDate: -1 })
+          .skip(skip)
+          .limit(pageSize)
+          .exec(),
+        Expense.countDocuments(query).exec(),
+      ]);
 
-    // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
-    const formattedExpenses = expenses.map((expense, index) => {
+      // Query result logging (only in non-production)
+      if (config.app.env !== 'production') {
+        logger.debug({ count: expenses.length, total, requested: pageSize }, '[ExpensesService] Query result');
+      }
+
+      // Format dates as YYYY-MM-DD strings (calendar dates, not timestamps)
+      const formattedExpenses = expenses.map((expense, index) => {
       // FORENSIC: Log first expense only to avoid log spam
       if (index === 0 && expenses.length > 0) {
         logger.debug({
@@ -671,7 +696,19 @@ export class ExpensesService {
       return formatted;
     });
 
-    return createPaginatedResult(formattedExpenses, total, page, pageSize);
+      return createPaginatedResult(formattedExpenses, total, page, pageSize);
+    } catch (error: any) {
+      logger.error({ 
+        error: error.message || error, 
+        stack: error.stack, 
+        query, 
+        filters, 
+        userId 
+      }, '[ExpensesService] Error executing listExpensesForUser query');
+      
+      // Re-throw with more context
+      throw new Error(`Failed to fetch expenses: ${error.message || 'Unknown error'}`);
+    }
   }
 
   static async adminListExpenses(filters: ExpenseFiltersDto, req: AuthRequest): Promise<any> {
