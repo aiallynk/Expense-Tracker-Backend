@@ -25,7 +25,8 @@ export class IngestController {
       return;
     }
 
-    const { sessionId } = req.params;
+    const sessionIdParam = req.params.sessionId;
+    const sessionId = Array.isArray(sessionIdParam) ? sessionIdParam[0] : sessionIdParam;
     const ingestData = req.body;
 
     // Validate session ID format (UUID)

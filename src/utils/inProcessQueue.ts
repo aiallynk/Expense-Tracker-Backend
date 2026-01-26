@@ -1,3 +1,4 @@
+// @ts-ignore - Module may not be installed
 import PQueue from 'p-queue';
 
 import { config } from '../config/index';

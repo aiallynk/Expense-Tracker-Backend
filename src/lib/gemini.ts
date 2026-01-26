@@ -1,3 +1,4 @@
+// @ts-ignore - Module may not be installed if Gemini is not used
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // TEMP DISABLED: OpenAI OCR temporarily disabled for local testing
