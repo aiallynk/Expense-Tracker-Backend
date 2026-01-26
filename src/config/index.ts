@@ -86,6 +86,12 @@ export const config = {
     // This prevents issues with .env files that may have trailing newlines
     apiKey: (process.env.ANALYTICS_API_KEY || '').trim().replace(/\r?\n/g, ''),
   },
+  ingest: {
+    // Ingest service URL (for debug logging - development only)
+    serviceUrl: process.env.INGEST_SERVICE_URL || 'http://127.0.0.1:7244',
+    // Enable ingest endpoint (disabled in production by default for security)
+    enabled: process.env.INGEST_ENABLED === 'true' || process.env.APP_ENV === 'development',
+  },
 };
 
 // Log analytics API key status at startup (length only, not value)

@@ -31,6 +31,7 @@ import expensesRoutes from './routes/expenses.routes';
 import managerRoutes from './routes/manager.routes';
 import metaRoutes from './routes/meta.routes';
 import notificationsRoutes from './routes/notifications.routes';
+import ingestRoutes from './routes/ingest.routes';
 import ocrRoutes from './routes/ocr.routes';
 import projectsRoutes from './routes/projects.routes';
 import projectStakeholderRoutes from './routes/projectStakeholder.routes';
@@ -228,6 +229,7 @@ export const createApp = (): Express => {
   app.use('/api/v1', expensesRoutes);
   app.use('/api/v1', receiptsRoutes);
   app.use('/api/v1', bulkUploadRoutes);
+  app.use('/api/v1/ingest', ingestRoutes);
   app.use('/api/v1/ocr', ocrRoutes);
   app.use('/api/v1/admin', adminRoutes);
   app.use('/api/v1/super-admin', superAdminRoutes);

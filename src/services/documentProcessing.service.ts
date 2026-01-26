@@ -31,7 +31,7 @@ interface PdfParseResult {
 
 export interface ExtractedReceipt {
   vendor?: string;
-  date?: string;
+  date?: string | Date; // Allow both string and Date for flexibility
   invoiceId?: string;
   totalAmount?: number;
   currency?: string;
@@ -78,22 +78,47 @@ export class DocumentProcessingService {
   }
 
   private static normalizeAiReceipt(raw: any): ExtractedReceipt {
+    // Extract invoice ID from multiple possible fields including UPI Reference, Transaction ID, etc.
     const invoiceId =
       raw?.invoiceId ??
+      raw?.invoice_number ??
       raw?.invoice_id ??
       raw?.invoiceNo ??
       raw?.invoice_no ??
       raw?.billNo ??
       raw?.bill_no ??
       raw?.receiptNo ??
-      raw?.receipt_no;
+      raw?.receipt_no ??
+      raw?.upi_ref_no ??
+      raw?.upi_reference_number ??
+      raw?.upiRefNo ??
+      raw?.transaction_id ??
+      raw?.transactionId ??
+      raw?.txn_id ??
+      raw?.payment_reference ??
+      raw?.paymentReference ??
+      raw?.payment_id ??
+      raw?.paymentId ??
+      raw?.order_id ??
+      raw?.orderId;
 
     const date = raw?.date ?? raw?.invoiceDate ?? raw?.invoice_date;
+    
+    // Build notes from lineItems if available and notes not already present
+    let notes = raw?.notes;
+    if (!notes && raw?.lineItems && Array.isArray(raw.lineItems) && raw.lineItems.length > 0) {
+      notes = raw.lineItems.map((item: any) => {
+        const desc = item.description || item.desc || '';
+        const amt = item.amount || item.amt || 0;
+        return `${desc}: ${amt}`;
+      }).join('\n');
+    }
 
     return {
       ...raw,
       invoiceId: invoiceId != null ? String(invoiceId).trim() : undefined,
       date: date != null ? String(date).trim() : raw?.date,
+      notes: notes || undefined,
     };
   }
   /**
@@ -314,11 +339,19 @@ If a field is not visible, return null.
 Return STRICT JSON only. No explanations. No markdown.
 
 For EACH receipt found in the image, return:
-- vendor_name (string)
-- invoice_number (string | null)
+- vendor_name (string) - Extract merchant/recipient/shop name
+- invoice_number (string | null) - Extract ANY of these if found:
+  * Invoice ID / Invoice Number
+  * UPI Ref No / UPI Reference Number / UPI Ref
+  * Transaction ID / Transaction Reference / Txn ID
+  * Payment Reference / Payment ID / Payment Ref
+  * Bill Number / Bill No
+  * Receipt Number / Receipt No
+  * Order ID / Order Number
+  * Any unique transaction identifier visible on the receipt
 - invoice_date (ISO date string YYYY-MM-DD | null)
-- total_amount (number | null)
-- currency (string | null)
+- total_amount (number | null) - Extract as number without currency symbol
+- currency (string | null) - Extract currency code (INR, USD, etc.)
 - tax_amount (number | null)
 - line_items (array of { description, amount })
 
@@ -326,7 +359,8 @@ Rules:
 - Do NOT guess values
 - Do NOT hallucinate
 - Use INR if currency symbol ₹ is present
-- Dates must be YYYY-MM-DD
+- Dates must be YYYY-MM-DD format
+- For invoice_number, prioritize UPI Reference Number, Transaction ID, or Payment Reference if this is a payment receipt
 - Return JSON: {"receipts": [{"vendor_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD", "total_amount": number, "currency": "...", "tax_amount": number, "line_items": [{"description": "...", "amount": number}]}]}
 - If multiple receipts in image, include all in receipts array
 - If no receipts found, return {"receipts": []}`;
@@ -1239,11 +1273,35 @@ Rules:
         const defaultCategory = await Category.findOne({ name: 'Others' }) || await Category.findOne({});
         if (defaultCategory) categoryId = defaultCategory._id as mongoose.Types.ObjectId;
       }
-      const invoiceDate = receipt.date ? new Date(receipt.date) : undefined;
+      // Parse date from receipt - handle both string and Date formats
+      let invoiceDate: Date | undefined;
+      if (receipt.date) {
+        if (typeof receipt.date === 'string') {
+          // Try parsing as YYYY-MM-DD first (frontend format)
+          if (/^\d{4}-\d{2}-\d{2}$/.test(receipt.date)) {
+            invoiceDate = DateUtils.frontendDateToBackend(receipt.date);
+          } else {
+            // Try parsing as ISO string or other formats
+            invoiceDate = new Date(receipt.date);
+            if (isNaN(invoiceDate.getTime())) {
+              invoiceDate = undefined;
+            }
+          }
+        } else if (receipt.date && typeof receipt.date !== 'string') {
+          // receipt.date is a Date object
+          invoiceDate = receipt.date as Date;
+        }
+      }
+      
       expenseDate = invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : new Date();
       if (!DateUtils.isDateInReportRange(expenseDate, report.fromDate, report.toDate)) {
+        logger.error({
+          expenseDate: DateUtils.backendDateToFrontend(expenseDate),
+          reportFromDate: DateUtils.backendDateToFrontend(report.fromDate),
+          reportToDate: DateUtils.backendDateToFrontend(report.toDate),
+        }, 'Expense date validation failed in createExpenseDraft - REJECTING');
         throw new Error(
-          `Extracted date outside report range (${DateUtils.backendDateToFrontend(report.fromDate)}–${DateUtils.backendDateToFrontend(report.toDate)})`
+          `Extracted date (${DateUtils.backendDateToFrontend(expenseDate)}) is outside report range (${DateUtils.backendDateToFrontend(report.fromDate)} to ${DateUtils.backendDateToFrontend(report.toDate)})`
         );
       }
     }
@@ -1251,7 +1309,40 @@ Rules:
     const receiptIds: mongoose.Types.ObjectId[] = [];
     if (documentReceiptId) receiptIds.push(new mongoose.Types.ObjectId(documentReceiptId));
 
-    const invoiceDate = receipt.date ? new Date(receipt.date) : undefined;
+    // Parse invoice date - handle both string and Date formats
+    let invoiceDate: Date | undefined;
+    if (receipt.date) {
+      if (typeof receipt.date === 'string') {
+        // Try parsing as YYYY-MM-DD first (frontend format)
+        if (/^\d{4}-\d{2}-\d{2}$/.test(receipt.date)) {
+          invoiceDate = DateUtils.frontendDateToBackend(receipt.date);
+        } else {
+          // Try parsing as ISO string or other formats
+          invoiceDate = new Date(receipt.date);
+          if (isNaN(invoiceDate.getTime())) {
+            invoiceDate = undefined;
+          }
+        }
+      } else if (receipt.date && typeof receipt.date !== 'string') {
+        // receipt.date is a Date object
+        invoiceDate = receipt.date as Date;
+      }
+    }
+    
+    // Invoice date must be within report [fromDate, toDate] if provided
+    if (invoiceDate && !isNaN(invoiceDate.getTime())) {
+      if (!DateUtils.isDateInReportRange(invoiceDate, report.fromDate, report.toDate)) {
+        logger.error({
+          invoiceDate: DateUtils.backendDateToFrontend(invoiceDate),
+          reportFromDate: DateUtils.backendDateToFrontend(report.fromDate),
+          reportToDate: DateUtils.backendDateToFrontend(report.toDate),
+        }, 'Invoice date validation failed in createExpenseDraft - REJECTING');
+        throw new Error(
+          `Invoice date (${DateUtils.backendDateToFrontend(invoiceDate)}) must be within report date range (${DateUtils.backendDateToFrontend(report.fromDate)} to ${DateUtils.backendDateToFrontend(report.toDate)})`
+        );
+      }
+    }
+    
     const invoiceId = receipt.invoiceId?.toString().trim() || undefined;
     let invoiceFingerprint: string | undefined = undefined;
     if (invoiceId && invoiceDate && !isNaN(invoiceDate.getTime()) && typeof receipt.totalAmount === 'number') {

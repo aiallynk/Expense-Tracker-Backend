@@ -49,6 +49,22 @@ export class ExpensesService {
     }
 
     const invoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
+    
+    // Invoice date must be within report [fromDate, toDate] if provided
+    if (invoiceDate) {
+      const isValidDate = invoiceDate instanceof Date && !isNaN(invoiceDate.getTime());
+      if (isValidDate && !DateUtils.isDateInReportRange(invoiceDate, report.fromDate, report.toDate)) {
+        logger.error({
+          invoiceDate: DateUtils.backendDateToFrontend(invoiceDate),
+          reportFromDate: DateUtils.backendDateToFrontend(report.fromDate),
+          reportToDate: DateUtils.backendDateToFrontend(report.toDate),
+        }, 'Invoice date validation failed - REJECTING EXPENSE');
+        throw new Error(
+          `Invoice date (${DateUtils.backendDateToFrontend(invoiceDate)}) must be within report date range (${DateUtils.backendDateToFrontend(report.fromDate)} to ${DateUtils.backendDateToFrontend(report.toDate)})`
+        );
+      }
+    }
+    
     let invoiceFingerprint: string | undefined = undefined;
     // Keep fingerprint for legacy indexes; duplicate detection is flag-only via DuplicateDetectionService
     if (data.invoiceId && invoiceDate) {
@@ -148,12 +164,66 @@ export class ExpensesService {
       throw new Error('advanceAppliedAmount cannot exceed expense amount');
     }
 
+    // CRITICAL: Run duplicate detection BEFORE saving to block duplicate expenses
+    try {
+      const { DuplicateDetectionService } = await import('./duplicateDetection.service');
+      const user = await User.findById(userId).select('companyId').exec();
+      const companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+      
+      if (companyId && expense.vendor && (expense.amount || expense.expenseDate || expense.invoiceDate)) {
+        // Check for duplicates using a temporary check (without saving expense first)
+        const duplicateCheck = await DuplicateDetectionService.checkForDuplicateBeforeSave(
+          {
+            vendor: expense.vendor,
+            amount: expense.amount,
+            expenseDate: expense.expenseDate,
+            invoiceDate: expense.invoiceDate,
+            invoiceId: expense.invoiceId,
+            currency: expense.currency,
+            originalAmount: expense.originalAmount,
+            originalCurrency: expense.originalCurrency,
+          },
+          companyId,
+          null // No expenseId to exclude (new expense)
+        );
+        
+        if (duplicateCheck.duplicateFlag) {
+          const isStrongDuplicate = duplicateCheck.duplicateFlag === 'STRONG_DUPLICATE';
+          const message = isStrongDuplicate
+            ? `This expense is a duplicate of another expense in your company (strong match). ${duplicateCheck.duplicateReason ? `Matched fields: ${duplicateCheck.duplicateReason}` : ''}`
+            : `This expense appears similar to another expense in your company. ${duplicateCheck.duplicateReason ? `Matched fields: ${duplicateCheck.duplicateReason}` : ''}`;
+          
+          logger.warn({
+            userId,
+            companyId: companyId.toString(),
+            vendor: expense.vendor,
+            amount: expense.amount,
+            duplicateFlag: duplicateCheck.duplicateFlag,
+            duplicateReason: duplicateCheck.duplicateReason,
+          }, 'Duplicate expense detected - BLOCKING SAVE');
+          
+          // Create error with 400 status code (Bad Request) instead of 500
+          const error: any = new Error(message);
+          error.statusCode = 400;
+          error.code = 'DUPLICATE_EXPENSE';
+          throw error;
+        }
+      }
+    } catch (e: any) {
+      // If it's a duplicate error, re-throw it to block saving
+      if (e.message && (e.message.includes('duplicate') || e.message.includes('similar'))) {
+        throw e;
+      }
+      // For other errors, log but don't block (non-critical)
+      logger.warn({ err: e }, 'Pre-save duplicate check failed; continuing');
+    }
+
     const saved = await expense.save();
 
     // Recalculate report total
     await ReportsService.recalcTotals(reportId);
 
-    // Duplicate detection: flag-only, never block (updates expense.duplicateFlag / duplicateReason)
+    // Run duplicate detection again after saving to set flags (for reporting)
     try {
       const { DuplicateDetectionService } = await import('./duplicateDetection.service');
       const user = await User.findById(userId).select('companyId').exec();
@@ -163,7 +233,7 @@ export class ExpensesService {
         companyId
       );
     } catch (e) {
-      logger.warn({ err: e, expenseId: saved._id }, 'Duplicate check failed; continuing');
+      logger.warn({ err: e, expenseId: saved._id }, 'Post-save duplicate check failed; continuing');
     }
 
     await AuditService.log(
@@ -333,7 +403,24 @@ export class ExpensesService {
       expense.invoiceId = data.invoiceId || undefined;
     }
     if (data.invoiceDate !== undefined) {
-      expense.invoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
+      const newInvoiceDate = data.invoiceDate ? DateUtils.frontendDateToBackend(data.invoiceDate) : undefined;
+      
+      // Invoice date must be within report [fromDate, toDate] if provided
+      if (newInvoiceDate) {
+        const isValidDate = newInvoiceDate instanceof Date && !isNaN(newInvoiceDate.getTime());
+        if (isValidDate && !DateUtils.isDateInReportRange(newInvoiceDate, report.fromDate, report.toDate)) {
+          logger.error({
+            invoiceDate: DateUtils.backendDateToFrontend(newInvoiceDate),
+            reportFromDate: DateUtils.backendDateToFrontend(report.fromDate),
+            reportToDate: DateUtils.backendDateToFrontend(report.toDate),
+          }, 'Invoice date validation failed in updateExpense - REJECTING');
+          throw new Error(
+            `Invoice date (${DateUtils.backendDateToFrontend(newInvoiceDate)}) must be within report date range (${DateUtils.backendDateToFrontend(report.fromDate)} to ${DateUtils.backendDateToFrontend(report.toDate)})`
+          );
+        }
+      }
+      
+      expense.invoiceDate = newInvoiceDate;
     }
     // Keep invoiceFingerprint consistent with invoice fields (legacy indexes)
     if (expense.invoiceId && expense.invoiceDate) {
@@ -505,7 +592,7 @@ export class ExpensesService {
   static async listExpensesForUser(
     userId: string,
     filters: ExpenseFiltersDto,
-    req?: any // Optional AuthRequest for company-wide filtering
+    _req?: any // Optional AuthRequest (kept for backward compatibility, not used for filtering)
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     
@@ -514,57 +601,12 @@ export class ExpensesService {
       logger.debug({ page, pageSize, skip: (page - 1) * pageSize }, '[ExpensesService] Pagination');
     }
 
-    // Build base query
-    // For company-wide duplicate detection, we need to check all expenses in the company
-    // If req is provided, use company-wide filtering; otherwise, filter by specific userId
-    let query: any = {};
-    
-    if (req) {
-      try {
-        // Use company-wide filtering for duplicate detection
-        // This ensures we check expenses from all users in the company, not just the current user
-        const { buildCompanyQuery } = await import('../utils/companyAccess');
-        const companyQuery = await buildCompanyQuery(req, {}, 'users');
-        
-        // buildCompanyQuery returns { userId: { $in: userIds } } for company users
-        // If it returns empty array, fall back to user-specific query
-        if (companyQuery && companyQuery.userId && Array.isArray(companyQuery.userId.$in)) {
-          if (companyQuery.userId.$in.length > 0) {
-            // Use company-wide filtering (all users in company)
-            query = { ...companyQuery };
-          } else {
-            // No users in company, fall back to user-specific
-            query = {
-              userId: new mongoose.Types.ObjectId(userId),
-            };
-          }
-        } else if (companyQuery && companyQuery._id && Array.isArray(companyQuery._id.$in) && companyQuery._id.$in.length === 0) {
-          // Company query returned empty result query, fall back to user-specific
-          query = {
-            userId: new mongoose.Types.ObjectId(userId),
-          };
-        } else if (companyQuery && Object.keys(companyQuery).length > 0) {
-          // Use company query as-is (but make a copy to avoid mutations)
-          query = { ...companyQuery };
-        } else {
-          // Fallback to user-specific query if company query is invalid
-          query = {
-            userId: new mongoose.Types.ObjectId(userId),
-          };
-        }
-      } catch (error) {
-        // If company query fails, fall back to user-specific query
-        logger.error({ error, userId }, 'Error building company query, falling back to user-specific query');
-        query = {
-          userId: new mongoose.Types.ObjectId(userId),
-        };
-      }
-    } else {
-      // Default: filter by specific userId (backward compatibility)
-      query = {
-        userId: new mongoose.Types.ObjectId(userId),
-      };
-    }
+    // Build base query - ALWAYS filter by specific userId for data visibility
+    // NOTE: Duplicate detection is company-wide (handled separately in duplicateDetection.service.ts),
+    // but data visibility must remain user-specific
+    const query: any = {
+      userId: new mongoose.Types.ObjectId(userId),
+    };
 
     // Filter by specific reportId if provided
     if (filters.reportId) {

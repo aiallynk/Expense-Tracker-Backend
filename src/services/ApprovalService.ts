@@ -128,55 +128,93 @@ export class ApprovalService {
       const pendingForUser: any[] = [];
       for (const instance of pendingInstances) {
         try {
-          // Defensive: Ensure matrix and level config present
+          // Defensive: Ensure matrix is present
           const matrix = instance.matrixId as any;
           if (!matrix) { 
             logger.warn({ instanceId: instance._id }, 'Matrix not found for instance'); 
             continue; 
           }
           
-          const currentLevel = matrix.levels?.find((l: any) => l.levelNumber === instance.currentLevel);
-          if (!currentLevel) { 
-            logger.warn({ instanceId: instance._id, level: instance.currentLevel, matrixLevels: matrix.levels?.length }, 'Level config not found for instance'); 
-            continue; 
-          }
-          
-          // Handle both old format (approverRoleIds) and new format (approverUserIds)
-          let approverIds = [];
-          let isUserBasedApproval = false;
-
-          if (currentLevel.approverUserIds && currentLevel.approverUserIds.length > 0) {
-            // New format: specific users
-            approverIds = currentLevel.approverUserIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
-            isUserBasedApproval = true;
-          } else if (currentLevel.approverRoleIds && currentLevel.approverRoleIds.length > 0) {
-            // Old format: roles (for backward compatibility)
-            approverIds = currentLevel.approverRoleIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
-            isUserBasedApproval = false;
-          }
-          
-          if (approverIds.length === 0) {
-            logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'No approver IDs found for current level');
-            continue;
-          }
-
-          // Check if user is authorized for this level
+          // CRITICAL: Check if this is an additional approver level BEFORE checking matrix levels
+          // Additional approver levels are NOT in the matrix, they're in the report's approvers array
+          let isAdditionalApproverLevel = false;
           let isAuthorized = false;
+          
+          if (instance.requestType === 'EXPENSE_REPORT') {
+            const report = await ExpenseReport.findById(instance.requestId)
+              .select('approvers')
+              .lean()
+              .exec();
+            
+            if (report && report.approvers) {
+              const currentAdditionalApprover = (report.approvers as any[]).find(
+                (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+              );
+              
+              if (currentAdditionalApprover) {
+                isAdditionalApproverLevel = true;
+                // Check if the current user is the assigned additional approver
+                const approverUserId = currentAdditionalApprover.userId?.toString() || currentAdditionalApprover.userId;
+                const currentUserId = (user._id as mongoose.Types.ObjectId).toString();
+                isAuthorized = approverUserId === currentUserId;
+                
+                logger.info({
+                  instanceId: instance._id,
+                  reportId: instance.requestId,
+                  currentUserId,
+                  approverUserId,
+                  level: instance.currentLevel,
+                  isAuthorized,
+                  isAdditionalApproverLevel: true,
+                  approverRole: currentAdditionalApprover.role
+                }, 'getPendingApprovalsForUser: Checking additional approver authorization');
+              }
+            }
+          }
+          
+          // If not an additional approver level, check matrix levels
+          if (!isAdditionalApproverLevel) {
+            const currentLevel = matrix.levels?.find((l: any) => l.levelNumber === instance.currentLevel);
+            if (!currentLevel) { 
+              logger.warn({ instanceId: instance._id, level: instance.currentLevel, matrixLevels: matrix.levels?.length }, 'Level config not found for instance'); 
+              continue; 
+            }
+            
+            // Handle both old format (approverRoleIds) and new format (approverUserIds)
+            let approverIds = [];
+            let isUserBasedApproval = false;
 
-          if (isUserBasedApproval) {
-            // New format: check if user ID is directly in the approver list
-            const normalizedApproverIds = approverIds.map((id: string) => id.toLowerCase().trim());
-            const userId = (user._id as mongoose.Types.ObjectId).toString().toLowerCase().trim();
-            isAuthorized = normalizedApproverIds.includes(userId);
-          } else {
-            // Old format: check if user has matching role
-            const normalizedApproverRoleIds = approverIds.map((id: string) => id.toLowerCase().trim());
-            const normalizedUserRoleIds = userRoleIds.map((id: string) => id.toLowerCase().trim());
+            if (currentLevel.approverUserIds && currentLevel.approverUserIds.length > 0) {
+              // New format: specific users
+              approverIds = currentLevel.approverUserIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
+              isUserBasedApproval = true;
+            } else if (currentLevel.approverRoleIds && currentLevel.approverRoleIds.length > 0) {
+              // Old format: roles (for backward compatibility)
+              approverIds = currentLevel.approverRoleIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
+              isUserBasedApproval = false;
+            }
+            
+            if (approverIds.length === 0) {
+              logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'No approver IDs found for current level');
+              continue;
+            }
 
-            const matchingRoleId = normalizedApproverRoleIds.find((rId: string) =>
-              normalizedUserRoleIds.includes(rId)
-            );
-            isAuthorized = !!matchingRoleId;
+            // Check if user is authorized for this level
+            if (isUserBasedApproval) {
+              // New format: check if user ID is directly in the approver list
+              const normalizedApproverIds = approverIds.map((id: string) => id.toLowerCase().trim());
+              const userId = (user._id as mongoose.Types.ObjectId).toString().toLowerCase().trim();
+              isAuthorized = normalizedApproverIds.includes(userId);
+            } else {
+              // Old format: check if user has matching role
+              const normalizedApproverRoleIds = approverIds.map((id: string) => id.toLowerCase().trim());
+              const normalizedUserRoleIds = userRoleIds.map((id: string) => id.toLowerCase().trim());
+
+              const matchingRoleId = normalizedApproverRoleIds.find((rId: string) =>
+                normalizedUserRoleIds.includes(rId)
+              );
+              isAuthorized = !!matchingRoleId;
+            }
           }
 
           // Only actionable for *current* level approvers:
@@ -184,32 +222,109 @@ export class ApprovalService {
             logger.debug({
               instanceId: instance._id,
               userId: user._id,
-              isUserBasedApproval,
-              approverIds: approverIds.slice(0, 3),
-              level: instance.currentLevel
+              level: instance.currentLevel,
+              isAdditionalApproverLevel
             }, 'User is not authorized for this approval level');
             continue;
           }
           
           // Parallel ALL/ANY: if this user already acted at this level, don't show it again
+          const currentUserId = (user._id as mongoose.Types.ObjectId).toString();
           const alreadyActed = instance.history?.some(
             (h: any) =>
               h.levelNumber === instance.currentLevel &&
-              h.approverId?.toString?.() === userId
+              h.approverId?.toString?.() === currentUserId
           );
           if (alreadyActed) {
-            logger.debug({ instanceId: instance._id, userId }, 'User already acted on this approval');
+            logger.debug({ instanceId: instance._id, userId: currentUserId }, 'User already acted on this approval');
             continue;
           }
           // Fetch details for this report
           let requestDetails: any = null;
             if (instance.requestType === 'EXPENSE_REPORT') {
             requestDetails = await ExpenseReport.findById(instance.requestId)
-              .select('name totalAmount fromDate toDate status userId notes createdAt projectId costCentreId')
-              .populate('userId', 'name email')
+              .select('name totalAmount fromDate toDate status userId notes createdAt projectId costCentreId appliedVouchers approvers currency companyId')
+              .populate('userId', 'name email companyId')
               .populate('projectId', 'name code')
               .lean()
               .exec();
+              
+            // If report doesn't have additional approvers but should (based on rules), check rules dynamically
+            // This handles reports submitted before the fix was applied
+            if (requestDetails && requestDetails.userId) {
+              const userIdObj = requestDetails.userId as any;
+              let companyId = userIdObj.companyId;
+              
+              // If companyId not populated, fetch it from User model
+              if (!companyId && userIdObj._id) {
+                const user = await User.findById(userIdObj._id).select('companyId').lean().exec();
+                companyId = user?.companyId;
+              }
+              
+              const hasAdditionalApprovers = requestDetails.approvers?.some((a: any) => a.isAdditionalApproval === true);
+              
+              if (!hasAdditionalApprovers && companyId) {
+                // Re-evaluate approval rules to check if additional approvers should exist
+                try {
+                  const { ReportsService } = await import('./reports.service');
+                  
+                  // Create a temporary report object for rule evaluation
+                  const tempReport = {
+                    _id: requestDetails._id,
+                    totalAmount: requestDetails.totalAmount,
+                    projectId: requestDetails.projectId,
+                    costCentreId: requestDetails.costCentreId,
+                    userId: userIdObj._id || userIdObj,
+                  };
+                  const additionalApprovers = await ReportsService.evaluateAdditionalApprovalRules(
+                    tempReport as any,
+                    new mongoose.Types.ObjectId(companyId)
+                  );
+                  
+                  // If additional approvers should exist, add them to requestDetails for UI display
+                  if (additionalApprovers.length > 0) {
+                    if (!requestDetails.approvers) {
+                      requestDetails.approvers = [];
+                    }
+                    
+                    // Get max level from ApprovalMatrix
+                    const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
+                    const matrix = await ApprovalMatrix.findOne({ 
+                      companyId: companyId, 
+                      isActive: true 
+                    }).exec();
+                    
+                    let maxLevel = 2;
+                    if (matrix && matrix.levels) {
+                      const enabledLevels = matrix.levels
+                        .filter((l: any) => l.enabled !== false)
+                        .map((l: any) => l.levelNumber);
+                      if (enabledLevels.length > 0) {
+                        maxLevel = Math.max(...enabledLevels);
+                      }
+                    }
+                    
+                    const insertAfterLevel = Math.max(maxLevel, 2);
+                    additionalApprovers.forEach((approver, index) => {
+                      requestDetails.approvers.push({
+                        ...approver,
+                        level: insertAfterLevel + index + 1,
+                      });
+                    });
+                    
+                    logger.info({
+                      reportId: instance.requestId,
+                      additionalApproversCount: additionalApprovers.length,
+                      message: 'Additional approvers computed dynamically for existing report'
+                    }, 'ApprovalService: Dynamic additional approver evaluation');
+                  }
+                } catch (ruleError) {
+                  logger.warn({ error: ruleError, reportId: instance.requestId }, 
+                    'Failed to evaluate additional approval rules dynamically');
+                  // Continue without additional approvers if evaluation fails
+                }
+              }
+            }
           }
           if (!requestDetails) continue;
           
@@ -238,7 +353,7 @@ export class ApprovalService {
           }, 'FORENSIC: About to fetch expenses for approval');
           
           // CRITICAL: Fetch expenses with all fields (expenseDate is required in schema)
-          // Using .lean() returns plain objects with all fields by default
+          // Using .lean() returns plain objects with all fields by default (including duplicateFlag, needsReview, etc.)
           const expenses = await Expense.find({ reportId: instance.requestId })
             .populate('categoryId', 'name')
             .populate('receiptPrimaryId', '_id storageUrl mimeType filename')
@@ -330,7 +445,7 @@ export class ApprovalService {
             // Use converted value if available, otherwise preserve original
             // This ensures dates are never lost even if conversion fails
             return {
-              ...exp, // Preserves all original fields
+              ...exp, // Preserves all original fields (including duplicateFlag, needsReview, etc.)
               receiptUrl: exp.receiptPrimaryId?.storageUrl || null,
               // Always include expenseDate and invoiceDate if they exist in original
               // Use converted value if available, otherwise preserve original from exp
@@ -338,6 +453,10 @@ export class ApprovalService {
               invoiceDate: invoiceDate !== undefined ? invoiceDate : exp.invoiceDate,
               createdAt: createdAt !== undefined ? createdAt : exp.createdAt,
               updatedAt: updatedAt !== undefined ? updatedAt : exp.updatedAt,
+              // Preserve duplicate and review flags
+              duplicateFlag: exp.duplicateFlag || null,
+              duplicateReason: exp.duplicateReason || null,
+              needsReview: exp.needsReview || false,
             };
           });
           
@@ -393,6 +512,48 @@ export class ApprovalService {
             }, 'FORENSIC: Final expense object in response (before returning)');
           }
           
+          // Get additional approver info - check if ANY additional approver exists for this report
+          // Additional approvers are added after L2, so check all approvers, not just current level
+          const additionalApprovers = requestDetails.approvers?.filter(
+            (a: any) => a.isAdditionalApproval === true
+          ) || [];
+          
+          // Check if current level is an additional approval level
+          const currentApprover = requestDetails.approvers?.find(
+            (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+          );
+          
+          // If current level is additional approval, show info
+          // Otherwise, if there are any additional approvers in the chain, show that info too
+          const additionalApproverInfo = currentApprover ? {
+            isAdditionalApproval: true,
+            approverRole: currentApprover.role,
+            triggerReason: currentApprover.triggerReason,
+            approvalRuleId: currentApprover.approvalRuleId,
+            isCurrentLevel: true
+          } : (additionalApprovers.length > 0 ? {
+            isAdditionalApproval: true,
+            approverRole: additionalApprovers[0].role,
+            triggerReason: additionalApprovers[0].triggerReason,
+            approvalRuleId: additionalApprovers[0].approvalRuleId,
+            isCurrentLevel: false,
+            pendingLevel: additionalApprovers[0].level
+          } : null);
+
+          // Debug logging for vouchers and additional approvers
+          logger.debug({
+            reportId: instance.requestId,
+            hasAppliedVouchers: !!(requestDetails.appliedVouchers && requestDetails.appliedVouchers.length > 0),
+            appliedVouchersCount: requestDetails.appliedVouchers?.length || 0,
+            hasApprovers: !!(requestDetails.approvers && requestDetails.approvers.length > 0),
+            approversCount: requestDetails.approvers?.length || 0,
+            additionalApproversCount: additionalApprovers.length,
+            hasAdditionalApproverInfo: !!additionalApproverInfo,
+            expensesCount: mappedExpenses.length,
+            expensesWithDuplicateFlag: mappedExpenses.filter((e: any) => e.duplicateFlag).length,
+            expensesWithNeedsReview: mappedExpenses.filter((e: any) => e.needsReview).length,
+          }, 'ApprovalService: Report data for approval UI');
+
           pendingForUser.push({
             instanceId: instance._id,
             approvalStatus: instance.status,
@@ -412,7 +573,23 @@ export class ApprovalService {
               // CRITICAL: Always include expenses array (even if empty)
               // Each expense should have expenseDate as ISO string
               expenses: mappedExpenses,
-              dateRange: { from: requestDetails.fromDate, to: requestDetails.toDate }
+              dateRange: { from: requestDetails.fromDate, to: requestDetails.toDate },
+              // Include vouchers for approver visibility
+              appliedVouchers: requestDetails.appliedVouchers || [],
+              currency: requestDetails.currency || 'INR',
+              // Include additional approver info if ANY additional approver exists
+              additionalApproverInfo: additionalApproverInfo,
+              // Include flags for approver visibility (computed from expenses)
+              flags: {
+                changes_requested: requestDetails.status === 'CHANGES_REQUESTED',
+                rejected: requestDetails.status === 'REJECTED',
+                voucher_applied: (requestDetails.appliedVouchers || []).length > 0,
+                additional_approver_added: additionalApprovers.length > 0,
+                duplicate_flagged: mappedExpenses.some(
+                  (e: any) => e.duplicateFlag === 'POTENTIAL_DUPLICATE' || e.duplicateFlag === 'STRONG_DUPLICATE' || e.duplicateFlag === 'HARD_DUPLICATE'
+                ) || false,
+                ocr_needs_review: mappedExpenses.some((e: any) => e.needsReview === true),
+              }
             },
             createdAt: instance.createdAt
           });
@@ -445,6 +622,31 @@ export class ApprovalService {
   // ... any other methods ...
 
     private static async checkLevelCompletion(instance: IApprovalInstance, levelConfig: IApprovalLevel): Promise<boolean> {
+        // Check if this is an additional approver level
+        if (instance.requestType === 'EXPENSE_REPORT') {
+            const report = await ExpenseReport.findById(instance.requestId).exec();
+            if (report) {
+                const currentApprover = (report.approvers || []).find(
+                    (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+                );
+                
+                if (currentApprover) {
+                    // Additional approver level - only one approver, so sequential approval
+                    const approverUserId = currentApprover.userId?.toString() || currentApprover.userId?.toString() || String(currentApprover.userId);
+                    const hasApproved = instance.history.some(
+                        (h) => {
+                          const historyApproverId = h.approverId?.toString();
+                          return h.levelNumber === instance.currentLevel && 
+                                 h.status === ApprovalStatus.APPROVED &&
+                                 historyApproverId === approverUserId;
+                        }
+                    );
+                    return hasApproved;
+                }
+            }
+        }
+        
+        // Regular matrix level - use existing logic
         if (levelConfig.approvalType === ApprovalType.SEQUENTIAL) return true;
 
         if (levelConfig.approvalType === ApprovalType.PARALLEL) {
@@ -525,11 +727,41 @@ export class ApprovalService {
     let reportStatus = ExpenseReportStatus.SUBMITTED;
             if (instance.status === ApprovalStatus.PENDING) {
                 const level = instance.currentLevel;
-                if (level === 1) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L1;
-                else if (level === 2) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L2;
-                else if (level === 3) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L3;
-                else if (level === 4) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L4;
-                else if (level === 5) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L5;
+                // Check if this is an additional approver level
+                const report = await ExpenseReport.findById(instance.requestId).exec();
+                if (report) {
+                  const currentApprover = (report.approvers || []).find(
+                    (a: any) => a.level === level && a.isAdditionalApproval === true
+                  );
+                  
+                  if (currentApprover) {
+                    // Additional approver level - use highest matrix level status or a generic pending status
+                    // Use the last matrix level status (L5, L4, L3, L2, or L1) as fallback
+                    const maxMatrixLevel = Math.max(...(report.approvers || [])
+                      .filter((a: any) => !a.isAdditionalApproval)
+                      .map((a: any) => a.level || 0), 0);
+                    
+                    if (maxMatrixLevel >= 5) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L5;
+                    else if (maxMatrixLevel >= 4) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L4;
+                    else if (maxMatrixLevel >= 3) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L3;
+                    else if (maxMatrixLevel >= 2) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L2;
+                    else reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L1;
+                  } else {
+                    // Regular matrix level
+                    if (level === 1) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L1;
+                    else if (level === 2) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L2;
+                    else if (level === 3) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L3;
+                    else if (level === 4) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L4;
+                    else if (level === 5) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L5;
+                  }
+                } else {
+                  // Fallback to regular level mapping
+                  if (level === 1) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L1;
+                  else if (level === 2) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L2;
+                  else if (level === 3) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L3;
+                  else if (level === 4) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L4;
+                  else if (level === 5) reportStatus = ExpenseReportStatus.PENDING_APPROVAL_L5;
+                }
             } else if (instance.status === ApprovalStatus.APPROVED) {
                 reportStatus = ExpenseReportStatus.APPROVED;
             } else if (instance.status === ApprovalStatus.REJECTED) {
@@ -543,19 +775,56 @@ export class ApprovalService {
 
     private static async notifyApprovers(instance: IApprovalInstance, matrix: IApprovalMatrix): Promise<void> {
         try {
-      const currentLevelConfig = matrix.levels.find((l) => l.levelNumber === instance.currentLevel);
-            if (!currentLevelConfig) return;
-
-      let requestData: any = null;
+            let requestData: any = null;
             if (instance.requestType === 'EXPENSE_REPORT') {
                 requestData = await ExpenseReport.findById(instance.requestId).exec();
             }
             if (!requestData) return;
-
-            const { ApprovalMatrixNotificationService } = await import('./approvalMatrixNotification.service');
-      await ApprovalMatrixNotificationService.notifyApprovalRequired(instance, currentLevelConfig as any, requestData);
+            
+            // Check if current level is an additional approver level
+            const report = requestData as any;
+            const currentApprover = (report.approvers || []).find(
+                (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+            );
+            
+            if (currentApprover) {
+                // This is an additional approver level - notify the specific approver
+                const { ApprovalMatrixNotificationService } = await import('./approvalMatrixNotification.service');
+                const { NotificationService } = await import('./notification.service');
+                
+                // Create a mock level config for additional approver
+                const additionalLevelConfig = {
+                    levelNumber: instance.currentLevel,
+                    approverUserIds: [currentApprover.userId.toString()],
+                    approverRoleIds: [],
+                    enabled: true,
+                };
+                
+                await ApprovalMatrixNotificationService.notifyApprovalRequired(
+                    instance, 
+                    additionalLevelConfig as any, 
+                    requestData
+                );
+                
+                // Also send additional approver notification
+                await NotificationService.notifyAdditionalApproverAdded(
+                    report,
+                    [{
+                        userId: currentApprover.userId.toString(),
+                        role: currentApprover.role,
+                        triggerReason: currentApprover.triggerReason
+                    }]
+                );
+            } else {
+                // Regular matrix level - use existing logic
+                const currentLevelConfig = matrix.levels.find((l) => l.levelNumber === instance.currentLevel);
+                if (!currentLevelConfig) return;
+                
+                const { ApprovalMatrixNotificationService } = await import('./approvalMatrixNotification.service');
+                await ApprovalMatrixNotificationService.notifyApprovalRequired(instance, currentLevelConfig as any, requestData);
+            }
         } catch (error: any) {
-      logger.error({ error: error?.message || error }, 'Error notifying approvers');
+            logger.error({ error: error?.message || error }, 'Error notifying approvers');
         }
     }
 
@@ -597,25 +866,65 @@ export class ApprovalService {
       }
       const matrix = await ApprovalMatrix.findById(instance.matrixId).exec();
       if (!matrix) throw new Error('Matrix configuration missing');
-      const currentLevelConfig = matrix.levels?.find(l => l.levelNumber === instance.currentLevel);
-      if (!currentLevelConfig) throw new Error('Configuration error: Current level not found');
+      // Check if this is an additional approver level (not in matrix)
+      let requestData = null;
+      if (instance.requestType === 'EXPENSE_REPORT') {
+        requestData = await ExpenseReport.findById(instance.requestId).exec();
+      }
+      
+      let isAdditionalApproverLevel = false;
+      if (requestData) {
+        const report = requestData as any;
+        const currentApprover = (report.approvers || []).find(
+          (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+        );
+        isAdditionalApproverLevel = !!currentApprover;
+      }
+      
+      const currentLevelConfig = isAdditionalApproverLevel 
+        ? null // Additional approver levels are not in the matrix
+        : matrix.levels?.find(l => l.levelNumber === instance.currentLevel);
+      
+      if (!isAdditionalApproverLevel && !currentLevelConfig) {
+        throw new Error('Configuration error: Current level not found');
+      }
       // Validate User Permission
       const user = await User.findById(userId).populate('roles').exec();
       if (!user) throw new Error('User not found');
       const userRoleIds = (user.roles || []).map(r => r._id ? r._id.toString() : r.toString());
-      // Check if user is authorized for this level
-      let isAuthorized = false;
-      let authorizedRole = null;
-
-      if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
-        // New format: check if user ID is directly in the approver list
-        const approverUserIds = currentLevelConfig.approverUserIds.map(id => id.toString());
-        isAuthorized = approverUserIds.includes(userId);
-      } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
-        // Old format: check if user has matching role
-        authorizedRole = (currentLevelConfig.approverRoleIds || []).find(rId => userRoleIds.includes(rId?.toString()));
-        isAuthorized = !!authorizedRole;
-      }
+          // Check if user is authorized for this level
+          let isAuthorized = false;
+          let authorizedRole = null;
+          
+          // First, check if this is an additional approver level
+          if (isAdditionalApproverLevel && requestData) {
+            const report = requestData as any;
+            const currentApprover = (report.approvers || []).find(
+              (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+            );
+            
+            if (currentApprover) {
+              // This is an additional approver level - check if user matches
+              const approverUserId = currentApprover.userId?.toString() || currentApprover.userId;
+              isAuthorized = approverUserId === userId;
+              if (isAuthorized) {
+                // For additional approvers, role is a string (e.g., "CFO"), not an ObjectId
+                // We'll store the role name but not convert it to ObjectId
+                authorizedRole = currentApprover.role;
+              }
+            }
+          } else if (currentLevelConfig) {
+            // Regular matrix level - check matrix configuration
+            if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
+              // New format: check if user ID is directly in the approver list
+              const approverUserIds = currentLevelConfig.approverUserIds.map(id => id.toString());
+              isAuthorized = approverUserIds.includes(userId);
+            } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
+              // Old format: check if user has matching role
+              authorizedRole = (currentLevelConfig.approverRoleIds || []).find(rId => userRoleIds.includes(rId?.toString()));
+              isAuthorized = !!authorizedRole;
+            }
+          }
 
       if (!isAuthorized) {
         throw new Error('You are not authorized to approve at this level');
@@ -633,11 +942,23 @@ export class ApprovalService {
       let historyStatus = ApprovalStatus.APPROVED;
       if (action === 'REJECT') historyStatus = ApprovalStatus.REJECTED;
       if (action === 'REQUEST_CHANGES') historyStatus = ApprovalStatus.CHANGES_REQUESTED;
+      
+      // For additional approvers, authorizedRole is a string (role name), not an ObjectId
+      // Only convert to ObjectId if it's a valid ObjectId string
+      let roleIdObjectId: mongoose.Types.ObjectId | undefined = undefined;
+      if (authorizedRole) {
+        // Check if authorizedRole is a valid ObjectId string (24 hex characters)
+        if (mongoose.Types.ObjectId.isValid(authorizedRole) && authorizedRole.length === 24) {
+          roleIdObjectId = new mongoose.Types.ObjectId(authorizedRole);
+        }
+        // If it's not a valid ObjectId (e.g., it's a role name string like "CFO"), leave it undefined
+      }
+      
       instance.history.push({
         levelNumber: instance.currentLevel,
         status: historyStatus,
         approverId: new mongoose.Types.ObjectId(userId),
-        roleId: authorizedRole ? new mongoose.Types.ObjectId(authorizedRole) : undefined,
+        roleId: roleIdObjectId,
         timestamp: new Date(),
         comments
       });
@@ -661,24 +982,110 @@ export class ApprovalService {
         return instance;
       }
       // Handle APPROVE
-      const levelComplete = await this.checkLevelCompletion(instance, currentLevelConfig as any);
+      // For additional approver levels, pass a mock config; for matrix levels, use the actual config
+      const levelConfigForCheck = isAdditionalApproverLevel 
+        ? { approvalType: ApprovalType.SEQUENTIAL } as any
+        : currentLevelConfig as any;
+      const levelComplete = await this.checkLevelCompletion(instance, levelConfigForCheck);
       if (levelComplete) {
-        const nextLevelNum = instance.currentLevel + 1;
-        let requestData = null;
-        if (instance.requestType === 'EXPENSE_REPORT') {
-          requestData = await ExpenseReport.findById(instance.requestId).exec();
+        if (isAdditionalApproverLevel) {
+          // This is an additional approver level - check if there are more additional approvers
+          if (requestData) {
+            const report = requestData as any;
+            const remainingAdditionalApprovers = (report.approvers || []).filter(
+              (a: any) => a.isAdditionalApproval === true && 
+                         a.level > instance.currentLevel && 
+                         (!a.decidedAt || !a.action)
+            );
+            
+            if (remainingAdditionalApprovers.length > 0) {
+              // Route to next additional approver
+              const nextAdditionalApprover = remainingAdditionalApprovers[0];
+              instance.currentLevel = nextAdditionalApprover.level;
+              instance.status = ApprovalStatus.PENDING;
+              
+              logger.info({
+                reportId: instance.requestId,
+                additionalLevel: nextAdditionalApprover.level,
+                approverRole: nextAdditionalApprover.role,
+                message: 'Routing to next additional approver'
+              }, 'ApprovalService: Routing to next additional approver');
+            } else {
+              // No more additional approvers - finalize approval
+              instance.status = ApprovalStatus.APPROVED;
+            }
+          } else {
+            // No request data - finalize approval
+            instance.status = ApprovalStatus.APPROVED;
+          }
+        } else {
+          // Regular matrix level - evaluate next level
+          const nextLevelNum = instance.currentLevel + 1;
+          // Evaluate next level
+          const nextState = await ApprovalService.evaluateLevel(instance as any, matrix as any, nextLevelNum, requestData);
+          instance.currentLevel = nextState.levelNumber;
+          instance.status = nextState.status;
+          
+          // CRITICAL: If all matrix levels are approved, check for additional approvers
+          // Refresh requestData to get the latest approvers array from the database
+          if (instance.status === ApprovalStatus.APPROVED && instance.requestType === 'EXPENSE_REPORT') {
+            try {
+              const freshReport = await ExpenseReport.findById(instance.requestId)
+                .select('approvers')
+                .lean()
+                .exec();
+              
+              if (freshReport && freshReport.approvers) {
+                const additionalApprovers = (freshReport.approvers as any[]).filter(
+                  (a: any) => a.isAdditionalApproval === true && (!a.decidedAt || !a.action)
+                );
+                
+                logger.info({
+                  reportId: instance.requestId,
+                  additionalApproversCount: additionalApprovers.length,
+                  approvers: additionalApprovers.map((a: any) => ({
+                    level: a.level,
+                    role: a.role,
+                    userId: a.userId
+                  }))
+                }, 'processAction: Checking for additional approvers after matrix approval');
+                
+                if (additionalApprovers.length > 0) {
+                  // Route to first additional approver
+                  const firstAdditionalApprover = additionalApprovers[0];
+                  const additionalLevel = firstAdditionalApprover.level || (nextLevelNum);
+                  
+                  // Update instance to route to additional approver level
+                  instance.currentLevel = additionalLevel;
+                  instance.status = ApprovalStatus.PENDING;
+                  
+                  logger.info({
+                    reportId: instance.requestId,
+                    additionalLevel,
+                    approverRole: firstAdditionalApprover.role,
+                    approverUserId: firstAdditionalApprover.userId,
+                    message: 'Routing to additional approver after all matrix levels approved'
+                  }, 'ApprovalService: Routing to additional approver');
+                }
+              }
+            } catch (error: any) {
+              logger.error({
+                error: error?.message || error,
+                reportId: instance.requestId,
+                stack: error?.stack
+              }, 'Error checking for additional approvers after matrix approval');
+              // Continue - don't fail the approval if we can't check for additional approvers
+            }
+          }
         }
-        // Evaluate next level
-        const nextState = await ApprovalService.evaluateLevel(instance as any, matrix as any, nextLevelNum, requestData);
-        instance.currentLevel = nextState.levelNumber;
-        instance.status = nextState.status;
+        
         await instance.save();
         if (instance.status === ApprovalStatus.PENDING) {
           await ApprovalService.syncRequestStatus(instance);
           // Notify requester that their report was approved at the previous level
           const completedLevel = instance.currentLevel > 1 ? instance.currentLevel - 1 : 1;
           await ApprovalService.notifyStatusChange(instance, 'APPROVED', comments, completedLevel);
-          // Notify next level approvers
+          // Notify next level approvers (including additional approvers)
           await ApprovalService.notifyApprovers(instance, matrix as any);
         } else if (instance.status === ApprovalStatus.APPROVED) {
           await ApprovalService.finalizeApproval(instance);
@@ -691,9 +1098,24 @@ export class ApprovalService {
         await instance.save();
       }
       return instance;
-    } catch (error) {
-      logger.error({ error, instanceId, userId, action }, 'Approval action failed: Defensive catch');
-      throw new Error((error && (error as any).message) || 'Approval action failed');
+    } catch (error: any) {
+      logger.error({ 
+        error: error?.message || error, 
+        stack: error?.stack,
+        instanceId, 
+        userId, 
+        action 
+      }, 'Approval action failed: Defensive catch');
+      
+      // Re-throw with more context if it's a known error
+      if (error?.message) {
+        const enhancedError: any = new Error(error.message);
+        enhancedError.statusCode = error.statusCode || 500;
+        enhancedError.code = error.code || 'APPROVAL_ACTION_FAILED';
+        throw enhancedError;
+      }
+      
+      throw new Error('Approval action failed');
     }
   }
 
@@ -717,27 +1139,59 @@ export class ApprovalService {
     const skip = (page - 1) * limit;
 
     // Build aggregation pipeline
-    const pipeline: any[] = [
-      // Match instances where user has acted
-      {
+    const pipeline: any[] = [];
+    
+    // Only add initial match if actedBy is provided and we want to filter by user
+    // This pre-filters instances that have at least one history entry by this user
+    if (filters.actedBy) {
+      pipeline.push({
         $match: {
           'history.approverId': filters.actedBy,
         },
+      });
+    }
+    
+    // Unwind history to get individual actions
+    // Use preserveNullAndEmptyArrays: false to only keep instances with history
+    // But first ensure history array exists and is not empty
+    pipeline.push({
+      $match: {
+        history: { $exists: true, $ne: [], $type: 'array' }
+      }
+    });
+    
+    pipeline.push({
+      $unwind: {
+        path: '$history',
+        preserveNullAndEmptyArrays: false, // Only keep instances with history entries
       },
-      // Unwind history to get individual actions
-      {
-        $unwind: '$history',
-      },
-      // Filter history entries for this user
-      {
-        $match: {
-          'history.approverId': filters.actedBy,
-          ...(filters.actionType && { 'history.status': filters.actionType }),
-          ...(filters.dateRange && {
-            'history.timestamp': filters.dateRange,
-          }),
-        },
-      },
+    });
+    
+    // Filter history entries for this user and action type
+    const historyMatch: any = {};
+    if (filters.actedBy) {
+      historyMatch['history.approverId'] = filters.actedBy;
+    }
+    if (filters.actionType) {
+      historyMatch['history.status'] = filters.actionType;
+    }
+    if (filters.dateRange) {
+      historyMatch['history.timestamp'] = filters.dateRange;
+    }
+    
+    // Only add match stage if we have filters
+    if (Object.keys(historyMatch).length > 0) {
+      pipeline.push({
+        $match: historyMatch,
+      });
+    }
+    
+    // #region agent log
+    fetch('http://127.0.0.1:7244/ingest/4df6bb03-2191-446a-93ae-c093fcd724e4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ApprovalService.ts:1090',message:'getApprovalHistory: Adding lookup stages to pipeline',data:{filters,employeeFilter,pipelineLength:pipeline.length},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+    // #endregion
+    
+    // Push all lookup and transformation stages to pipeline
+    pipeline.push(
       // Lookup request details (ExpenseReport)
       {
         $lookup: {
@@ -851,6 +1305,39 @@ export class ApprovalService {
                 'Unknown'
               ]
             },
+            // Include vouchers for approver visibility
+            appliedVouchers: {
+              $ifNull: ['$requestData.appliedVouchers', []]
+            },
+            currency: {
+              $ifNull: ['$requestData.currency', 'INR']
+            },
+            // Include approvers array to check for additional approvals
+            approvers: {
+              $ifNull: ['$requestData.approvers', []]
+            },
+            // Include flags for approver visibility
+            flags: {
+              changes_requested: { $eq: ['$requestData.status', 'CHANGES_REQUESTED'] },
+              rejected: { $eq: ['$requestData.status', 'REJECTED'] },
+              voucher_applied: { $gt: [{ $size: { $ifNull: ['$requestData.appliedVouchers', []] } }, 0] },
+              additional_approver_added: {
+                $gt: [
+                  {
+                    $size: {
+                      $filter: {
+                        input: { $ifNull: ['$requestData.approvers', []] },
+                        as: 'approver',
+                        cond: { $eq: ['$$approver.isAdditionalApproval', true] }
+                      }
+                    }
+                  },
+                  0
+                ]
+              },
+              duplicate_flagged: false,
+              ocr_needs_review: false
+            },
             projectName: '$requestData.projectName',
             submittedAt: '$requestData.submittedAt',
             createdAt: '$requestData.createdAt',
@@ -904,28 +1391,60 @@ export class ApprovalService {
       // Sort by most recent first
       {
         $sort: { actedAt: -1 },
-      },
-    ];
+      }
+    );
 
-    // Get total count
-    const countPipeline = [...pipeline, { $count: 'total' }];
-    const countResult = await ApprovalInstance.aggregate(countPipeline);
-    const total = countResult[0]?.total || 0;
+    try {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/4df6bb03-2191-446a-93ae-c093fcd724e4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ApprovalService.ts:1292',message:'getApprovalHistory: Executing aggregation',data:{pipelineLength:pipeline.length,skip,limit},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      
+      // Get total count
+      const countPipeline = [...pipeline, { $count: 'total' }];
+      const countResult = await ApprovalInstance.aggregate(countPipeline);
+      const total = countResult[0]?.total || 0;
 
-    // Add pagination
-    pipeline.push({ $skip: skip }, { $limit: limit });
+      // Add pagination
+      pipeline.push({ $skip: skip }, { $limit: limit });
 
-    const history = await ApprovalInstance.aggregate(pipeline);
+      const history = await ApprovalInstance.aggregate(pipeline);
 
-    return {
-      data: history,
-      pagination: {
-        page,
-        limit,
-        total,
-        pages: Math.ceil(total / limit),
-      },
-    };
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/4df6bb03-2191-446a-93ae-c093fcd724e4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ApprovalService.ts:1303',message:'getApprovalHistory: Aggregation successful',data:{historyCount:history?.length||0,total},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+
+      return {
+        data: history || [],
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit) || 0,
+        },
+      };
+    } catch (error: any) {
+      // #region agent log
+      fetch('http://127.0.0.1:7244/ingest/4df6bb03-2191-446a-93ae-c093fcd724e4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ApprovalService.ts:1313',message:'getApprovalHistory: Aggregation error',data:{error:error?.message||error,stack:error?.stack},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});
+      // #endregion
+      
+      logger.error({ 
+        error: error?.message || error, 
+        filters,
+        employeeFilter,
+        pagination 
+      }, 'Error in getApprovalHistory aggregation');
+      
+      // Return empty result instead of throwing
+      return {
+        data: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          pages: 0,
+        },
+      };
+    }
   }
 }
 

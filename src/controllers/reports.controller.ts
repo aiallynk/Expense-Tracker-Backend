@@ -253,24 +253,42 @@ export class ReportsController {
    * GET /api/v1/reports/:id/export/excel
    */
   static exportExcel = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const buffer = await ExportService.generateStructuredExport(
-      reportId,
-      req.user!.id,
-      req.user!.role
-    );
+    try {
+      const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const buffer = await ExportService.generateStructuredExport(
+        reportId,
+        req.user!.id,
+        req.user!.role
+      );
 
-    const report = await ReportsService.getReportById(
-      reportId,
-      req.user!.id,
-      req.user!.role
-    );
+      const report = await ReportsService.getReportById(
+        reportId,
+        req.user!.id,
+        req.user!.role
+      );
 
-    const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.xlsx`;
 
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.status(200).send(buffer);
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.status(200).send(buffer);
+    } catch (error: any) {
+      // If headers already sent, we can't change them - log and return
+      if (res.headersSent) {
+        logger.error({ error: error?.message || error, reportId: req.params.id }, 'Error after headers sent in exportExcel');
+        return;
+      }
+      
+      // Return JSON error response (not blob) so frontend can parse it
+      const statusCode = error.statusCode || 500;
+      const message = error.message || 'Failed to export report to Excel';
+      
+      res.status(statusCode).json({
+        success: false,
+        message,
+        code: error.code || 'EXPORT_ERROR',
+      });
+    }
   });
 
   /**
@@ -278,24 +296,42 @@ export class ReportsController {
    * GET /api/v1/reports/:id/export/pdf
    */
   static exportPDF = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const buffer = await ExportService.generateExport(
-      reportId,
-      ExportFormat.PDF,
-      true // return buffer directly
-    ) as Buffer;
+    try {
+      const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const buffer = await ExportService.generateExport(
+        reportId,
+        ExportFormat.PDF,
+        true // return buffer directly
+      ) as Buffer;
 
-    const report = await ReportsService.getReportById(
-      reportId,
-      req.user!.id,
-      req.user!.role
-    );
+      const report = await ReportsService.getReportById(
+        reportId,
+        req.user!.id,
+        req.user!.role
+      );
 
-    const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.pdf`;
+      const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.pdf`;
 
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.status(200).send(buffer);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+      res.status(200).send(buffer);
+    } catch (error: any) {
+      // If headers already sent, we can't change them - log and return
+      if (res.headersSent) {
+        logger.error({ error: error?.message || error, reportId: req.params.id }, 'Error after headers sent in exportPDF');
+        return;
+      }
+      
+      // Return JSON error response (not blob) so frontend can parse it
+      const statusCode = error.statusCode || 500;
+      const message = error.message || 'Failed to export report to PDF';
+      
+      res.status(statusCode).json({
+        success: false,
+        message,
+        code: error.code || 'EXPORT_ERROR',
+      });
+    }
   });
 
   /**

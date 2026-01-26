@@ -19,6 +19,11 @@ export interface IReceipt extends Document {
   queueWaitTimeMs?: number;
   openaiTimeMs?: number;
   totalPipelineMs?: number;
+  // Receipt-level duplicate detection hashes
+  imagePerceptualHash?: string; // pHash for similar image detection
+  imageAverageHash?: string; // aHash for exact/near-exact duplicates
+  ocrTextHash?: string; // Hash of normalized OCR text content
+  companyId?: mongoose.Types.ObjectId; // Company reference for duplicate queries
   createdAt: Date;
   updatedAt: Date;
 }
@@ -91,6 +96,23 @@ const receiptSchema = new Schema<IReceipt>(
       type: Number,
       min: 0,
     },
+    // Receipt-level duplicate detection hashes
+    imagePerceptualHash: {
+      type: String,
+      trim: true,
+    },
+    imageAverageHash: {
+      type: String,
+      trim: true,
+    },
+    ocrTextHash: {
+      type: String,
+      trim: true,
+    },
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Company',
+    },
   },
   {
     timestamps: true,
@@ -101,6 +123,10 @@ const receiptSchema = new Schema<IReceipt>(
 receiptSchema.index({ expenseId: 1 });
 receiptSchema.index({ ocrJobId: 1 });
 receiptSchema.index({ status: 1 });
+// Indexes for receipt-level duplicate detection (sparse - only index when hash exists)
+receiptSchema.index({ imagePerceptualHash: 1, companyId: 1 }, { sparse: true });
+receiptSchema.index({ imageAverageHash: 1, companyId: 1 }, { sparse: true });
+receiptSchema.index({ ocrTextHash: 1, companyId: 1 }, { sparse: true });
 
 export const Receipt = mongoose.model<IReceipt>('Receipt', receiptSchema);
 

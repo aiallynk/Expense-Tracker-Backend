@@ -345,14 +345,20 @@ export const emitReceiptProcessed = (
     date?: string | null;
     total?: number | null;
     currency?: string | null;
+    invoiceId?: string | null;
+    invoice_number?: string | null;
+    notes?: string | null;
+    lineItems?: Array<{ description: string; amount: number }> | null;
     reason?: 'TIMEOUT' | 'UNREADABLE' | 'API_ERROR';
+    duplicateFlag?: 'POTENTIAL_DUPLICATE' | 'STRONG_DUPLICATE' | 'HARD_DUPLICATE' | null;
+    duplicateReason?: string | null;
   }
 ) => {
   emitToUser(userId, ReceiptEvent.PROCESSED, {
     ...data,
     receiptId, // Override receiptId from data to ensure consistency
   });
-  logger.debug(`Emitted receipt:processed to user ${userId}, receipt: ${receiptId}, status: ${data.status}`);
+  logger.debug(`Emitted receipt:processed to user ${userId}, receipt: ${receiptId}, status: ${data.status}, duplicateFlag: ${data.duplicateFlag || 'none'}`);
 };
 
 // Notification events

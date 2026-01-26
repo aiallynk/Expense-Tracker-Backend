@@ -52,9 +52,10 @@ const categorySchema = new Schema<ICategory>(
   }
 );
 
-// Indexes - name must be unique within a company (or globally for system categories)
-categorySchema.index({ companyId: 1, name: 1 }, { unique: true });
+// Indexes - allow duplicate category names within a company (categories are common across companies)
+// Removed unique constraint to allow duplicate category names
+categorySchema.index({ companyId: 1, name: 1 }); // Non-unique index for query performance
 categorySchema.index({ companyId: 1, status: 1 });
-categorySchema.index({ code: 1 }, { unique: true, sparse: true });
+categorySchema.index({ code: 1 }, { unique: true, sparse: true }); // Code remains unique if provided
 
 export const Category = mongoose.model<ICategory>('Category', categorySchema);

@@ -23,6 +23,8 @@ export interface OcrResult {
   lineItems?: Array<{ description: string; amount: number }>;
   notes?: string;
   confidence?: number;
+  invoice_number?: string;
+  invoiceId?: string;
 }
 
 export class OcrService {
@@ -315,27 +317,108 @@ export class OcrService {
       // Don't auto-update expenses - user must click submit to save
       // Expenses will only be created/updated when user explicitly saves them
 
-      // Run duplicate detection if expense exists and has required data
+      // Run duplicate detection immediately after OCR using extracted data
+      // This allows duplicate detection even before user saves the expense
       if (receiptDocUpdated && receiptDocUpdated.expenseId) {
         try {
           const expense = receiptDocUpdated.expenseId as any;
           const expenseId = (expense._id as mongoose.Types.ObjectId).toString();
           
-          // Check if expense has vendor and amount (required for duplicate detection)
-          if (expense.vendor && expense.amount) {
-            // Get companyId for scoped duplicate detection
-            const report = expense.reportId as any;
-            let companyId: mongoose.Types.ObjectId | undefined;
-            if (report && report.userId) {
-              const { User } = await import('../models/User');
-              const user = await User.findById(report.userId).select('companyId').exec();
-              companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+          // Get companyId for company-level duplicate detection
+          const report = expense.reportId as any;
+          let companyId: mongoose.Types.ObjectId | undefined;
+          if (report && report.userId) {
+            const { User } = await import('../models/User');
+            const user = await User.findById(report.userId).select('companyId').exec();
+            companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+          }
+          
+          // Import Expense model for updating
+          const { Expense } = await import('../models/Expense');
+          
+          // Update expense with OCR data temporarily for duplicate detection
+          // This ensures duplicate detection works even if expense doesn't have vendor/amount yet
+          const updateData: any = {};
+          if (result.vendor && !expense.vendor) {
+            updateData.vendor = result.vendor;
+          }
+          if (result.totalAmount && !expense.amount) {
+            updateData.amount = result.totalAmount;
+            updateData.originalAmount = result.totalAmount;
+          }
+          if (result.date && !expense.expenseDate && !expense.invoiceDate) {
+            // Parse date and set as expenseDate
+            try {
+              const dateStr = result.date;
+              if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+                const { DateUtils } = await import('../utils/dateUtils');
+                updateData.expenseDate = DateUtils.frontendDateToBackend(dateStr);
+                updateData.invoiceDate = DateUtils.frontendDateToBackend(dateStr);
+              }
+            } catch (dateError) {
+              logger.warn({ error: dateError, date: result.date }, 'OCR: Failed to parse date for duplicate detection');
             }
-            
-            // Run duplicate detection (non-blocking)
+          }
+          if (result.invoiceId || result.invoice_number) {
+            const invoiceId = (result.invoiceId || result.invoice_number || '').trim();
+            if (invoiceId && !expense.invoiceId) {
+              updateData.invoiceId = invoiceId;
+            }
+          }
+          
+          // Update expense with OCR data if we have any updates
+          if (Object.keys(updateData).length > 0) {
+            await Expense.findByIdAndUpdate(expenseId, updateData).exec();
+            logger.debug({ expenseId, updates: Object.keys(updateData) }, 'OCR: Updated expense with OCR data for duplicate detection');
+          }
+          
+          // Run duplicate detection with company-level scope
+          // Check if we have minimum required data (vendor and amount/date)
+          const hasVendor = updateData.vendor || expense.vendor;
+          const hasAmount = updateData.amount || expense.amount;
+          const hasDate = updateData.expenseDate || updateData.invoiceDate || expense.expenseDate || expense.invoiceDate;
+          
+          if (hasVendor && (hasAmount || hasDate)) {
             const { DuplicateDetectionService } = await import('./duplicateDetection.service');
-            await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
-            logger.debug({ expenseId, receiptId: receiptIdStr }, 'OCR: Duplicate detection completed after OCR');
+            const duplicateResult = await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
+            logger.info({ 
+              expenseId, 
+              receiptId: receiptIdStr,
+              duplicateFlag: duplicateResult.duplicateFlag,
+              duplicateReason: duplicateResult.duplicateReason,
+              companyId: companyId?.toString(),
+            }, 'OCR: Company-level duplicate detection completed after OCR');
+            
+            // Store duplicate result to include in socket event
+            (result as any).duplicateFlag = duplicateResult.duplicateFlag;
+            (result as any).duplicateReason = duplicateResult.duplicateReason;
+            
+            // Emit expense update event to notify frontend of duplicate flag
+            if (duplicateResult.duplicateFlag && report && report.userId) {
+              try {
+                const { emitExpenseUpdateToEmployee } = await import('../socket/realtimeEvents');
+                // Refetch expense with duplicate flag (Expense already imported above)
+                const updatedExpense = await Expense.findById(expenseId)
+                  .select('_id duplicateFlag duplicateReason vendor amount invoiceId invoiceDate')
+                  .exec();
+                if (updatedExpense) {
+                  emitExpenseUpdateToEmployee(report.userId.toString(), {
+                    _id: updatedExpense._id,
+                    duplicateFlag: updatedExpense.duplicateFlag,
+                    duplicateReason: updatedExpense.duplicateReason,
+                  });
+                }
+              } catch (emitError) {
+                logger.warn({ error: emitError }, 'OCR: Failed to emit expense update for duplicate flag');
+              }
+            }
+          } else {
+            logger.debug({ 
+              expenseId, 
+              hasVendor: !!hasVendor,
+              hasAmount: !!hasAmount,
+              hasDate: !!hasDate,
+            }, 'OCR: Skipping duplicate detection - insufficient data');
           }
         } catch (dupError) {
           // Non-blocking - log but don't fail OCR
@@ -345,6 +428,16 @@ export class OcrService {
 
       // Emit socket event for successful OCR completion
       if (userId && receiptIdStr) {
+        // Build notes from lineItems if available
+        let notes: string | null = null;
+        if (result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
+          notes = result.lineItems.map(item => `${item.description || ''}: ${item.amount || 0}`).join('\n');
+        }
+        
+        // Include duplicate flag in socket event if detected
+        const duplicateFlag = (result as any).duplicateFlag || null;
+        const duplicateReason = (result as any).duplicateReason || null;
+        
         emitReceiptProcessed(userId, receiptIdStr, {
           receiptId: receiptIdStr,
           status: 'COMPLETED',
@@ -352,6 +445,12 @@ export class OcrService {
           date: result.date || null,
           total: result.totalAmount || null,
           currency: result.currency || null,
+          invoiceId: result.invoiceId || result.invoice_number || null,
+          invoice_number: result.invoice_number || null,
+          notes: notes || result.notes || null,
+          lineItems: result.lineItems || null,
+          duplicateFlag: duplicateFlag,
+          duplicateReason: duplicateReason,
         });
       }
 
@@ -502,13 +601,29 @@ export class OcrService {
     _mimeType: string,
     model: string = getVisionModel()
   ): Promise<OcrResult> {
-    const prompt = `Extract receipt data. Return JSON only:
+    const prompt = `Extract receipt data from this image. Return JSON only:
 {
   "vendor": string | null,
   "date": string | null,
   "total": number | null,
-  "currency": string | null
+  "currency": string | null,
+  "invoice_number": string | null
 }
+
+IMPORTANT: For invoice_number, extract ANY of these if found:
+- Invoice ID / Invoice Number
+- UPI Ref No / UPI Reference Number
+- Transaction ID / Transaction Reference
+- Payment Reference / Payment ID
+- Bill Number / Bill No
+- Receipt Number / Receipt No
+- Order ID / Order Number
+- Any unique transaction identifier
+
+Extract the vendor name (merchant/recipient name).
+Extract the date in YYYY-MM-DD format.
+Extract the total amount as a number (without currency symbol).
+Extract currency code (INR, USD, etc.).
 
 If unreadable, return null. No explanations.`;
 
@@ -556,11 +671,37 @@ If unreadable, return null. No explanations.`;
       try {
         const parsed = JSON.parse(cleanedContent);
         // Map simplified OpenAI response format to our internal format
+        // Extract invoice number from multiple possible fields (including UPI Reference, Transaction ID, etc.)
+        const invoiceNumber = parsed.invoice_number || 
+                             parsed.invoiceId || 
+                             parsed.invoice_id || 
+                             parsed.invoiceNo || 
+                             parsed.invoice_no ||
+                             parsed.billNo ||
+                             parsed.bill_no ||
+                             parsed.upi_ref_no ||
+                             parsed.upi_reference_number ||
+                             parsed.upiRefNo ||
+                             parsed.transaction_id ||
+                             parsed.transactionId ||
+                             parsed.txn_id ||
+                             parsed.payment_reference ||
+                             parsed.paymentReference ||
+                             parsed.payment_id ||
+                             parsed.paymentId ||
+                             parsed.order_id ||
+                             parsed.orderId ||
+                             parsed.receipt_number ||
+                             parsed.receiptNumber ||
+                             null;
+        
         const result: OcrResult = {
           vendor: parsed.vendor || null,
           date: parsed.date || null,
           totalAmount: parsed.total || null,
           currency: parsed.currency || 'INR',
+          invoice_number: invoiceNumber,
+          invoiceId: invoiceNumber,
           confidence: 0.85,
         };
         

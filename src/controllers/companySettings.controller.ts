@@ -26,9 +26,21 @@ export class CompanySettingsController {
     const companyId = companyAdmin.companyId.toString();
     const settings = await CompanySettingsService.getSettingsByCompanyId(companyId);
 
+    // Fetch company roles for frontend (real-time roles)
+    // Only return CUSTOM roles, exclude SYSTEM roles
+    const { Role } = await import('../models/Role');
+    const roles = await Role.find({ 
+      companyId: companyAdmin.companyId, 
+      isActive: true,
+      type: 'CUSTOM' // Only custom/company roles, exclude system roles
+    }).sort({ name: 1 }).exec();
+
     res.status(200).json({
       success: true,
-      data: settings,
+      data: {
+        ...settings.toObject(),
+        roles, // Include roles in response for frontend
+      },
     });
   });
 

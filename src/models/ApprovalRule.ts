@@ -17,7 +17,8 @@ export interface IApprovalRule extends Document {
   companyId: mongoose.Types.ObjectId;
   triggerType: ApprovalRuleTriggerType;
   thresholdValue: number; // Amount or percentage depending on triggerType
-  approverRole: ApprovalRuleApproverRole;
+  approverRole?: ApprovalRuleApproverRole; // System role (for backward compatibility)
+  approverRoleId?: mongoose.Types.ObjectId; // Custom role from Role model (new)
   active: boolean;
   description?: string; // Human-readable description for admin UI
   createdAt: Date;
@@ -44,7 +45,12 @@ const approvalRuleSchema = new Schema<IApprovalRule>(
     approverRole: {
       type: String,
       enum: Object.values(ApprovalRuleApproverRole),
-      required: true,
+      required: false, // Now optional - can use approverRoleId instead
+    },
+    approverRoleId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Role',
+      required: false, // Optional - can use approverRole instead
     },
     active: {
       type: Boolean,
@@ -60,9 +66,21 @@ const approvalRuleSchema = new Schema<IApprovalRule>(
   }
 );
 
+// Validation: Either approverRole or approverRoleId must be provided
+approvalRuleSchema.pre('validate', function(next) {
+  if (!this.approverRole && !this.approverRoleId) {
+    return next(new Error('Either approverRole or approverRoleId must be provided'));
+  }
+  if (this.approverRole && this.approverRoleId) {
+    return next(new Error('Cannot specify both approverRole and approverRoleId'));
+  }
+  next();
+});
+
 // Indexes
 approvalRuleSchema.index({ companyId: 1, active: 1 });
 approvalRuleSchema.index({ companyId: 1, triggerType: 1 });
+approvalRuleSchema.index({ approverRoleId: 1 });
 
 export const ApprovalRule = mongoose.model<IApprovalRule>('ApprovalRule', approvalRuleSchema);
 

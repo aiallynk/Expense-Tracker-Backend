@@ -81,7 +81,9 @@ export class ExportService {
       .exec();
 
     if (!expenses || expenses.length === 0) {
-      throw new Error('No data available for selected filters');
+      const error: any = new Error('No expenses found in this report. Cannot export empty report.');
+      error.statusCode = 400;
+      throw error;
     }
 
     let buffer: Buffer;
@@ -792,13 +794,18 @@ export class ExportService {
     const isAdmin = ['ADMIN', 'SUPER_ADMIN', 'COMPANY_ADMIN'].includes(requestingUserRole);
     
     if (!isOwner && !isManager && !isAccountant && !isAdmin) {
-      throw new Error('Unauthorized to export this report');
+      const error: any = new Error('Unauthorized to export this report');
+      error.statusCode = 403;
+      throw error;
     }
 
     // Only allow export for approved/submitted reports (or draft if owner)
-    const allowedStatuses = ['SUBMITTED', 'APPROVED', 'MANAGER_APPROVED', 'BH_APPROVED'];
-    if (!isOwner && !allowedStatuses.includes(report.status)) {
-      throw new Error('Report must be submitted or approved to export');
+    // Company admins can export any report regardless of status
+    const allowedStatuses = ['SUBMITTED', 'APPROVED', 'MANAGER_APPROVED', 'BH_APPROVED', 'DRAFT'];
+    if (!isOwner && !isAdmin && !allowedStatuses.includes(report.status)) {
+      const error: any = new Error('Report must be submitted or approved to export');
+      error.statusCode = 400;
+      throw error;
     }
 
     const expenses = await Expense.find({ reportId, status: { $ne: ExpenseStatus.REJECTED } })

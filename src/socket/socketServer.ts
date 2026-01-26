@@ -31,6 +31,14 @@ export const initializeSocketServer = (httpServer: HTTPServer): SocketIOServer =
     pingTimeout: 60000, // 60 seconds
     pingInterval: 25000, // 25 seconds
     allowEIO3: true, // Allow Engine.IO v3 clients for compatibility
+    // Add connection timeout to prevent hanging connections
+    connectTimeout: 45000, // 45 seconds
+    // Enable transports
+    transports: ['websocket', 'polling'],
+    // Allow upgrade from polling to websocket
+    allowUpgrades: true,
+    // Enable perMessageDeflate for better performance
+    perMessageDeflate: true,
   });
 
   // Authentication middleware for socket connections

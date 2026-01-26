@@ -539,6 +539,11 @@ export class ReportsService {
             else if (action === 'rejected') mappedAction = 'reject';
             else if (action === 'changes_requested') mappedAction = 'request_changes';
             
+            // Check if this approver is an additional approver from the report's approvers array
+            const reportApprover = (report.approvers || []).find(
+              (a: any) => a.level === level.levelNumber && a.isAdditionalApproval === true
+            );
+            
             approvalChain.push({
               level: level.levelNumber,
               step: stepName,
@@ -551,7 +556,9 @@ export class ReportsService {
               decidedAt: decidedAt,
               comment: comment, // Frontend expects 'comment'
               action: mappedAction, // Frontend expects 'approve', 'reject', 'request_changes'
-              isAdditionalApproval: false
+              isAdditionalApproval: reportApprover ? true : false,
+              triggerReason: reportApprover?.triggerReason || null,
+              approvalRuleId: reportApprover?.approvalRuleId || null
             });
           }
         }
@@ -957,18 +964,30 @@ export class ReportsService {
     }
 
     // STEP 4: Evaluate additional approval rules (budget-based)
+    // Additional approvers are added AFTER L1 and L2 (or after the last normal approver if L3-L5 exist)
     if (reportUser.companyId) {
       const additionalApprovers = await this.evaluateAdditionalApprovalRules(report, reportUser.companyId);
 
-      // Insert additional approvers after the last normal approver
-      const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
+      if (additionalApprovers.length > 0) {
+        // Find the level after which to insert additional approvers
+        // Ensure they come after at least L2 (level 2)
+        const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
+        const insertAfterLevel = Math.max(maxLevel, 2); // At minimum, insert after L2
 
-      additionalApprovers.forEach((additionalApprover, index) => {
-        approvers.push({
-          ...additionalApprover,
-          level: maxLevel + index + 1, // Ensure additional approvals come after normal approvals
+        additionalApprovers.forEach((additionalApprover, index) => {
+          approvers.push({
+            ...additionalApprover,
+            level: insertAfterLevel + index + 1, // Ensure additional approvals come after L2 (or last normal approver)
+          });
         });
-      });
+
+        logger.info({
+          reportId: report._id,
+          additionalApproversCount: additionalApprovers.length,
+          insertAfterLevel,
+          totalApprovers: approvers.length,
+        }, 'Additional approvers added after L2');
+      }
     }
 
     // STEP 5: Fallback - if no approvers found, assign to ADMIN or COMPANY_ADMIN
@@ -1066,7 +1085,8 @@ export class ReportsService {
         if (shouldTrigger) {
           const approver = await this.findAdditionalApprover(
             companyId,
-            rule.approverRole
+            rule.approverRole,
+            rule.approverRoleId
           );
 
           if (approver) {
@@ -1076,10 +1096,29 @@ export class ReportsService {
             );
 
             if (!isDuplicate) {
+              // Get role name - if custom role is specified, get the role name from Role model
+              let roleName = approver.role; // Default to user's system role
+              if (rule.approverRoleId) {
+                const { Role } = await import('../models/Role');
+                const customRole = await Role.findById(rule.approverRoleId).select('name').exec();
+                if (customRole && customRole.name) {
+                  roleName = customRole.name; // Use custom role name
+                }
+              } else if (rule.approverRole) {
+                // Map system role enum to readable name
+                const roleMap: Record<ApprovalRuleApproverRole, string> = {
+                  [ApprovalRuleApproverRole.ADMIN]: 'Admin',
+                  [ApprovalRuleApproverRole.BUSINESS_HEAD]: 'Business Head',
+                  [ApprovalRuleApproverRole.ACCOUNTANT]: 'Accountant',
+                  [ApprovalRuleApproverRole.COMPANY_ADMIN]: 'Company Admin',
+                };
+                roleName = roleMap[rule.approverRole] || approver.role;
+              }
+              
               additionalApprovers.push({
                 level: 0, // Will be set correctly in computeApproverChain
                 userId: approver._id as mongoose.Types.ObjectId,
-                role: approver.role,
+                role: roleName, // Use the resolved role name (custom role name or system role)
                 isAdditionalApproval: true,
                 approvalRuleId: rule._id as mongoose.Types.ObjectId,
                 triggerReason: triggerReason || rule.description || 'Budget oversight approval required',
@@ -1098,33 +1137,51 @@ export class ReportsService {
 
   /**
    * Find an approver with the specified role for additional approvals
+   * Supports both system roles (approverRole) and custom roles (approverRoleId)
    */
   static async findAdditionalApprover(
     companyId: mongoose.Types.ObjectId,
-    approverRole: ApprovalRuleApproverRole
+    approverRole?: ApprovalRuleApproverRole,
+    approverRoleId?: mongoose.Types.ObjectId
   ): Promise<any> {
-    // Map ApprovalRuleApproverRole to UserRole
-    const roleMap: Record<ApprovalRuleApproverRole, UserRole[]> = {
-      [ApprovalRuleApproverRole.ADMIN]: [UserRole.ADMIN],
-      [ApprovalRuleApproverRole.BUSINESS_HEAD]: [UserRole.BUSINESS_HEAD],
-      [ApprovalRuleApproverRole.ACCOUNTANT]: [UserRole.ACCOUNTANT],
-      [ApprovalRuleApproverRole.COMPANY_ADMIN]: [UserRole.COMPANY_ADMIN],
-    };
+    // If custom role is specified, find users with that custom role
+    if (approverRoleId) {
+      const approver = await User.findOne({
+        companyId,
+        roles: approverRoleId, // User has this custom role in their roles array
+        status: 'ACTIVE',
+      }).populate('roles').exec();
 
-    const targetRoles = roleMap[approverRole] || [];
-
-    if (targetRoles.length === 0) {
-      return null;
+      return approver;
     }
 
-    // Find first active user with the target role in the company
-    const approver = await User.findOne({
-      companyId,
-      role: { $in: targetRoles },
-      status: 'ACTIVE',
-    }).exec();
+    // Fallback to system role mapping (for backward compatibility)
+    if (approverRole) {
+      // Map ApprovalRuleApproverRole to UserRole
+      const roleMap: Record<ApprovalRuleApproverRole, UserRole[]> = {
+        [ApprovalRuleApproverRole.ADMIN]: [UserRole.ADMIN],
+        [ApprovalRuleApproverRole.BUSINESS_HEAD]: [UserRole.BUSINESS_HEAD],
+        [ApprovalRuleApproverRole.ACCOUNTANT]: [UserRole.ACCOUNTANT],
+        [ApprovalRuleApproverRole.COMPANY_ADMIN]: [UserRole.COMPANY_ADMIN],
+      };
 
-    return approver;
+      const targetRoles = roleMap[approverRole] || [];
+
+      if (targetRoles.length === 0) {
+        return null;
+      }
+
+      // Find first active user with the target role in the company
+      const approver = await User.findOne({
+        companyId,
+        role: { $in: targetRoles },
+        status: 'ACTIVE',
+      }).exec();
+
+      return approver;
+    }
+
+    return null;
   }
 
   static async submitReport(id: string, userId: string, data?: { advanceCashId?: string; advanceAmount?: number }): Promise<IExpenseReport> {
@@ -1231,6 +1288,13 @@ export class ReportsService {
     // Use the NEW Approval Matrix System
     if (reportUser && reportUser.companyId) {
       try {
+        // CRITICAL: Compute additional approvers from approval rules BEFORE clearing approvers array
+        // This ensures additional approvers are saved even when using ApprovalMatrix
+        const additionalApprovers = await this.evaluateAdditionalApprovalRules(
+          report,
+          reportUser.companyId as mongoose.Types.ObjectId
+        );
+        
         // Initiate approval using the ApprovalService (Matrix-based)
         const approvalInstance = await ApprovalService.initiateApproval(
           reportUser.companyId.toString(),
@@ -1245,7 +1309,8 @@ export class ReportsService {
           userId,
           approvalInstanceId: approvalInstance._id,
           currentLevel: approvalInstance.currentLevel,
-          status: approvalInstance.status
+          status: approvalInstance.status,
+          additionalApproversCount: additionalApprovers.length
         }, 'Approval instance created via ApprovalService');
 
         // Set initial status based on approval instance status
@@ -1259,8 +1324,49 @@ export class ReportsService {
           report.status = ExpenseReportStatus.SUBMITTED;
         }
 
-        // Clear the old approvers array since we're using ApprovalInstance now
-        report.approvers = [];
+        // CRITICAL: Save additional approvers to report even when using ApprovalMatrix
+        // This allows the approval UI to show additional approver remarks
+        // Additional approvers are added after L2 (or after last normal approver)
+        if (additionalApprovers.length > 0) {
+          // Get the max level from ApprovalMatrix to determine where to insert additional approvers
+          const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
+          const matrix = await ApprovalMatrix.findOne({ 
+            companyId: reportUser.companyId, 
+            isActive: true 
+          }).exec();
+          
+          let maxLevel = 2; // Default to L2
+          if (matrix && matrix.levels) {
+            const enabledLevels = matrix.levels
+              .filter((l: any) => l.enabled !== false)
+              .map((l: any) => l.levelNumber);
+            if (enabledLevels.length > 0) {
+              maxLevel = Math.max(...enabledLevels);
+            }
+          }
+          
+          const insertAfterLevel = Math.max(maxLevel, 2); // At minimum, insert after L2
+          
+          // Set approvers array with additional approvers (for UI display and notifications)
+          report.approvers = additionalApprovers.map((additionalApprover, index) => ({
+            ...additionalApprover,
+            level: insertAfterLevel + index + 1, // Ensure additional approvals come after L2 (or last normal approver)
+          }));
+          
+          logger.info({
+            reportId: id,
+            additionalApproversCount: additionalApprovers.length,
+            insertAfterLevel,
+            approvers: report.approvers.map((a: any) => ({
+              level: a.level,
+              role: a.role,
+              triggerReason: a.triggerReason
+            }))
+          }, 'Additional approvers saved to report for ApprovalMatrix flow');
+        } else {
+          // No additional approvers - clear the array
+          report.approvers = [];
+        }
 
       } catch (error: any) {
         logger.error({
@@ -1523,6 +1629,15 @@ export class ReportsService {
         // Don't fail report rejection if voucher reversal fails, but log the error
         // The report will still be rejected, but vouchers may need manual correction
       }
+
+      // Release receipt hashes for all expenses in rejected report
+      try {
+        const { ReceiptDuplicateDetectionService } = await import('./receiptDuplicateDetection.service');
+        await ReceiptDuplicateDetectionService.releaseReceiptHashesForReport(id);
+      } catch (error) {
+        logger.error({ error, reportId: id }, 'Failed to release receipt hashes for rejected report');
+        // Don't fail report rejection if hash release fails
+      }
     } else if (action === 'approve') {
       // Check if this is the last approver
       const totalLevels = Math.max(...report.approvers.map(a => a.level));
@@ -1688,6 +1803,17 @@ export class ReportsService {
     }
 
     const saved = await report.save();
+
+    // If report is rejected, release receipt hashes to allow resubmission
+    if (newStatus === ExpenseReportStatus.REJECTED) {
+      try {
+        const { ReceiptDuplicateDetectionService } = await import('./receiptDuplicateDetection.service');
+        await ReceiptDuplicateDetectionService.releaseReceiptHashesForReport(id);
+      } catch (error) {
+        logger.error({ error, reportId: id }, 'Failed to release receipt hashes for rejected report');
+        // Don't fail report rejection if hash release fails
+      }
+    }
 
     // If report is approved, approve all expenses in the report and emit real-time events
     if (newStatus === ExpenseReportStatus.APPROVED) {

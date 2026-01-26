@@ -13,6 +13,8 @@ import { getPresignedUploadUrl, getObjectUrl, getPresignedDownloadUrl, uploadFil
 
 
 import { OcrService } from './ocr.service';
+import { ReceiptHashService } from './receiptHash.service';
+import { ReceiptDuplicateDetectionService } from './receiptDuplicateDetection.service';
 
 import { logger } from '@/config/logger';
 
@@ -164,6 +166,13 @@ export class ReceiptsService {
     // Mark upload as confirmed and set status to PROCESSING
     receipt.uploadConfirmed = true;
     receipt.status = ReceiptStatus.PROCESSING;
+    
+    // Get companyId from user for receipt-level duplicate detection
+    const userForCompany = await User.findById(userId).select('companyId').exec();
+    if (userForCompany && userForCompany.companyId) {
+      receipt.companyId = userForCompany.companyId as mongoose.Types.ObjectId;
+    }
+    
     await receipt.save();
 
     // Small delay to ensure S3 upload has fully propagated (non-blocking, runs in background)
@@ -273,6 +282,67 @@ export class ReceiptsService {
       }, 'OCR queue error');
       // Don't fail the confirm upload if OCR queue fails - receipt is still uploaded
     }
+
+    // Generate receipt hashes for duplicate detection (non-blocking, runs in background)
+    // This happens after S3 upload is confirmed
+    setImmediate(async () => {
+      try {
+        const receiptForHashing = await Receipt.findById(receiptId).exec();
+        if (!receiptForHashing || !receiptForHashing.companyId) {
+          logger.debug({ receiptId }, 'ReceiptDuplicateDetectionService: Skipping hash generation - no companyId');
+          return;
+        }
+
+        // Download receipt image and generate hashes
+        const imageHashes = await ReceiptHashService.generateHashesForReceipt(
+          receiptForHashing.storageKey,
+          receiptForHashing.mimeType
+        );
+
+        if (imageHashes) {
+          // Update receipt with image hashes
+          await Receipt.findByIdAndUpdate(receiptId, {
+            imagePerceptualHash: imageHashes.perceptualHash,
+            imageAverageHash: imageHashes.averageHash,
+          }).exec();
+
+          logger.debug({ receiptId }, 'ReceiptDuplicateDetectionService: Image hashes generated');
+
+          // Run duplicate check (non-blocking, flag-only)
+          try {
+            const duplicateCheck = await ReceiptDuplicateDetectionService.checkReceiptDuplicate(
+              receiptId,
+              receiptForHashing.companyId as mongoose.Types.ObjectId
+            );
+
+            if (duplicateCheck.isDuplicate && duplicateCheck.matchType) {
+              logger.warn({ 
+                receiptId, 
+                matchType: duplicateCheck.matchType,
+                reason: duplicateCheck.reason 
+              }, 'ReceiptDuplicateDetectionService: Duplicate receipt detected on upload');
+
+              // If receipt is linked to an expense, update expense duplicate flag
+              if (receiptForHashing.expenseId) {
+                await Expense.findByIdAndUpdate(receiptForHashing.expenseId, {
+                  duplicateFlag: 'HARD_DUPLICATE',
+                  duplicateReason: duplicateCheck.reason || 'IMAGE',
+                }).exec();
+              }
+            }
+          } catch (dupError: any) {
+            logger.warn({ error: dupError.message, receiptId }, 
+              'ReceiptDuplicateDetectionService: Duplicate check failed (non-blocking)');
+          }
+        } else {
+          logger.warn({ receiptId }, 'ReceiptDuplicateDetectionService: Failed to generate image hashes');
+        }
+      } catch (hashError: any) {
+        logger.error({ error: hashError.message, receiptId }, 
+          'ReceiptDuplicateDetectionService: Error generating receipt hashes (non-blocking)');
+        // Don't throw - hash generation is non-critical
+      }
+    });
     
     // Return receipt with OCR job info
     // Refresh receipt to ensure ocrJobId is populated

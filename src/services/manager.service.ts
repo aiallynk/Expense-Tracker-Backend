@@ -896,6 +896,15 @@ export class ManagerService {
     expense.managerComment = comment;
     await expense.save();
 
+    // Release receipt hashes to allow resubmission
+    try {
+      const { ReceiptDuplicateDetectionService } = await import('./receiptDuplicateDetection.service');
+      await ReceiptDuplicateDetectionService.releaseReceiptHashes(expenseId);
+    } catch (error) {
+      logger.error({ error, expenseId }, 'Failed to release receipt hashes for rejected expense');
+      // Don't fail expense rejection if hash release fails
+    }
+
     // Update report status to CHANGES_REQUESTED so employee knows to make changes
     if (report.status === ExpenseReportStatus.SUBMITTED) {
       await ExpenseReport.findByIdAndUpdate(report._id, {

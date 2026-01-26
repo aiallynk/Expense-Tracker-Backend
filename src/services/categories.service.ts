@@ -59,19 +59,129 @@ export class CategoriesService {
   ): Promise<ICategory> {
     logger.debug({ data }, 'Creating category');
     
+    // Check if a category with the same name already exists for this company
+    // Use case-insensitive matching to prevent duplicates
+    const existingCategory = await this.getCategoryByName(data.name.trim(), data.companyId);
+    
+    if (existingCategory) {
+      logger.info({ 
+        categoryId: existingCategory._id, 
+        companyId: data.companyId, 
+        name: data.name 
+      }, 'Category already exists, returning existing category');
+      return existingCategory;
+    }
+    
+    // If code is provided, check if a category with that code already exists
+    // Code has a unique sparse index, so we need to handle this gracefully
+    if (data.code?.trim()) {
+      const codeUpper = data.code.trim().toUpperCase();
+      const existingByCode = await Category.findOne({ 
+        code: codeUpper,
+        companyId: data.companyId ? new mongoose.Types.ObjectId(data.companyId) : { $exists: false }
+      }).exec();
+      
+      if (existingByCode) {
+        logger.warn({ 
+          companyId: data.companyId, 
+          code: codeUpper,
+          existingCategoryId: existingByCode._id
+        }, 'Category with this code already exists, but name is different - allowing creation with different code');
+        // Continue with creation but use a modified code to avoid conflict
+        // Or we could return the existing category - but since name is different, create new one
+      }
+    }
+    
     const category = new Category({
-      name: data.name,
-      code: data.code,
-      description: data.description,
+      name: data.name.trim(),
+      code: data.code?.trim().toUpperCase() || undefined,
+      description: data.description?.trim() || undefined,
       companyId: data.companyId ? new mongoose.Types.ObjectId(data.companyId) : undefined,
       status: CategoryStatus.ACTIVE,
       isCustom: true,
     });
     
-    const saved = await category.save();
-    logger.info({ categoryId: saved._id, companyId: data.companyId, name: data.name }, 'Category created successfully');
-    
-    return saved;
+    try {
+      const saved = await category.save();
+      logger.info({ categoryId: saved._id, companyId: data.companyId, name: data.name }, 'Category created successfully');
+      return saved;
+    } catch (error: any) {
+      // Handle duplicate key error (E11000) - may occur if unique index still exists in database
+      // If we still get a duplicate error despite checking, try to find and return the existing category
+      if (error.code === 11000 || (error.name === 'MongoServerError' && error.message?.includes('duplicate key'))) {
+        logger.warn({ 
+          companyId: data.companyId, 
+          categoryName: data.name,
+          categoryCode: data.code,
+          error: error.message 
+        }, 'Category creation failed - duplicate key error, attempting to find existing category');
+        
+        // Try to find by name first
+        const existingByName = await this.getCategoryByName(data.name.trim(), data.companyId);
+        if (existingByName) {
+          logger.info({ 
+            categoryId: existingByName._id, 
+            companyId: data.companyId, 
+            name: data.name 
+          }, 'Found existing category by name after duplicate key error');
+          return existingByName;
+        }
+        
+        // If code was provided and caused the conflict, try to find by code
+        if (data.code?.trim()) {
+          const existingByCode = await Category.findOne({ 
+            code: data.code.trim().toUpperCase(),
+            companyId: data.companyId ? new mongoose.Types.ObjectId(data.companyId) : { $exists: false }
+          }).exec();
+          
+          if (existingByCode) {
+            logger.info({ 
+              categoryId: existingByCode._id, 
+              companyId: data.companyId, 
+              code: data.code 
+            }, 'Found existing category by code after duplicate key error');
+            return existingByCode;
+          }
+        }
+        
+        // If we can't find it, create without code if code was the issue
+        if (data.code?.trim() && error.message?.includes('code')) {
+          logger.info({ 
+            companyId: data.companyId, 
+            name: data.name,
+            code: data.code 
+          }, 'Retrying category creation without code due to code conflict');
+          
+          const categoryWithoutCode = new Category({
+            name: data.name.trim(),
+            code: undefined, // Don't set code if it conflicts
+            description: data.description?.trim() || undefined,
+            companyId: data.companyId ? new mongoose.Types.ObjectId(data.companyId) : undefined,
+            status: CategoryStatus.ACTIVE,
+            isCustom: true,
+          });
+          
+          try {
+            const saved = await categoryWithoutCode.save();
+            logger.info({ categoryId: saved._id, companyId: data.companyId, name: data.name }, 'Category created successfully without code');
+            return saved;
+          } catch (retryError: any) {
+            // If still fails, throw original error
+            logger.error({ error: retryError, originalError: error }, 'Failed to create category even without code');
+          }
+        }
+        
+        // If we can't resolve it, re-throw with a clearer message
+        const duplicateError: any = new Error(
+          'A category with this name or code already exists. Please use a different name or code.'
+        );
+        duplicateError.statusCode = 400;
+        duplicateError.code = 'DUPLICATE_CATEGORY';
+        throw duplicateError;
+      }
+      // Re-throw other errors
+      throw error;
+    }
   }
 
   static async updateCategory(
