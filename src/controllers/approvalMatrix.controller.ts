@@ -4,6 +4,8 @@ import mongoose from 'mongoose';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { ApprovalMatrix } from '../models/ApprovalMatrix';
+import { CostCentre } from '../models/CostCentre';
+import { Project } from '../models/Project';
 import { Role } from '../models/Role';
 import { User } from '../models/User';
 import { ApprovalService } from '../services/ApprovalService';
@@ -140,36 +142,53 @@ export class ApprovalMatrixController {
     });
 
     // ================= ACTIONS =================
+    // Single resolution for "current user id" so pending, history, and approve/reject/request-changes all use the same value.
+    private static getCurrentUserId(req: AuthRequest): string | null {
+        const raw = req.user?.id ?? (req.user as any)?._id;
+        return raw != null ? String(raw) : null;
+    }
 
     static approveRequest = asyncHandler(async (req: AuthRequest, res: Response) => {
         const instanceId = Array.isArray(req.params.instanceId) ? req.params.instanceId[0] : req.params.instanceId;
         const { comment } = req.body;
-        const userId = req.user!.id;
+        const userId = ApprovalMatrixController.getCurrentUserId(req);
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(401).json({ success: false, message: 'Invalid user context for approval action' });
+        }
 
         const result = await ApprovalService.processAction(instanceId, userId, 'APPROVE', comment);
-        res.json({ success: true, data: result });
+        return res.json({ success: true, data: result });
     });
 
     static rejectRequest = asyncHandler(async (req: AuthRequest, res: Response) => {
         const instanceId = Array.isArray(req.params.instanceId) ? req.params.instanceId[0] : req.params.instanceId;
         const { comment } = req.body;
-        const userId = req.user!.id;
+        const userId = ApprovalMatrixController.getCurrentUserId(req);
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(401).json({ success: false, message: 'Invalid user context for approval action' });
+        }
 
         const result = await ApprovalService.processAction(instanceId, userId, 'REJECT', comment);
-        res.json({ success: true, data: result });
+        return res.json({ success: true, data: result });
     });
 
     static requestChanges = asyncHandler(async (req: AuthRequest, res: Response) => {
         const instanceId = Array.isArray(req.params.instanceId) ? req.params.instanceId[0] : req.params.instanceId;
         const { comment } = req.body;
-        const userId = req.user!.id;
+        const userId = ApprovalMatrixController.getCurrentUserId(req);
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(401).json({ success: false, message: 'Invalid user context for approval action' });
+        }
 
         const result = await ApprovalService.processAction(instanceId, userId, 'REQUEST_CHANGES', comment);
-        res.json({ success: true, data: result });
+        return res.json({ success: true, data: result });
     });
 
     static getPendingApprovals = asyncHandler(async (req: AuthRequest, res: Response) => {
-        const userId = req.user!.id;
+        const userId = ApprovalMatrixController.getCurrentUserId(req);
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(401).json({ success: false, message: 'Invalid user context for pending approvals' });
+        }
         const { page, limit, startDate, endDate } = req.query;
 
         const options: any = {};
@@ -179,21 +198,30 @@ export class ApprovalMatrixController {
         if (endDate) options.endDate = endDate as string;
 
         const result = await ApprovalService.getPendingApprovalsForUser(userId, options);
-        res.json({ success: true, data: result.data, total: result.total });
+        return res.json({ success: true, data: result.data, total: result.total });
     });
 
     // ================= APPROVAL HISTORY =================
 
     static getApprovalHistory = asyncHandler(async (req: AuthRequest, res: Response) => {
-        const userId = req.user!.id;
+        const userId = ApprovalMatrixController.getCurrentUserId(req);
+        if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
+            return res.status(401).json({ success: false, message: 'Invalid user context for approval history' });
+        }
         const { actionType, employee, project, costCentre, startDate, endDate, page = 1, limit = 20 } = req.query;
+
+        // Only allow APPROVED, REJECTED, CHANGES_REQUESTED for history; reject invalid actionType
+        const allowedActionTypes = ['APPROVED', 'REJECTED', 'CHANGES_REQUESTED'];
+        if (actionType && !allowedActionTypes.includes(String(actionType).toUpperCase())) {
+            return res.status(400).json({ success: false, message: 'actionType must be one of: APPROVED, REJECTED, CHANGES_REQUESTED' });
+        }
 
         const filters: any = {
             actedBy: new mongoose.Types.ObjectId(userId),
         };
 
         if (actionType) {
-            filters.actionType = actionType;
+            filters.actionType = String(actionType).toUpperCase();
         }
 
         if (employee) {
@@ -201,11 +229,29 @@ export class ApprovalMatrixController {
         }
 
         if (project) {
-            filters.projectId = new mongoose.Types.ObjectId(project as string);
+            const projectStr = project as string;
+            if (mongoose.Types.ObjectId.isValid(projectStr) && projectStr.length === 24) {
+                filters.projectId = new mongoose.Types.ObjectId(projectStr);
+            } else {
+                const companyId = (req.user?.companyId as string) || (await User.findById(userId).select('companyId').then((u) => u?.companyId?.toString()));
+                const proj = companyId
+                    ? await Project.findOne({ name: projectStr, companyId: new mongoose.Types.ObjectId(companyId) }).select('_id').lean()
+                    : await Project.findOne({ name: projectStr }).select('_id').lean();
+                if (proj?._id) filters.projectId = proj._id;
+            }
         }
 
         if (costCentre) {
-            filters.costCentreId = new mongoose.Types.ObjectId(costCentre as string);
+            const ccStr = costCentre as string;
+            if (mongoose.Types.ObjectId.isValid(ccStr) && ccStr.length === 24) {
+                filters.costCentreId = new mongoose.Types.ObjectId(ccStr);
+            } else {
+                const companyId = (req.user?.companyId as string) || (await User.findById(userId).select('companyId').then((u) => u?.companyId?.toString()));
+                const cc = companyId
+                    ? await CostCentre.findOne({ name: ccStr, companyId: new mongoose.Types.ObjectId(companyId) }).select('_id').lean()
+                    : await CostCentre.findOne({ name: ccStr }).select('_id').lean();
+                if (cc?._id) filters.costCentreId = cc._id;
+            }
         }
 
         if (startDate && endDate) {
@@ -216,12 +262,15 @@ export class ApprovalMatrixController {
             };
         }
 
+        const pageNum = Math.max(1, parseInt(String(page), 10) || 1);
+        const limitNum = Math.min(1000, Math.max(1, parseInt(String(limit), 10) || 20));
         const history = await ApprovalService.getApprovalHistory(filters, employee as string, {
-            page: parseInt(page as string),
-            limit: parseInt(limit as string),
+            page: pageNum,
+            limit: limitNum,
         });
-
-        res.json({ success: true, data: history });
+        // History endpoint: actions by current user (APPROVED/REJECTED/CHANGES_REQUESTED). Never default actionType to PENDING.
+        // Response shape: { success: true, data: { data: array, pagination: { page, limit, total, pages } } }
+        return res.json({ success: true, data: history });
     });
 
 }

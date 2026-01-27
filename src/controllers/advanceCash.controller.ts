@@ -44,7 +44,16 @@ export class AdvanceCashController {
     }
 
     const data = await AdvanceCashService.listEmployeeAdvances({ companyId, employeeId: userId });
-    res.status(200).json({ success: true, data });
+    // Normalize so EXHAUSTED never shows unused balance and remainingAmount = totalAmount - usedAmount
+    const normalized = (Array.isArray(data) ? data : []).map((v: any) => {
+      const doc = v.toObject ? v.toObject() : { ...v };
+      const total = doc.totalAmount ?? doc.amount ?? 0;
+      const used = doc.usedAmount ?? 0;
+      const remaining =
+        doc.status === 'EXHAUSTED' || doc.remainingAmount === 0 ? 0 : Math.max(0, total - used);
+      return { ...doc, remainingAmount: remaining, balance: remaining };
+    });
+    res.status(200).json({ success: true, data: normalized });
   });
 
   static getAvailableVouchers = asyncHandler(async (req: AuthRequest, res: Response) => {

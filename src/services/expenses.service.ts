@@ -535,14 +535,28 @@ export class ExpensesService {
     }
 
     const report = expense.reportId as any;
+    if (!report || !report._id) {
+      return null;
+    }
 
-    // Check access
-    if (
-      report.userId.toString() !== requestingUserId &&
-      requestingUserRole !== 'ADMIN' &&
-      requestingUserRole !== 'BUSINESS_HEAD'
-    ) {
-      throw new Error('Access denied');
+    // Check access: owner, ADMIN, BUSINESS_HEAD, or user who has acted as approver on this report
+    const isOwner = report.userId?.toString() === requestingUserId;
+    const isAdminOrBH = requestingUserRole === 'ADMIN' || requestingUserRole === 'BUSINESS_HEAD' || requestingUserRole === 'COMPANY_ADMIN';
+    if (!isOwner && !isAdminOrBH) {
+      const { ApprovalInstance } = await import('../models/ApprovalInstance');
+      const instance = await ApprovalInstance.findOne({
+        requestId: report._id,
+        'history.approverId': new mongoose.Types.ObjectId(requestingUserId),
+      })
+        .select('_id')
+        .lean()
+        .exec();
+      if (!instance) {
+        const err: any = new Error('Access denied');
+        err.statusCode = 403;
+        err.code = 'ACCESS_DENIED';
+        throw err;
+      }
     }
 
     // FORENSIC: Log raw expense from database (before transformation)
@@ -611,6 +625,20 @@ export class ExpensesService {
     // Filter by specific reportId if provided
     if (filters.reportId) {
       query.reportId = new mongoose.Types.ObjectId(filters.reportId);
+    } else if (filters.excludeRejectedReports) {
+      // Exclude expenses from rejected reports so dashboard/expenses totals don't count them; rejected-report expenses can be re-submitted
+      const nonRejectedReportIds = await ExpenseReport.find({
+        userId: new mongoose.Types.ObjectId(userId),
+        status: { $ne: ExpenseReportStatus.REJECTED },
+      })
+        .select('_id')
+        .lean()
+        .exec();
+      const ids = (nonRejectedReportIds || []).map((r: any) => r._id).filter(Boolean);
+      query.$or = [
+        { reportId: { $in: ids } },
+        { reportId: null },
+      ];
     }
     // Otherwise, show all expenses for the user (regardless of reportId)
     // This ensures expenses from phone and web are both visible

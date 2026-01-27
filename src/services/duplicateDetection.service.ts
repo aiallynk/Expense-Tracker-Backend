@@ -3,15 +3,16 @@
  *
  * IMPORTANT: This service performs COMPANY-WIDE duplicate detection.
  * - Checks expenses across ALL users within the same company
- * - Excludes REJECTED expenses and expenses from REJECTED/CANCELLED reports
+ * - Excludes REJECTED expenses and expenses from REJECTED reports (so rejected-report expenses
+ *   can be re-submitted; duplicates are only among DRAFT / PENDING / APPROVED)
  * - Does NOT expose other users' data - only sets duplicate flags
- * 
+ *
  * Primary data source priority: Receipt OCR / parsed invoice → parsed metadata → notes (fallback only).
  * Matching: vendor_name (normalized), amount (2 decimals), date (UTC ±1 day), invoice_id (optional).
  * Rules:
  * - Any 3 of { vendor, amount, date, invoice_id } match within same company → POTENTIAL_DUPLICATE
  * - invoice_id match within same company → STRONG_DUPLICATE
- * 
+ *
  * Stores duplicateFlag, duplicateReason on expense. Exposed to approver & company admin.
  * Users see warning: "This expense appears similar to another expense submitted in your company."
  */
@@ -133,20 +134,14 @@ export class DuplicateDetectionService {
         })
         .exec();
 
-      // Filter out expenses from REJECTED or CANCELLED reports
+      // Only consider duplicates among DRAFT / PENDING / APPROVED. Exclude REJECTED-report
+      // expenses so they can be re-created (same rule as runDuplicateCheck).
       const candidates = allCandidates.filter((candidate: any) => {
         const report = candidate.reportId;
         const reportStatus = report?.status;
         const expenseStatus = candidate.status;
-        
-        if (expenseStatus === 'REJECTED') {
-          return false;
-        }
-        
-        if (reportStatus === ExpenseReportStatus.REJECTED) {
-          return false;
-        }
-        
+        if (expenseStatus === 'REJECTED') return false;
+        if (reportStatus === ExpenseReportStatus.REJECTED) return false;
         return true;
       });
 
@@ -302,35 +297,24 @@ export class DuplicateDetectionService {
         ],
       };
 
-      // Find candidate expenses, then filter out those from rejected/cancelled reports
+      // Find candidate expenses, then filter out those from rejected reports
       const allCandidates = await Expense.find(baseQuery as any)
-        .select('_id vendor amount originalAmount expenseDate invoiceDate invoiceId currency originalCurrency reportId')
+        .select('_id vendor amount originalAmount expenseDate invoiceDate invoiceId currency originalCurrency reportId status')
         .populate({
           path: 'reportId',
           select: 'status',
         })
         .exec();
 
-      // Filter out expenses from REJECTED or CANCELLED reports
-      // Also exclude expenses with REJECTED status
-      // IMPORTANT: Include DRAFT expenses - they should be checked for duplicates
+      // Filter: only consider duplicates among DRAFT / PENDING / APPROVED.
+      // Exclude expenses in REJECTED reports so they can be re-created.
       const candidates = allCandidates.filter((candidate: any) => {
         const report = candidate.reportId;
         const reportStatus = report?.status;
         const expenseStatus = candidate.status;
-        
-        // Exclude if expense is rejected
-        if (expenseStatus === 'REJECTED') {
-          return false;
-        }
-        
-        // Exclude if report is rejected or cancelled
-        // But allow DRAFT reports - expenses in draft reports should be checked for duplicates
-        if (reportStatus === ExpenseReportStatus.REJECTED) {
-          return false;
-        }
-        
-        // Include all other expenses (DRAFT, SUBMITTED, APPROVED, etc.)
+
+        if (expenseStatus === 'REJECTED') return false;
+        if (reportStatus === ExpenseReportStatus.REJECTED) return false;
         return true;
       });
 

@@ -49,6 +49,13 @@ export class CompanySettingsService {
   }
 
   /**
+   * Validate selfApprovalPolicy value
+   */
+  static validateSelfApprovalPolicy(policy: string): policy is 'SKIP_SELF' | 'ALLOW_SELF' {
+    return policy === 'SKIP_SELF' || policy === 'ALLOW_SELF';
+  }
+
+  /**
    * Update company settings
    */
   static async updateSettings(
@@ -62,6 +69,10 @@ export class CompanySettingsService {
       if (!validation.valid) {
         throw new Error(validation.error);
       }
+    }
+
+    if (updates.selfApprovalPolicy !== undefined && !this.validateSelfApprovalPolicy(updates.selfApprovalPolicy)) {
+      throw new Error('selfApprovalPolicy must be SKIP_SELF or ALLOW_SELF');
     }
 
     let settings = await CompanySettings.findOne({ companyId });
@@ -95,6 +106,20 @@ export class CompanySettingsService {
     logger.info(`Company settings updated for company ${companyId} by user ${userId}`);
     
     return settings;
+  }
+
+  /**
+   * Update self-approval policy only (company admin only)
+   */
+  static async updateSelfApprovalPolicy(
+    companyId: string,
+    selfApprovalPolicy: 'SKIP_SELF' | 'ALLOW_SELF',
+    userId: string
+  ): Promise<ICompanySettings> {
+    if (!this.validateSelfApprovalPolicy(selfApprovalPolicy)) {
+      throw new Error('selfApprovalPolicy must be SKIP_SELF or ALLOW_SELF');
+    }
+    return this.updateSettings(companyId, { selfApprovalPolicy }, userId);
   }
 
   /**

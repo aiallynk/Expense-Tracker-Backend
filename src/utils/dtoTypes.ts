@@ -373,6 +373,7 @@ export const expenseFiltersSchema = paginationBaseSchema.extend({
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), // YYYY-MM-DD format
   q: z.string().optional(),
   reportId: z.string().optional(),
+  excludeRejectedReports: z.coerce.boolean().optional(), // When true, exclude expenses whose report status is REJECTED (so dashboard/expenses totals don't count them)
 }).transform((data) => {
   // Use limit if provided, otherwise use pageSize, default to 20 if neither provided
   const pageSize = data.limit ?? data.pageSize ?? 20;
@@ -386,6 +387,7 @@ export const expenseFiltersSchema = paginationBaseSchema.extend({
     to: data.to,
     q: data.q,
     reportId: data.reportId,
+    excludeRejectedReports: data.excludeRejectedReports,
   };
 });
 

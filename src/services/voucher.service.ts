@@ -353,10 +353,10 @@ export class VoucherService {
       // Update voucher
       voucher.usedAmount = (voucher.usedAmount || 0) + amount;
       voucher.remainingAmount = voucher.remainingAmount - amount;
-      
-      // Update status based on remaining amount
+      // Enforce invariant: remainingAmount = totalAmount - usedAmount
+      voucher.remainingAmount = Math.max(0, (voucher.totalAmount ?? 0) - voucher.usedAmount);
       voucher.status = this.calculateVoucherStatus(voucher);
-      
+
       await voucher.save({ session });
 
       // Update report: legacy fields + appliedVouchers (plan §2.2)
@@ -518,6 +518,8 @@ export class VoucherService {
         // Restore voucher amounts
         voucher.remainingAmount = (voucher.remainingAmount || 0) + usage.amountUsed;
         voucher.usedAmount = Math.max(0, (voucher.usedAmount || 0) - usage.amountUsed);
+        // Enforce invariant: remainingAmount = totalAmount - usedAmount
+        voucher.remainingAmount = Math.max(0, (voucher.totalAmount ?? 0) - voucher.usedAmount);
         voucher.status = this.calculateVoucherStatus(voucher);
 
         await voucher.save({ session });
@@ -604,9 +606,15 @@ export class VoucherService {
   }
 
   /**
-   * Get voucher details with usage history and ledger entries
+   * Get voucher details with usage history and ledger entries.
+   * If any usage is APPLIED but the linked report is REJECTED, reverses those usages
+   * so the voucher balance is restored (reconciliation for legacy data).
+   * @param reconciledByUserId - optional; used as reversedBy when reconciling rejected-report usages
    */
-  static async getVoucherDetails(voucherId: string): Promise<{
+  static async getVoucherDetails(
+    voucherId: string,
+    reconciledByUserId?: string
+  ): Promise<{
     voucher: IAdvanceCash;
     usageHistory: IVoucherUsage[];
     ledgerEntries: any[];
@@ -615,7 +623,7 @@ export class VoucherService {
       throw new Error('Invalid voucher ID');
     }
 
-    const voucher = await AdvanceCash.findById(voucherId)
+    let voucher = await AdvanceCash.findById(voucherId)
       .populate('employeeId', 'name email')
       .populate('projectId', 'name code')
       .populate('costCentreId', 'name code')
@@ -626,11 +634,42 @@ export class VoucherService {
       throw new Error('Voucher not found');
     }
 
-    const usageHistory = await this.getVoucherUsageHistory(voucherId);
+    let usageHistory = await this.getVoucherUsageHistory(voucherId);
+
+    // Reconcile: reverse any APPLIED usages whose report is REJECTED (e.g. rejected before reversal was implemented)
+    const reportIdsToReverse = new Set<string>();
+    for (const u of usageHistory) {
+      if (u.status !== VoucherUsageStatus.APPLIED) continue;
+      const report = u.reportId as any;
+      if (report && typeof report === 'object' && report.status === 'REJECTED') {
+        const rid = report._id?.toString?.() || report.id?.toString?.();
+        if (rid) reportIdsToReverse.add(rid);
+      }
+    }
+    const reversedBy =
+      reconciledByUserId || (voucher.employeeId as any)?.toString?.() || voucher.employeeId?.toString?.();
+    for (const reportId of reportIdsToReverse) {
+      try {
+        await this.reverseVoucherUsageForReport(reportId, reversedBy, 'Reconciliation: report was rejected');
+      } catch (err: any) {
+        logger.error({ error: err, reportId, voucherId }, 'VoucherService.getVoucherDetails: failed to reconcile rejected-report usage');
+      }
+    }
+    if (reportIdsToReverse.size > 0) {
+      const refetched = await AdvanceCash.findById(voucherId)
+        .populate('employeeId', 'name email')
+        .populate('projectId', 'name code')
+        .populate('costCentreId', 'name code')
+        .populate('createdBy', 'name email')
+        .exec();
+      if (refetched) voucher = refetched;
+      usageHistory = await this.getVoucherUsageHistory(voucherId);
+    }
+
     const ledgerEntries = await LedgerService.getVoucherLedger(voucherId);
 
     return {
-      voucher,
+      voucher: voucher as IAdvanceCash,
       usageHistory,
       ledgerEntries,
     };

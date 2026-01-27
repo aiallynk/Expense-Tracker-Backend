@@ -438,6 +438,8 @@ export class AdvanceCashService {
             // Update both new and legacy fields
             adv.remainingAmount = available - use;
             adv.usedAmount = (adv.usedAmount || 0) + use;
+            // Enforce invariant: remainingAmount = totalAmount - usedAmount
+            adv.remainingAmount = Math.max(0, (adv.totalAmount ?? adv.amount ?? 0) - adv.usedAmount);
             adv.balance = adv.remainingAmount; // Sync legacy field
             if (adv.remainingAmount <= 0) {
               adv.remainingAmount = 0;
@@ -580,6 +582,8 @@ export class AdvanceCashService {
         // Update both new and legacy fields
         adv.remainingAmount = available - use;
         adv.usedAmount = (adv.usedAmount || 0) + use;
+        // Enforce invariant: remainingAmount = totalAmount - usedAmount
+        adv.remainingAmount = Math.max(0, (adv.totalAmount ?? adv.amount ?? 0) - adv.usedAmount);
         adv.balance = adv.remainingAmount; // Sync legacy field
         if (adv.remainingAmount <= 0) {
           adv.remainingAmount = 0;

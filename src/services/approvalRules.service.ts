@@ -12,6 +12,7 @@ export class ApprovalRulesService {
     try {
       const rules = await ApprovalRule.find({ companyId })
         .populate('approverRoleId', 'name description type')
+        .populate('approverUserId', 'name email')
         .sort({ createdAt: -1 })
         .exec();
       return rules;
@@ -31,6 +32,7 @@ export class ApprovalRulesService {
       thresholdValue: number;
       approverRole?: ApprovalRuleApproverRole; // Optional - can use approverRoleId instead
       approverRoleId?: string; // Optional - custom role ID
+      approverUserId?: string; // Optional - specific user when role has multiple users
       description?: string;
       active?: boolean;
     }
@@ -53,12 +55,18 @@ export class ApprovalRulesService {
         throw new Error('Either approverRole or approverRoleId must be provided');
       }
 
+      if (data.approverUserId) {
+        ruleData.approverUserId = new mongoose.Types.ObjectId(data.approverUserId);
+      }
+
       const rule = new ApprovalRule(ruleData);
       const saved = await rule.save();
       
-      // Populate role if approverRoleId is used
       if (saved.approverRoleId) {
         await saved.populate('approverRoleId');
+      }
+      if (saved.approverUserId) {
+        await saved.populate('approverUserId', 'name email');
       }
       
       return saved;
@@ -79,6 +87,7 @@ export class ApprovalRulesService {
       thresholdValue?: number;
       approverRole?: ApprovalRuleApproverRole;
       approverRoleId?: string; // New: custom role ID
+      approverUserId?: string | null; // Specific user when role has multiple users; null to clear
       description?: string;
       active?: boolean;
     }
@@ -100,20 +109,26 @@ export class ApprovalRulesService {
 
       // Handle approver role - can update to either system role or custom role
       if (data.approverRoleId !== undefined) {
-        // Setting custom role - clear system role
         rule.approverRoleId = new mongoose.Types.ObjectId(data.approverRoleId);
         rule.approverRole = undefined;
       } else if (data.approverRole !== undefined) {
-        // Setting system role - clear custom role
         rule.approverRole = data.approverRole;
         rule.approverRoleId = undefined;
       }
 
+      if (data.approverUserId !== undefined) {
+        rule.approverUserId = data.approverUserId
+          ? new mongoose.Types.ObjectId(data.approverUserId)
+          : undefined;
+      }
+
       const saved = await rule.save();
       
-      // Populate role if approverRoleId is used
       if (saved.approverRoleId) {
         await saved.populate('approverRoleId');
+      }
+      if (saved.approverUserId) {
+        await saved.populate('approverUserId', 'name email');
       }
       
       return saved;

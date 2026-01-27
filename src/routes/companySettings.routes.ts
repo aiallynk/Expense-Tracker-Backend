@@ -26,6 +26,9 @@ router.get('/settings', CompanySettingsController.getSettings);
 // PUT /api/v1/company-admin/settings - Update company settings
 router.put('/settings', CompanySettingsController.updateSettings);
 
+// PUT /api/v1/company-admin/settings/self-approval - Update self-approval policy only
+router.put('/settings/self-approval', CompanySettingsController.updateSelfApprovalPolicy);
+
 // POST /api/v1/company-admin/settings/reset - Reset settings to default
 router.post('/settings/reset', CompanySettingsController.resetSettings);
 

@@ -19,6 +19,7 @@ export interface IApprovalRule extends Document {
   thresholdValue: number; // Amount or percentage depending on triggerType
   approverRole?: ApprovalRuleApproverRole; // System role (for backward compatibility)
   approverRoleId?: mongoose.Types.ObjectId; // Custom role from Role model (new)
+  approverUserId?: mongoose.Types.ObjectId; // Specific user when role has multiple users
   active: boolean;
   description?: string; // Human-readable description for admin UI
   createdAt: Date;
@@ -51,6 +52,11 @@ const approvalRuleSchema = new Schema<IApprovalRule>(
       type: Schema.Types.ObjectId,
       ref: 'Role',
       required: false, // Optional - can use approverRole instead
+    },
+    approverUserId: {
+      type: Schema.Types.ObjectId,
+      ref: 'User',
+      required: false, // When role has multiple users, specifies which user is the approver
     },
     active: {
       type: Boolean,

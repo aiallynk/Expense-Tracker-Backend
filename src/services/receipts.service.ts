@@ -411,18 +411,25 @@ export class ReceiptsService {
       const report = expense.reportId as any;
 
       if (report) {
-        // Check access via report
-        if (
-          report.userId.toString() !== requestingUserId &&
-          requestingUserRole !== 'ADMIN' &&
-          requestingUserRole !== 'BUSINESS_HEAD'
-        ) {
-          logger.warn({
-            receiptId: id,
-            requestingUserId,
-            reportUserId: report.userId.toString(),
-          }, 'Access denied to receipt');
-          throw new Error('Access denied');
+        const isOwner = report.userId?.toString() === requestingUserId;
+        const isAdminOrBH = requestingUserRole === 'ADMIN' || requestingUserRole === 'BUSINESS_HEAD' || requestingUserRole === 'COMPANY_ADMIN';
+        if (!isOwner && !isAdminOrBH) {
+          const { ApprovalInstance } = await import('../models/ApprovalInstance');
+          const instance = await ApprovalInstance.findOne({
+            requestId: report._id,
+            'history.approverId': new mongoose.Types.ObjectId(requestingUserId),
+          })
+            .select('_id')
+            .lean()
+            .exec();
+          if (!instance) {
+            logger.warn({
+              receiptId: id,
+              requestingUserId,
+              reportUserId: report.userId?.toString(),
+            }, 'Access denied to receipt');
+            throw new Error('Access denied');
+          }
         }
       }
     } else {

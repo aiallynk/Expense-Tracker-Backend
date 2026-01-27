@@ -70,6 +70,9 @@ export interface ICompanySettings extends Document {
     requireAdminApproval: boolean; // Whether advance creation needs approval (future use)
   };
 
+  /** Self-approval policy: SKIP_SELF (default) = skip submitter in chain, auto-approve if last; ALLOW_SELF = normal flow */
+  selfApprovalPolicy?: 'SKIP_SELF' | 'ALLOW_SELF';
+
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -137,6 +140,11 @@ const companySettingsSchema = new Schema<ICompanySettings>(
       allowSelfCreation: { type: Boolean, default: true },
       allowOthersCreation: { type: Boolean, default: true },
       requireAdminApproval: { type: Boolean, default: false },
+    },
+    selfApprovalPolicy: {
+      type: String,
+      enum: ['SKIP_SELF', 'ALLOW_SELF'],
+      default: 'SKIP_SELF',
     },
     updatedBy: {
       type: Schema.Types.ObjectId,

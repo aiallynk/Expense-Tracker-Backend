@@ -5,9 +5,10 @@ import { ApprovalMatrix, IApprovalMatrix, IApprovalLevel, ApprovalType, Parallel
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
-import { ExpenseReportStatus } from '../utils/enums';
+import { AuditAction, ExpenseReportStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
+import { AuditService } from './audit.service';
 import { config } from '@/config/index';
 import { DateUtils } from '../utils/dateUtils';
 // NOTE: Keep ApprovalService fully functional for matrix-based approvals.
@@ -38,6 +39,11 @@ export class ApprovalService {
             throw new Error('Request data not found for approval initiation.');
         }
 
+        const submitterId = (requestData.userId?.toString?.() ?? requestData.userId) as string;
+        const { CompanySettings } = await import('../models/CompanySettings');
+        const companySettings = await CompanySettings.findOne({ companyId }).lean().exec();
+        const selfApprovalPolicy = (companySettings as any)?.selfApprovalPolicy ?? 'SKIP_SELF';
+
         const instance = new ApprovalInstance({
             companyId,
             matrixId: matrix._id,
@@ -48,9 +54,61 @@ export class ApprovalService {
       history: [],
     });
 
-    const nextState = await this.evaluateLevel(instance as any, matrix as any, 1, requestData);
-    instance.currentLevel = nextState.levelNumber;
-    instance.status = nextState.status;
+        if (selfApprovalPolicy === 'ALLOW_SELF') {
+      const nextState = await this.evaluateLevel(instance as any, matrix as any, 1, requestData);
+      instance.currentLevel = nextState.levelNumber;
+      instance.status = nextState.status;
+        } else {
+      // SKIP_SELF: skip levels where submitter is an approver; auto-approve if submitter is last
+      const levels = ((matrix as any).levels || []).filter((l: any) => l.enabled !== false);
+      const sortedLevels = [...levels].sort((a: any, b: any) => a.levelNumber - b.levelNumber);
+      const history: any[] = [];
+      let firstNonSubmitterLevel: any = null;
+      for (const level of sortedLevels) {
+        const approverIds = await this.getApproverUserIdsForLevel(level, companyId);
+        const normalizedApproverIds = new Set(approverIds.map((id) => id.toString().toLowerCase().trim()));
+        const submitterNorm = submitterId.toString().toLowerCase().trim();
+        if (normalizedApproverIds.has(submitterNorm)) {
+          history.push({
+            levelNumber: level.levelNumber,
+            status: ApprovalStatus.SKIPPED,
+            timestamp: new Date(),
+            comments: 'Self approval skipped per company policy',
+          });
+          await AuditService.log(submitterId, 'ExpenseReport', requestId, AuditAction.SELF_APPROVAL_SKIPPED, {
+            reportId: requestId,
+            userId: submitterId,
+            policy: 'SKIP_SELF',
+            level: level.levelNumber,
+          });
+        } else {
+          firstNonSubmitterLevel = level;
+          break;
+        }
+      }
+      if (!firstNonSubmitterLevel) {
+        instance.status = ApprovalStatus.APPROVED;
+        instance.history = history;
+        await instance.save();
+        const approvalMeta = {
+          type: 'AUTO_APPROVED' as const,
+          reason: 'SUBMITTER_IS_LAST_APPROVER',
+          policy: 'SKIP_SELF',
+          approvedAt: new Date(),
+        };
+        await this.finalizeApproval(instance, approvalMeta);
+        await AuditService.log(submitterId, 'ExpenseReport', requestId, AuditAction.AUTO_APPROVED, {
+          reportId: requestId,
+          reason: 'SUBMITTER_IS_LAST_APPROVER',
+          policy: 'SKIP_SELF',
+        });
+        await this.notifyStatusChange(instance, 'APPROVED');
+        return instance;
+      }
+      instance.currentLevel = firstNonSubmitterLevel.levelNumber;
+      instance.status = ApprovalStatus.PENDING;
+      instance.history = history;
+        }
 
         await instance.save();
         await this.syncRequestStatus(instance);
@@ -63,6 +121,25 @@ export class ApprovalService {
         }
 
         return instance;
+    }
+
+    /** Resolve approver user IDs for a matrix level (for self-approval skip logic). */
+    private static async getApproverUserIdsForLevel(level: any, companyId: string): Promise<string[]> {
+      if (level.approverUserIds && level.approverUserIds.length > 0) {
+        return level.approverUserIds.map((id: any) => (id._id ?? id).toString()).filter(Boolean);
+      }
+      if (level.approverRoleIds && level.approverRoleIds.length > 0) {
+        const roleIds = level.approverRoleIds.map((id: any) => (id._id ?? id)).filter(Boolean);
+        const userIds = await User.find({
+          companyId: new mongoose.Types.ObjectId(companyId),
+          roles: { $in: roleIds },
+        })
+          .select('_id')
+          .lean()
+          .exec();
+        return userIds.map((u: any) => u._id.toString());
+      }
+      return [];
     }
 
     /**
@@ -124,6 +201,12 @@ export class ApprovalService {
         limit,
         companyId: user.companyId?.toString()
       }, 'getPendingApprovalsForUser - Start');
+
+      const { CompanySettings } = await import('../models/CompanySettings');
+      const companySettingsForPending = user.companyId
+        ? await CompanySettings.findOne({ companyId: user.companyId }).lean().exec()
+        : null;
+      const selfApprovalPolicyForPending = (companySettingsForPending as any)?.selfApprovalPolicy ?? 'SKIP_SELF';
 
       const pendingForUser: any[] = [];
       for (const instance of pendingInstances) {
@@ -243,7 +326,7 @@ export class ApprovalService {
           let requestDetails: any = null;
             if (instance.requestType === 'EXPENSE_REPORT') {
             requestDetails = await ExpenseReport.findById(instance.requestId)
-              .select('name totalAmount fromDate toDate status userId notes createdAt projectId costCentreId appliedVouchers approvers currency companyId')
+              .select('name totalAmount fromDate toDate status userId notes createdAt projectId costCentreId appliedVouchers approvers currency companyId approvalMeta')
               .populate('userId', 'name email companyId')
               .populate('projectId', 'name code')
               .lean()
@@ -554,6 +637,7 @@ export class ApprovalService {
             expensesWithNeedsReview: mappedExpenses.filter((e: any) => e.needsReview).length,
           }, 'ApprovalService: Report data for approval UI');
 
+          const reportSubmitterId = (requestDetails.userId?._id ?? requestDetails.userId)?.toString?.();
           pendingForUser.push({
             instanceId: instance._id,
             approvalStatus: instance.status,
@@ -579,6 +663,9 @@ export class ApprovalService {
               currency: requestDetails.currency || 'INR',
               // Include additional approver info if ANY additional approver exists
               additionalApproverInfo: additionalApproverInfo,
+              // Self-approval policy and submitter flag for UX (backend is source of truth)
+              selfApprovalPolicy: selfApprovalPolicyForPending,
+              isSubmitterCurrentApprover: !!(reportSubmitterId && userId === reportSubmitterId),
               // Include flags for approver visibility (computed from expenses)
               flags: {
                 changes_requested: requestDetails.status === 'CHANGES_REQUESTED',
@@ -702,12 +789,19 @@ export class ApprovalService {
         return true;
     }
 
-    private static async finalizeApproval(instance: IApprovalInstance): Promise<void> {
+    private static async finalizeApproval(
+        instance: IApprovalInstance,
+        approvalMeta?: { type: 'AUTO_APPROVED'; reason: string; policy: string; approvedAt: Date }
+    ): Promise<void> {
         if (instance.requestType === 'EXPENSE_REPORT') {
-            await ExpenseReport.findByIdAndUpdate(instance.requestId, {
+            const update: any = {
                 status: ExpenseReportStatus.APPROVED,
-        approvedAt: new Date(),
-      }).exec();
+                approvedAt: new Date(),
+            };
+            if (approvalMeta) {
+                update.approvalMeta = approvalMeta;
+            }
+            await ExpenseReport.findByIdAndUpdate(instance.requestId, update).exec();
 
       // Post-approval side-effect: apply advance cash deductions (does not affect approval routing)
       try {
@@ -871,6 +965,23 @@ export class ApprovalService {
       if (instance.requestType === 'EXPENSE_REPORT') {
         requestData = await ExpenseReport.findById(instance.requestId).exec();
       }
+
+      // Block self-approval when company policy is SKIP_SELF
+      if (action === 'APPROVE' && requestData && instance.requestType === 'EXPENSE_REPORT') {
+        const report = requestData as any;
+        const reportSubmitterId = (report.userId?.toString?.() ?? report.userId) as string;
+        if (reportSubmitterId && userId === reportSubmitterId) {
+          const { CompanySettings } = await import('../models/CompanySettings');
+          const companySettings = await CompanySettings.findOne({ companyId: instance.companyId }).lean().exec();
+          const selfApprovalPolicy = (companySettings as any)?.selfApprovalPolicy ?? 'SKIP_SELF';
+          if (selfApprovalPolicy === 'SKIP_SELF') {
+            const err: any = new Error('Self approval is not allowed by company policy');
+            err.statusCode = 403;
+            err.code = 'SELF_APPROVAL_NOT_ALLOWED';
+            throw err;
+          }
+        }
+      }
       
       let isAdditionalApproverLevel = false;
       if (requestData) {
@@ -962,12 +1073,33 @@ export class ApprovalService {
         timestamp: new Date(),
         comments
       });
+      logger.info(
+        { instanceId, userId, action, historyLength: instance.history.length },
+        'ApprovalService.processAction: history entry written'
+      );
       // 3. Evaluate State Change
       if (action === 'REJECT') {
         instance.status = ApprovalStatus.REJECTED;
         await instance.save();
         if (instance.requestType === 'EXPENSE_REPORT') {
+          const reportId = (instance.requestId as mongoose.Types.ObjectId).toString();
           await ExpenseReport.findByIdAndUpdate(instance.requestId, { status: ExpenseReportStatus.REJECTED, rejectedAt: new Date() });
+          // Release voucher amount used on this report so it becomes available again
+          try {
+            const { VoucherService } = await import('./voucher.service');
+            await VoucherService.reverseVoucherUsageForReport(
+              reportId,
+              userId,
+              comments || 'Report rejected'
+            );
+            logger.info({ reportId }, 'ApprovalService: Voucher usages reversed for rejected report');
+          } catch (voucherError: any) {
+            logger.error(
+              { error: voucherError, reportId },
+              'ApprovalService: Failed to reverse voucher usages for rejected report'
+            );
+            // Don't fail report rejection; vouchers may need manual correction
+          }
         }
         await ApprovalService.notifyStatusChange(instance, 'REJECTED', comments);
         return instance;
@@ -1036,8 +1168,17 @@ export class ApprovalService {
                 .exec();
               
               if (freshReport && freshReport.approvers) {
-                const additionalApprovers = (freshReport.approvers as any[]).filter(
-                  (a: any) => a.isAdditionalApproval === true && (!a.decidedAt || !a.action)
+                const approversList = freshReport.approvers as any[];
+                const userIdsAlreadyDecided = new Set(
+                  approversList
+                    .filter((a: any) => a.decidedAt && a.action)
+                    .map((a: any) => (a.userId?.toString?.() ?? String(a.userId)))
+                );
+                const additionalApprovers = approversList.filter(
+                  (a: any) =>
+                    a.isAdditionalApproval === true &&
+                    (!a.decidedAt || !a.action) &&
+                    !userIdsAlreadyDecided.has((a.userId?.toString?.() ?? String(a.userId)))
                 );
                 
                 logger.info({
@@ -1120,7 +1261,9 @@ export class ApprovalService {
   }
 
   /**
-   * Get approval history for a user with filtering
+   * Get approval history for a user with filtering.
+   * Used for "actions by user" (APPROVED / REJECTED / CHANGES_REQUESTED). Does not default actionType to PENDING.
+   * Returns { data: array, pagination: { page, limit, total, pages } }. Controller sends { success: true, data: this } so HTTP response is { success: true, data: { data, pagination } }.
    */
   static async getApprovalHistory(
     filters: any,
@@ -1137,6 +1280,11 @@ export class ApprovalService {
   }> {
     const { page, limit } = pagination;
     const skip = (page - 1) * limit;
+
+    logger.debug(
+      { actedBy: filters.actedBy?.toString(), actionType: filters.actionType, page, limit },
+      'ApprovalService.getApprovalHistory: start'
+    );
 
     // Build aggregation pipeline
     const pipeline: any[] = [];
@@ -1274,22 +1422,22 @@ export class ApprovalService {
                 notes: 1,
                 amount: 1,
                 currency: 1,
-                // CRITICAL: Include expenseDate and invoiceDate (required for date display)
-                // These fields were missing, causing "Date: NA" in approval history flows
                 expenseDate: 1,
                 invoiceDate: 1,
                 category: { $arrayElemAt: ['$category.name', 0] },
                 categoryId: 1,
+                receiptPrimaryId: 1,
+                receiptIds: 1,
               },
             },
           ],
           as: 'expenses',
         },
       },
-      // Project and format results
+      // Project and format results (use composite _id so frontend has a stable key; history has _id: false)
       {
         $project: {
-          _id: '$history._id',
+          _id: { $concat: [{ $toString: '$_id' }, '-', { $toString: '$history.timestamp' }, '-', { $toString: '$history.levelNumber' }] },
           instanceId: '$_id',
           actionType: '$history.status',
           actedAt: '$history.timestamp',
@@ -1316,7 +1464,7 @@ export class ApprovalService {
             approvers: {
               $ifNull: ['$requestData.approvers', []]
             },
-            // Include flags for approver visibility
+            // Include flags for approver visibility (use $literal so MongoDB does not treat false as exclusion)
             flags: {
               changes_requested: { $eq: ['$requestData.status', 'CHANGES_REQUESTED'] },
               rejected: { $eq: ['$requestData.status', 'REJECTED'] },
@@ -1335,8 +1483,8 @@ export class ApprovalService {
                   0
                 ]
               },
-              duplicate_flagged: false,
-              ocr_needs_review: false
+              duplicate_flagged: { $literal: false },
+              ocr_needs_review: { $literal: false }
             },
             projectName: '$requestData.projectName',
             submittedAt: '$requestData.submittedAt',
@@ -1353,10 +1501,10 @@ export class ApprovalService {
                   category: '$$exp.category',
                   categoryId: '$$exp.categoryId',
                   currency: '$$exp.currency',
-                  // CRITICAL: Include expenseDate and invoiceDate (required for date display)
-                  // These fields were missing, causing "Date: NA" in approval history flows
                   expenseDate: '$$exp.expenseDate',
                   invoiceDate: '$$exp.invoiceDate',
+                  receiptPrimaryId: '$$exp.receiptPrimaryId',
+                  receiptIds: '$$exp.receiptIds',
                 }
               }
             },
@@ -1372,10 +1520,10 @@ export class ApprovalService {
                   category: '$$exp.category',
                   categoryId: '$$exp.categoryId',
                   currency: '$$exp.currency',
-                  // CRITICAL: Include expenseDate and invoiceDate (required for date display)
-                  // These fields were missing, causing "Date: NA" in approval history flows
                   expenseDate: '$$exp.expenseDate',
                   invoiceDate: '$$exp.invoiceDate',
+                  receiptPrimaryId: '$$exp.receiptPrimaryId',
+                  receiptIds: '$$exp.receiptIds',
                 }
               }
             },
@@ -1408,6 +1556,11 @@ export class ApprovalService {
       pipeline.push({ $skip: skip }, { $limit: limit });
 
       const history = await ApprovalInstance.aggregate(pipeline);
+
+      logger.debug(
+        { total, pageResultCount: history?.length ?? 0 },
+        'ApprovalService.getApprovalHistory: aggregation complete'
+      );
 
       // #region agent log
       fetch('http://127.0.0.1:7244/ingest/4df6bb03-2191-446a-93ae-c093fcd724e4',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({location:'ApprovalService.ts:1303',message:'getApprovalHistory: Aggregation successful',data:{historyCount:history?.length||0,total},timestamp:Date.now(),sessionId:'debug-session',runId:'run1',hypothesisId:'A'})}).catch(()=>{});

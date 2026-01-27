@@ -153,6 +153,15 @@ advanceCashSchema.pre('save', function (next) {
     this.voucherCode = `VCH-${code}`;
   }
   
+  // Defensive: EXHAUSTED or zero remaining => force remainingAmount and balance to 0
+  if (this.status === AdvanceCashStatus.EXHAUSTED || this.remainingAmount === 0) {
+    this.remainingAmount = 0;
+    this.balance = 0;
+  }
+  if (this.remainingAmount !== undefined && this.balance === undefined) {
+    this.balance = this.remainingAmount;
+  }
+
   // Auto-calculate status based on remainingAmount
   if (this.remainingAmount !== undefined && this.totalAmount !== undefined) {
     if (this.status !== AdvanceCashStatus.RETURNED) {
@@ -165,7 +174,7 @@ advanceCashSchema.pre('save', function (next) {
       }
     }
   }
-  
+
   next();
 });
 

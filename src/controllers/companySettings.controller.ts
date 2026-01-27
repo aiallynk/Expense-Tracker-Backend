@@ -107,6 +107,39 @@ export class CompanySettingsController {
   });
 
   /**
+   * Update self-approval policy
+   * PUT /api/v1/company-admin/settings/self-approval
+   * Body: { selfApprovalPolicy: 'SKIP_SELF' | 'ALLOW_SELF' }
+   */
+  static updateSelfApprovalPolicy = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+    if (!companyAdmin || !companyAdmin.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Company admin not found or company not associated',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+    const companyId = companyAdmin.companyId.toString();
+    const { selfApprovalPolicy } = req.body;
+    if (!selfApprovalPolicy || (selfApprovalPolicy !== 'SKIP_SELF' && selfApprovalPolicy !== 'ALLOW_SELF')) {
+      res.status(400).json({
+        success: false,
+        message: 'selfApprovalPolicy must be SKIP_SELF or ALLOW_SELF',
+        code: 'VALIDATION_ERROR',
+      });
+      return;
+    }
+    const settings = await CompanySettingsService.updateSelfApprovalPolicy(companyId, selfApprovalPolicy, req.user!.id);
+    res.status(200).json({
+      success: true,
+      message: 'Self-approval policy updated successfully',
+      data: settings,
+    });
+  });
+
+  /**
    * Reset company settings to default
    * POST /api/v1/company-admin/settings/reset
    */

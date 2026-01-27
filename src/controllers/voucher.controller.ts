@@ -125,7 +125,7 @@ export class VoucherController {
     const actorId = req.user!.id;
     const actorRole = req.user!.role;
 
-    const details = await VoucherService.getVoucherDetails(voucherId);
+    const details = await VoucherService.getVoucherDetails(voucherId, actorId);
 
     // Security check: Users can only view their own vouchers, admins can view any
     if (actorRole !== UserRole.COMPANY_ADMIN && actorRole !== UserRole.ADMIN) {

@@ -967,14 +967,19 @@ export class ReportsService {
     // Additional approvers are added AFTER L1 and L2 (or after the last normal approver if L3-L5 exist)
     if (reportUser.companyId) {
       const additionalApprovers = await this.evaluateAdditionalApprovalRules(report, reportUser.companyId);
+      // Exclude additional approvers who are already in the active chain so approval is not shown again
+      const existingUserIds = new Set(approvers.map((a) => (a.userId as any)?.toString?.() ?? String(a.userId)));
+      const newAdditional = additionalApprovers.filter(
+        (a) => !existingUserIds.has((a.userId as any)?.toString?.() ?? String(a.userId))
+      );
 
-      if (additionalApprovers.length > 0) {
+      if (newAdditional.length > 0) {
         // Find the level after which to insert additional approvers
         // Ensure they come after at least L2 (level 2)
         const maxLevel = approvers.length > 0 ? Math.max(...approvers.map(a => a.level)) : 0;
         const insertAfterLevel = Math.max(maxLevel, 2); // At minimum, insert after L2
 
-        additionalApprovers.forEach((additionalApprover, index) => {
+        newAdditional.forEach((additionalApprover, index) => {
           approvers.push({
             ...additionalApprover,
             level: insertAfterLevel + index + 1, // Ensure additional approvals come after L2 (or last normal approver)
@@ -983,7 +988,7 @@ export class ReportsService {
 
         logger.info({
           reportId: report._id,
-          additionalApproversCount: additionalApprovers.length,
+          additionalApproversCount: newAdditional.length,
           insertAfterLevel,
           totalApprovers: approvers.length,
         }, 'Additional approvers added after L2');
@@ -1081,12 +1086,13 @@ export class ReportsService {
             break;
         }
 
-        // If rule should trigger, find an approver with the specified role
+        // If rule should trigger, find an approver (specific user when set, else by role)
         if (shouldTrigger) {
           const approver = await this.findAdditionalApprover(
             companyId,
             rule.approverRole,
-            rule.approverRoleId
+            rule.approverRoleId,
+            rule.approverUserId
           );
 
           if (approver) {
@@ -1137,18 +1143,29 @@ export class ReportsService {
 
   /**
    * Find an approver with the specified role for additional approvals
-   * Supports both system roles (approverRole) and custom roles (approverRoleId)
+   * When approverUserId is set, returns that user (no random pick). Otherwise uses role.
    */
   static async findAdditionalApprover(
     companyId: mongoose.Types.ObjectId,
     approverRole?: ApprovalRuleApproverRole,
-    approverRoleId?: mongoose.Types.ObjectId
+    approverRoleId?: mongoose.Types.ObjectId,
+    approverUserId?: mongoose.Types.ObjectId
   ): Promise<any> {
-    // If custom role is specified, find users with that custom role
+    // When a specific user is chosen (role has multiple users), use that user
+    if (approverUserId) {
+      const user = await User.findOne({
+        _id: approverUserId,
+        companyId,
+        status: 'ACTIVE',
+      }).exec();
+      return user ?? null;
+    }
+
+    // If custom role is specified, find first user with that custom role (legacy / single-user role)
     if (approverRoleId) {
       const approver = await User.findOne({
         companyId,
-        roles: approverRoleId, // User has this custom role in their roles array
+        roles: approverRoleId,
         status: 'ACTIVE',
       }).populate('roles').exec();
 
@@ -1535,21 +1552,26 @@ export class ReportsService {
       costCentreId: report.costCentreId?.toString(),
     });
 
-    return vouchers.map((v) => ({
-      _id: v._id,
-      voucherCode: v.voucherCode,
-      totalAmount: v.totalAmount ?? v.amount ?? 0,
-      remainingAmount: v.remainingAmount ?? v.balance ?? 0,
-      usedAmount: v.usedAmount ?? 0,
-      currency: v.currency,
-      status: v.status,
-      projectId: v.projectId,
-      costCentreId: v.costCentreId,
-      createdAt: v.createdAt,
-      // Include legacy fields for backward compatibility
-      amount: v.totalAmount ?? v.amount,
-      balance: v.remainingAmount ?? v.balance,
-    }));
+    return vouchers.map((v: any) => {
+      const total = v.totalAmount ?? v.amount ?? 0;
+      const used = v.usedAmount ?? 0;
+      const remaining =
+        v.status === 'EXHAUSTED' ? 0 : Math.max(0, total - used);
+      return {
+        _id: v._id,
+        voucherCode: v.voucherCode,
+        totalAmount: total,
+        remainingAmount: remaining,
+        usedAmount: used,
+        currency: v.currency,
+        status: v.status,
+        projectId: v.projectId,
+        costCentreId: v.costCentreId,
+        createdAt: v.createdAt,
+        amount: total,
+        balance: remaining,
+      };
+    });
   }
 
   static async handleReportAction(
@@ -1983,7 +2005,10 @@ export class ReportsService {
 
       // Only allow settlement for APPROVED reports
       if (report.status !== ExpenseReportStatus.APPROVED) {
-        throw new Error('Settlement can only be processed for approved reports');
+        const err: any = new Error('Settlement can only be processed for approved reports');
+        err.statusCode = 400;
+        err.code = 'SETTLEMENT_REPORT_NOT_APPROVED';
+        throw err;
       }
 
       // Calculate voucher total used

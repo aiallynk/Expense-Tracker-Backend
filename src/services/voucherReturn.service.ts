@@ -162,7 +162,12 @@ export class VoucherReturnService {
       // Update voucher
       voucher.remainingAmount = voucher.remainingAmount - returnRequest.returnAmount;
       voucher.returnedAmount = (voucher.returnedAmount || 0) + returnRequest.returnAmount;
-      
+      // Enforce invariant: remainingAmount = totalAmount - usedAmount - returnedAmount
+      voucher.remainingAmount = Math.max(
+        0,
+        (voucher.totalAmount ?? 0) - (voucher.usedAmount ?? 0) - voucher.returnedAmount
+      );
+
       // If fully returned, mark as RETURNED
       if (voucher.remainingAmount === 0) {
         voucher.status = AdvanceCashStatus.RETURNED;

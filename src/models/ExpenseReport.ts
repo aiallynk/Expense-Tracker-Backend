@@ -55,6 +55,13 @@ export interface IExpenseReport extends Document {
     voucherId?: mongoose.Types.ObjectId; // If type is ISSUE_VOUCHER
     reimbursementAmount?: number; // If type is REIMBURSE
   };
+  /** Set when report is auto-approved (e.g. submitter was last approver under SKIP_SELF policy) */
+  approvalMeta?: {
+    type: 'AUTO_APPROVED';
+    reason: string;
+    policy: string;
+    approvedAt: Date;
+  };
   updatedBy?: mongoose.Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
@@ -208,6 +215,12 @@ const expenseReportSchema = new Schema<IExpenseReport>(
       comment: String,
       voucherId: { type: Schema.Types.ObjectId, ref: 'AdvanceCash' },
       reimbursementAmount: Number,
+    },
+    approvalMeta: {
+      type: { type: String, enum: ['AUTO_APPROVED'] },
+      reason: String,
+      policy: String,
+      approvedAt: Date,
     },
     updatedBy: {
       type: Schema.Types.ObjectId,

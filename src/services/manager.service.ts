@@ -663,6 +663,22 @@ export class ManagerService {
 
     await report.save();
 
+    // Release voucher amount used on this report so it becomes available again
+    try {
+      const { VoucherService } = await import('./voucher.service');
+      await VoucherService.reverseVoucherUsageForReport(
+        reportId,
+        managerId,
+        comment || 'Report rejected by manager'
+      );
+    } catch (voucherError: any) {
+      logger.error(
+        { error: voucherError, reportId },
+        'ManagerService: Failed to reverse voucher usages for rejected report'
+      );
+      // Don't fail report rejection
+    }
+
     // Audit log
     await AuditService.log(
       managerId,
