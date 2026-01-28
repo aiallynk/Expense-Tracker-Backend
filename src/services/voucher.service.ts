@@ -442,6 +442,9 @@ export class VoucherService {
     if (voucher.status === AdvanceCashStatus.RETURNED) {
       return AdvanceCashStatus.RETURNED;
     }
+    if (voucher.status === AdvanceCashStatus.REIMBURSED) {
+      return AdvanceCashStatus.REIMBURSED;
+    }
 
     if (voucher.remainingAmount === 0) {
       return AdvanceCashStatus.EXHAUSTED;
@@ -602,6 +605,29 @@ export class VoucherService {
       throw error;
     } finally {
       session.endSession();
+    }
+  }
+
+  /**
+   * Mark vouchers (advance cash) used in this report as REIMBURSED when settlement is done.
+   */
+  static async markVouchersAsReimbursedForReport(reportId: string): Promise<void> {
+    if (!mongoose.Types.ObjectId.isValid(reportId)) {
+      throw new Error(`Invalid report ID format: ${reportId}`);
+    }
+    const reportObjectId = new mongoose.Types.ObjectId(reportId);
+    const usages = await VoucherUsage.find({
+      reportId: reportObjectId,
+      status: VoucherUsageStatus.APPLIED,
+    }).exec();
+    const voucherIds = [...new Set(usages.map((u) => u.voucherId.toString()))];
+    for (const vid of voucherIds) {
+      const voucher = await AdvanceCash.findById(vid).exec();
+      if (voucher) {
+        voucher.status = AdvanceCashStatus.REIMBURSED;
+        await voucher.save();
+        logger.info({ voucherId: vid, reportId }, 'Voucher marked as REIMBURSED after settlement');
+      }
     }
   }
 

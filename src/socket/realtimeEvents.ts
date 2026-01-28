@@ -334,25 +334,31 @@ export const emitReceiptProcessing = (userId: string, receiptId: string) => {
   logger.debug(`Emitted receipt:processing to user ${userId}, receipt: ${receiptId}`);
 };
 
+/** Payload for receipt:processed socket event */
+export interface ReceiptProcessedPayload {
+  receiptId: string;
+  status: 'COMPLETED' | 'FAILED';
+  vendor?: string | null;
+  date?: string | null;
+  total?: number | null;
+  currency?: string | null;
+  invoiceId?: string | null;
+  invoice_number?: string | null;
+  notes?: string | null;
+  lineItems?: Array<{ description: string; amount: number }> | null;
+  reason?: 'TIMEOUT' | 'UNREADABLE' | 'API_ERROR';
+  duplicateFlag?: 'POTENTIAL_DUPLICATE' | 'STRONG_DUPLICATE' | 'HARD_DUPLICATE' | null;
+  duplicateReason?: string | null;
+  categorySuggestion?: string | null;
+  categoryId?: string;
+  categoryUnidentified?: boolean;
+}
+
 // Emit receipt processed event to user
 export const emitReceiptProcessed = (
   userId: string,
   receiptId: string,
-  data: {
-    receiptId: string;
-    status: 'COMPLETED' | 'FAILED';
-    vendor?: string | null;
-    date?: string | null;
-    total?: number | null;
-    currency?: string | null;
-    invoiceId?: string | null;
-    invoice_number?: string | null;
-    notes?: string | null;
-    lineItems?: Array<{ description: string; amount: number }> | null;
-    reason?: 'TIMEOUT' | 'UNREADABLE' | 'API_ERROR';
-    duplicateFlag?: 'POTENTIAL_DUPLICATE' | 'STRONG_DUPLICATE' | 'HARD_DUPLICATE' | null;
-    duplicateReason?: string | null;
-  }
+  data: ReceiptProcessedPayload
 ) => {
   emitToUser(userId, ReceiptEvent.PROCESSED, {
     ...data,

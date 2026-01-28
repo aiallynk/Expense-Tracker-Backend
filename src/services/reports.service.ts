@@ -89,7 +89,7 @@ export class ReportsService {
       // Handle advance cash (report-level)
       let advanceAppliedAmount: number | undefined = undefined;
       let advanceCurrency: string | undefined = undefined;
-      
+
       if (data.advanceAppliedAmount !== undefined && data.advanceAppliedAmount > 0) {
         advanceAppliedAmount = Number(data.advanceAppliedAmount);
         if (!isFinite(advanceAppliedAmount) || advanceAppliedAmount < 0) {
@@ -175,12 +175,12 @@ export class ReportsService {
     filters: ReportFiltersDto
   ): Promise<any> {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
-    
+
     // Debug logging for pagination (only in non-production)
     if (config.app.env !== 'production') {
       logger.debug({ page, pageSize, skip: (page - 1) * pageSize }, '[ReportsService] Pagination');
     }
-    
+
     // Ensure userId is converted to ObjectId for proper matching
     const query: any = { userId: new mongoose.Types.ObjectId(userId) };
 
@@ -468,7 +468,7 @@ export class ReportsService {
       const { ApprovalInstance } = await import('../models/ApprovalInstance');
       const { Role } = await import('../models/Role');
       const { User } = await import('../models/User');
-      
+
       const approvalInstance = await ApprovalInstance.findOne({
         requestId: id,
         requestType: 'EXPENSE_REPORT'
@@ -478,29 +478,29 @@ export class ReportsService {
 
       if (approvalInstance) {
         const matrix = approvalInstance.matrixId as any;
-        
+
         // Build approval chain from history and matrix levels
         if (matrix && matrix.levels) {
           const sortedLevels = [...matrix.levels].sort((a: any, b: any) => a.levelNumber - b.levelNumber);
-          
+
           for (const level of sortedLevels) {
             if (!level.enabled) continue;
-            
+
             // Get history entries for this level
             const levelHistory = (approvalInstance.history || []).filter(
               (h: any) => h.levelNumber === level.levelNumber
             );
-            
+
             // Get role names for this level
             const roleIds = level.approverRoleIds || [];
             let roleNames: string[] = [];
-            
+
             // Fetch actual role names from Role model - this is the source of truth
             if (roleIds.length > 0) {
               const roles = await Role.find({ _id: { $in: roleIds } }).select('name').exec();
               roleNames = roles.map(r => r.name).filter(Boolean); // Filter out any null/undefined names
             }
-            
+
             // Get approver details from history
             const approverHistory = levelHistory.find((h: any) => h.approverId);
             let approverName = null;
@@ -508,7 +508,7 @@ export class ReportsService {
             let decidedAt = null;
             let comment = null;
             let action = null;
-            
+
             if (approverHistory) {
               const approver = await User.findById(approverHistory.approverId).select('name').exec();
               approverName = approver?.name || null;
@@ -517,12 +517,12 @@ export class ReportsService {
               comment = approverHistory.comments;
               action = approverHistory.status?.toLowerCase();
             }
-            
+
             // ALWAYS use actual role names from approval matrix - never use generic fallback names
             // The role field should contain the actual role names from the Role model
             const roleNameDisplay = roleNames.length > 0 ? roleNames.join(', ') : '';
             let stepName;
-            
+
             // Prioritize actual role names from approval matrix
             if (roleNames.length > 0) {
               // Use the actual role name(s) from the approval matrix (e.g., "Finance Manager", "CTO", etc.)
@@ -532,18 +532,18 @@ export class ReportsService {
               // This should rarely happen if approval matrix is properly configured
               stepName = `Level ${level.levelNumber} Approval`;
             }
-            
+
             // Map action to frontend expected format
             let mappedAction = null;
             if (action === 'approved') mappedAction = 'approve';
             else if (action === 'rejected') mappedAction = 'reject';
             else if (action === 'changes_requested') mappedAction = 'request_changes';
-            
+
             // Check if this approver is an additional approver from the report's approvers array
             const reportApprover = (report.approvers || []).find(
               (a: any) => a.level === level.levelNumber && a.isAdditionalApproval === true
             );
-            
+
             approvalChain.push({
               level: level.levelNumber,
               step: stepName,
@@ -560,6 +560,61 @@ export class ReportsService {
               triggerReason: reportApprover?.triggerReason || null,
               approvalRuleId: reportApprover?.approvalRuleId || null
             });
+          }
+
+          // Append additional approvers from report.approvers that are not in matrix levels
+          const chainLevels = new Set(approvalChain.map((a: any) => a.level));
+          const additionalFromReport = (report.approvers || []).filter(
+            (a: any) => a.isAdditionalApproval === true && !chainLevels.has(a.level)
+          );
+          for (const addApprover of additionalFromReport) {
+            const addUserId = addApprover.userId?.toString?.() || addApprover.userId;
+            let addName: string | null = null;
+            if (addUserId) {
+              const addUser = await User.findById(addUserId).select('name').exec();
+              addName = addUser?.name || null;
+            }
+            const addRole = addApprover.role || 'Additional Approver';
+            const addStep = addApprover.triggerReason ? `Additional: ${addApprover.triggerReason}` : `Additional Approval (${addRole})`;
+            const addHistory = (approvalInstance.history || []).filter(
+              (h: any) => h.levelNumber === addApprover.level
+            );
+            const addEntry = addHistory.find((h: any) => h.approverId);
+            let addAction: string | null = null;
+            let addDecidedAt = addApprover.decidedAt || null;
+            let addComment = addApprover.comment || null;
+            if (addEntry) {
+              addAction = addEntry.status?.toLowerCase() === 'approved' ? 'approve' : addEntry.status?.toLowerCase() === 'rejected' ? 'reject' : addEntry.status?.toLowerCase() === 'changes_requested' ? 'request_changes' : null;
+              addDecidedAt = addEntry.timestamp || addDecidedAt;
+              addComment = addEntry.comments || addComment;
+            }
+            approvalChain.push({
+              level: addApprover.level,
+              step: addStep,
+              role: addRole,
+              roleIds: [],
+              name: addName,
+              approverName: addName,
+              approverId: addUserId,
+              userId: addName ? { name: addName } : null,
+              decidedAt: addDecidedAt,
+              comment: addComment,
+              action: addAction,
+              isAdditionalApproval: true,
+              triggerReason: addApprover.triggerReason || null,
+              approvalRuleId: addApprover.approvalRuleId || null
+            });
+          }
+
+          // When report is REJECTED, mark all steps after the first rejected step as skipped so UI does not show them as pending
+          const reportStatus = (report.status || '').toUpperCase();
+          if (reportStatus === 'REJECTED') {
+            const rejectedIndex = approvalChain.findIndex((a: any) => a.action === 'reject');
+            if (rejectedIndex >= 0) {
+              for (let i = rejectedIndex + 1; i < approvalChain.length; i++) {
+                (approvalChain[i] as any).action = 'skipped';
+              }
+            }
           }
         }
       }
@@ -593,13 +648,13 @@ export class ReportsService {
     const affectedExpenseIds: string[] =
       status === 'CHANGES_REQUESTED'
         ? expensesWithSignedUrls
-            .filter(
-              (e: any) =>
-                (e.managerAction && String(e.managerAction).toLowerCase() === 'request_changes') ||
-                (e.managerComment && String(e.managerComment).trim().length > 0)
-            )
-            .map((e: any) => (e._id != null ? String(e._id) : ''))
-            .filter(Boolean)
+          .filter(
+            (e: any) =>
+              (e.managerAction && String(e.managerAction).toLowerCase() === 'request_changes') ||
+              (e.managerComment && String(e.managerComment).trim().length > 0)
+          )
+          .map((e: any) => (e._id != null ? String(e._id) : ''))
+          .filter(Boolean)
         : [];
 
     return {
@@ -680,7 +735,7 @@ export class ReportsService {
         throw new Error('Advance amount cannot exceed report total amount');
       }
       report.advanceAppliedAmount = advanceAmount > 0 ? advanceAmount : undefined;
-      report.advanceCurrency = advanceAmount > 0 
+      report.advanceCurrency = advanceAmount > 0
         ? (data.advanceCurrency?.toUpperCase() || report.currency || 'INR')
         : undefined;
     }
@@ -1120,7 +1175,7 @@ export class ReportsService {
                 };
                 roleName = roleMap[rule.approverRole] || approver.role;
               }
-              
+
               additionalApprovers.push({
                 level: 0, // Will be set correctly in computeApproverChain
                 userId: approver._id as mongoose.Types.ObjectId,
@@ -1311,7 +1366,7 @@ export class ReportsService {
           report,
           reportUser.companyId as mongoose.Types.ObjectId
         );
-        
+
         // Initiate approval using the ApprovalService (Matrix-based)
         const approvalInstance = await ApprovalService.initiateApproval(
           reportUser.companyId.toString(),
@@ -1347,11 +1402,11 @@ export class ReportsService {
         if (additionalApprovers.length > 0) {
           // Get the max level from ApprovalMatrix to determine where to insert additional approvers
           const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
-          const matrix = await ApprovalMatrix.findOne({ 
-            companyId: reportUser.companyId, 
-            isActive: true 
+          const matrix = await ApprovalMatrix.findOne({
+            companyId: reportUser.companyId,
+            isActive: true
           }).exec();
-          
+
           let maxLevel = 2; // Default to L2
           if (matrix && matrix.levels) {
             const enabledLevels = matrix.levels
@@ -1361,15 +1416,15 @@ export class ReportsService {
               maxLevel = Math.max(...enabledLevels);
             }
           }
-          
+
           const insertAfterLevel = Math.max(maxLevel, 2); // At minimum, insert after L2
-          
+
           // Set approvers array with additional approvers (for UI display and notifications)
           report.approvers = additionalApprovers.map((additionalApprover, index) => ({
             ...additionalApprover,
             level: insertAfterLevel + index + 1, // Ensure additional approvals come after L2 (or last normal approver)
           }));
-          
+
           logger.info({
             reportId: id,
             additionalApproversCount: additionalApprovers.length,
@@ -2027,15 +2082,17 @@ export class ReportsService {
         comment: decision.comment,
       };
 
+      // Load user to get companyId (needed for notifications and voucher creation)
+      const user = await User.findById(report.userId).select('companyId').exec();
+      if (!user || !user.companyId) {
+        throw new Error('User company not found');
+      }
+
       // Handle settlement type-specific logic
       if (decision.type === 'ISSUE_VOUCHER') {
         // Create new voucher for employee if voucherId not provided
         if (!decision.voucherId) {
           const { VoucherService } = await import('./voucher.service');
-          const user = await User.findById(report.userId).select('companyId').exec();
-          if (!user || !user.companyId) {
-            throw new Error('User company not found');
-          }
 
           const newVoucher = await VoucherService.createVoucher({
             companyId: user.companyId.toString(),
@@ -2075,6 +2132,14 @@ export class ReportsService {
 
       await report.save({ session });
 
+      // Mark advance cash (vouchers) used in this report as REIMBURSED when settlement is done
+      try {
+        const { VoucherService } = await import('./voucher.service');
+        await VoucherService.markVouchersAsReimbursedForReport(reportId);
+      } catch (voucherErr: any) {
+        logger.warn({ err: voucherErr?.message ?? voucherErr, reportId }, 'Mark vouchers as reimbursed failed');
+      }
+
       // Log audit entry
       await AuditService.log(
         adminId,
@@ -2099,6 +2164,37 @@ export class ReportsService {
         },
         'Settlement processed successfully'
       );
+
+      // Notify report owner that settlement is done
+      try {
+        const { NotificationDataService } = await import('./notificationData.service');
+        const { NotificationType } = await import('../models/Notification');
+        const { NotificationService } = await import('./notification.service');
+        const reportOwnerId = report.userId?.toString();
+        const reportName = report.name || 'Report';
+        const amountText = report.currency && employeePaidAmount != null
+          ? `${report.currency} ${employeePaidAmount.toLocaleString()}`
+          : `${employeePaidAmount?.toLocaleString() ?? 0}`;
+        const description = `Your settlement of ${amountText} for report "${reportName}" is done.`;
+        if (reportOwnerId) {
+          await NotificationDataService.createNotification({
+            userId: reportOwnerId,
+            companyId: user.companyId.toString(),
+            type: NotificationType.SETTLEMENT_DONE,
+            title: 'Settlement completed',
+            description,
+            link: `/reports/${reportId}`,
+            metadata: { reportId, reportName, amount: employeePaidAmount, settlementType: decision.type },
+          });
+          await NotificationService.sendPushToUser(reportOwnerId, {
+            title: 'Settlement completed',
+            body: description,
+            data: { type: 'SETTLEMENT_DONE', reportId, reportName },
+          });
+        }
+      } catch (notifErr: any) {
+        logger.warn({ err: notifErr?.message ?? notifErr, reportId }, 'Settlement notification failed');
+      }
 
       return report;
     } catch (error) {

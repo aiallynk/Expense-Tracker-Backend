@@ -15,6 +15,11 @@ import { User } from '../models/User';
 import { ExpenseStatus } from '../utils/enums';
 
 import { ReportsService } from './reports.service';
+import {
+  buildFullReceiptText,
+  inferCategoryFromReceiptText,
+  extractNotesFromLineItems,
+} from './ocr/ocrPostProcess.service';
 
 import { logger } from '@/config/logger';
 import { DateUtils } from '@/utils/dateUtils';
@@ -37,6 +42,10 @@ export interface ExtractedReceipt {
   currency?: string;
   tax?: number;
   categorySuggestion?: string;
+  /** Set when category was inferred from keywords; used for expense draft creation */
+  categoryId?: mongoose.Types.ObjectId;
+  /** True when no category could be confidently identified; app shows "Unable to identify the category. Please enter manually." */
+  categoryUnidentified?: boolean;
   lineItems?: Array<{ description: string; amount: number }>;
   notes?: string;
   confidence?: number;
@@ -104,14 +113,13 @@ export class DocumentProcessingService {
 
     const date = raw?.date ?? raw?.invoiceDate ?? raw?.invoice_date;
     
-    // Build notes from lineItems if available and notes not already present
+    // Build notes from lineItems as comma-separated item descriptions (not "desc: amt")
     let notes = raw?.notes;
     if (!notes && raw?.lineItems && Array.isArray(raw.lineItems) && raw.lineItems.length > 0) {
-      notes = raw.lineItems.map((item: any) => {
-        const desc = item.description || item.desc || '';
-        const amt = item.amount || item.amt || 0;
-        return `${desc}: ${amt}`;
-      }).join('\n');
+      const descriptions = raw.lineItems
+        .map((item: any) => (item.description || item.desc || '').toString().trim())
+        .filter((d: string) => d.length > 0);
+      notes = descriptions.length > 0 ? descriptions.join(', ') : undefined;
     }
 
     return {
@@ -120,6 +128,32 @@ export class DocumentProcessingService {
       date: date != null ? String(date).trim() : raw?.date,
       notes: notes || undefined,
     };
+  }
+
+  /**
+   * Apply OCR post-processing to extracted receipts: category inference and notes from line items.
+   * Mutates each receipt with categorySuggestion, categoryId, categoryUnidentified, and notes.
+   */
+  private static async applyOcrPostProcessToReceipts(
+    receipts: ExtractedReceipt[],
+    companyId?: mongoose.Types.ObjectId
+  ): Promise<void> {
+    for (const receipt of receipts) {
+      const fullText = buildFullReceiptText(receipt);
+      const categoryResult = await inferCategoryFromReceiptText(fullText, companyId, {
+        vendorText: receipt.vendor ?? undefined,
+      });
+      receipt.categorySuggestion = categoryResult.categorySuggestion ?? undefined;
+      receipt.categoryId = categoryResult.categoryId;
+      receipt.categoryUnidentified = categoryResult.categoryUnidentified;
+      const postNotes = extractNotesFromLineItems(receipt, {
+        vendor: receipt.vendor,
+        categoryName: categoryResult.categorySuggestion ?? undefined,
+      });
+      if (postNotes) {
+        receipt.notes = postNotes;
+      }
+    }
   }
   /**
    * Process a document (PDF, Excel, or image) and extract receipts
@@ -226,8 +260,9 @@ export class DocumentProcessingService {
       // For multi-receipt PDFs, we use AI to analyze the entire PDF
       // and identify individual receipts
       const receipts = await this.extractReceiptsFromPdfWithAI(buffer, pdfData, storageKey);
-      
+
       result.receipts = receipts;
+      await this.applyOcrPostProcessToReceipts(result.receipts, companyId);
 
       // Create expense drafts for each extracted receipt. Duplicate detection is flag-only (no skip).
       for (let i = 0; i < receipts.length; i++) {
@@ -1129,6 +1164,7 @@ Rules:
 
             result.receipts = receipts;
             result.totalPages = receipts.length;
+            await this.applyOcrPostProcessToReceipts(result.receipts, companyId);
           }
         } finally {
           this.releaseOcrSlot();
@@ -1144,6 +1180,7 @@ Rules:
             currency: 'INR',
             date: new Date().toISOString().split('T')[0],
             categorySuggestion: 'Others',
+            categoryUnidentified: true,
             notes: 'Please review and enter details manually',
             sourceType: 'image',
             confidence: 0,
@@ -1254,25 +1291,28 @@ Rules:
 
     const confidence = typeof receipt.confidence === 'number' ? receipt.confidence : 0;
     const threshold = (config.ocr as any).confidenceThreshold ?? 0.75;
-    const needsReview = confidence < threshold;
+    const categoryUnidentified = receipt.categoryUnidentified === true;
+    const needsReview = confidence < threshold || categoryUnidentified;
 
-    // Below threshold: do NOT auto-assign category/date; mark Needs Review (plan §5)
+    // Resolve category: use post-process categoryId if matched; otherwise Others when unidentified
     let categoryId: mongoose.Types.ObjectId | undefined;
     let expenseDate: Date;
+    if (receipt.categoryId) {
+      categoryId = receipt.categoryId;
+    } else if (receipt.categorySuggestion && !categoryUnidentified) {
+      const category = await Category.findOne({
+        name: { $regex: new RegExp(`^${receipt.categorySuggestion}$`, 'i') }
+      });
+      if (category) categoryId = category._id as mongoose.Types.ObjectId;
+    }
+    if (!categoryId) {
+      const defaultCategory = await Category.findOne({ name: { $regex: /^(Other|Others|Miscellaneous|Misc|General)$/i } }) || await Category.findOne({});
+      if (defaultCategory) categoryId = defaultCategory._id as mongoose.Types.ObjectId;
+    }
+
     if (needsReview) {
-      categoryId = undefined;
       expenseDate = report.fromDate;
     } else {
-      if (receipt.categorySuggestion) {
-        const category = await Category.findOne({
-          name: { $regex: new RegExp(`^${receipt.categorySuggestion}$`, 'i') }
-        });
-        if (category) categoryId = category._id as mongoose.Types.ObjectId;
-      }
-      if (!categoryId) {
-        const defaultCategory = await Category.findOne({ name: 'Others' }) || await Category.findOne({});
-        if (defaultCategory) categoryId = defaultCategory._id as mongoose.Types.ObjectId;
-      }
       // Parse date from receipt - handle both string and Date formats
       let invoiceDate: Date | undefined;
       if (receipt.date) {
@@ -1365,8 +1405,8 @@ Rules:
       expenseDate,
       status: ExpenseStatus.DRAFT,
       source: receipt.sourceType === 'excel' ? 'MANUAL' : 'SCANNED',
-      notes: receipt.notes || (receipt.lineItems
-        ? receipt.lineItems.map(item => `${item.description}: ${item.amount}`).join('\n')
+      notes: receipt.notes || (receipt.lineItems && receipt.lineItems.length > 0
+        ? receipt.lineItems.map(item => item.description).filter(Boolean).join(', ')
         : undefined),
       receiptIds,
       receiptPrimaryId: documentReceiptId ? new mongoose.Types.ObjectId(documentReceiptId) : undefined,

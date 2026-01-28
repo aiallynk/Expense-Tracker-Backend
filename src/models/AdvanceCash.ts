@@ -5,6 +5,7 @@ export enum AdvanceCashStatus {
   PARTIAL = 'PARTIAL',
   EXHAUSTED = 'EXHAUSTED',
   RETURNED = 'RETURNED',
+  REIMBURSED = 'REIMBURSED', // Settlement done for report(s) that used this voucher
   SETTLED = 'SETTLED', // Keep for backward compatibility
 }
 

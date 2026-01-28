@@ -38,9 +38,9 @@
     "test:concurrency": "jest tests/concurrency.test.ts --testTimeout=120000",
     "test:authorization": "jest tests/authorization.test.ts",
     "test:profile-image": "jest tests/profileImage.test.ts",
-    "test:security:jwt": "jest --testPathPattern=security-tests/jwtAttacks.test.ts --testTimeout=60000",
-    "test:security:api": "jest --testPathPattern=security-tests/apiAttacks.test.ts --testTimeout=60000",
-    "test:security:rate": "jest --testPathPattern=security-tests/rateLimiting.test.ts --testTimeout=120000"
+    "test:security:jwt": "jest --testPathPattern=security-tests/jwtAttacks.test.ts --testTimeout=60000 --setupFilesAfterEnv=security-tests/setup.ts",
+    "test:security:api": "jest --testPathPattern=security-tests/apiAttacks.test.ts --testTimeout=60000 --setupFilesAfterEnv=security-tests/setup.ts",
+    "test:security:rate": "jest --testPathPattern=security-tests/rateLimiting.test.ts --testTimeout=120000 --setupFilesAfterEnv=security-tests/setup.ts"
   },
   "keywords": [
     "expense-tracker",

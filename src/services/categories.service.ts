@@ -236,19 +236,20 @@ export class CategoriesService {
     await Category.findByIdAndDelete(id);
   }
 
-  // Get category by name (case-insensitive)
+  /**
+   * Get category by name (case-insensitive).
+   * When companyId is provided, only returns a category that belongs to that company
+   * (so duplicate check allows the same name in different companies).
+   */
   static async getCategoryByName(name: string, companyId?: string): Promise<ICategory | null> {
-    const query: any = { name: { $regex: new RegExp(`^${name}$`, 'i') } };
-    
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const query: Record<string, unknown> = { name: { $regex: new RegExp(`^${escaped}$`, 'i') } };
+
     if (companyId) {
-      query.$or = [
-        { companyId: new mongoose.Types.ObjectId(companyId) },
-        { companyId: { $exists: false } },
-        { companyId: null },
-      ];
+      query.companyId = new mongoose.Types.ObjectId(companyId);
     }
-    
-    return Category.findOne(query).exec();
+
+    return Category.findOne(query as any).exec();
   }
 
   // Get or create category by name (useful for ensuring categories exist)
@@ -267,7 +268,7 @@ export class CategoriesService {
     return category.save();
   }
 
-  // Initialize default categories for a company
+  // Initialize default categories for a company (or system when companyId is undefined)
   static async initializeDefaultCategories(companyId?: string): Promise<{ created: number }> {
     const defaultCategories = [
       { name: 'Travel', code: 'TRV', description: 'Travel and transportation expenses' },
@@ -278,19 +279,18 @@ export class CategoriesService {
       { name: 'Entertainment', code: 'ENT', description: 'Client entertainment and events' },
       { name: 'Others', code: 'OTH', description: 'Miscellaneous expenses' },
     ];
-    
+
     let created = 0;
-    
+
     for (const cat of defaultCategories) {
       try {
-        const exists = await Category.findOne({
-          name: cat.name,
-          $or: [
-            { companyId: companyId ? new mongoose.Types.ObjectId(companyId) : null },
-            { companyId: { $exists: false } },
-          ],
-        }).exec();
-        
+        const exists = companyId
+          ? await this.getCategoryByName(cat.name, companyId)
+          : await Category.findOne({
+              name: cat.name,
+              $or: [{ companyId: null }, { companyId: { $exists: false } }],
+            }).exec();
+
         if (!exists) {
           await new Category({
             ...cat,

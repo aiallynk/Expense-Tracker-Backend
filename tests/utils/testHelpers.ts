@@ -1,9 +1,9 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
-import { User, IUser } from '../../src/models/User';
-import { CompanyAdmin, ICompanyAdmin, CompanyAdminStatus } from '../../src/models/CompanyAdmin';
-import { Company, ICompany } from '../../src/models/Company';
+import { User } from '../../src/models/User';
+import { CompanyAdmin, CompanyAdminStatus } from '../../src/models/CompanyAdmin';
+import { Company } from '../../src/models/Company';
 import { ExpenseReport, IExpenseReport } from '../../src/models/ExpenseReport';
 import { Expense, IExpense } from '../../src/models/Expense';
 import { Category, ICategory } from '../../src/models/Category';
@@ -28,7 +28,7 @@ export async function createTestCompany(name: string = 'Test Company'): Promise<
     domain: `${name.toLowerCase().replace(/\s+/g, '-')}.com`,
   });
   const saved = await company.save();
-  return saved._id.toString();
+  return (saved._id as any).toString();
 }
 
 /**
@@ -59,7 +59,7 @@ export async function createTestUser(
   const saved = await user.save();
 
   return {
-    id: saved._id.toString(),
+    id: (saved._id as any).toString(),
     email: saved.email,
     password,
     role: saved.role as UserRole,
@@ -89,7 +89,7 @@ export async function createTestCompanyAdmin(
   const saved = await admin.save();
 
   return {
-    id: saved._id.toString(),
+    id: (saved._id as any).toString(),
     email: saved.email,
     password,
     role: UserRole.COMPANY_ADMIN,
@@ -132,6 +132,10 @@ export async function createTestReport(
     currency: 'INR',
     approvers: [],
   };
+  
+  if (companyId) {
+    reportData.companyId = new mongoose.Types.ObjectId(companyId);
+  }
   
   const report = new ExpenseReport(reportData);
   return await report.save();
@@ -217,7 +221,7 @@ export function generateAccessTokenWithExpiration(
   };
   
   const secret = String(config.jwt.accessSecret);
-  return jwt.sign(payload, secret, { expiresIn });
+  return (jwt as any).sign(payload, secret, { expiresIn });
 }
 
 /**
@@ -248,7 +252,7 @@ export function generateRefreshToken(user: TestUser): string {
   };
   
   const secret = String(config.jwt.refreshSecret);
-  return jwt.sign(payload, secret, { expiresIn: config.jwt.refreshExpiresIn });
+  return (jwt as any).sign(payload, secret, { expiresIn: config.jwt.refreshExpiresIn });
 }
 
 /**

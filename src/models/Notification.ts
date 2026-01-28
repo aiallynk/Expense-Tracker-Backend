@@ -9,6 +9,7 @@ export enum NotificationType {
   REPORT_CHANGES_REQUESTED = 'report_changes_requested',
   REPORT_PENDING_APPROVAL = 'report_pending_approval',
   VOUCHER_APPLIED = 'voucher_applied',
+  SETTLEMENT_DONE = 'settlement_done',
   ADDITIONAL_APPROVER_ADDED = 'additional_approver_added',
   EXPENSE_CREATED = 'expense_created',
   EXPENSE_APPROVED = 'expense_approved',

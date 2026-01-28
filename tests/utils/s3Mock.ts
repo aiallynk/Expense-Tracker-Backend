@@ -135,14 +135,16 @@ export function mockS3Client() {
   const originalModule = require('../../src/utils/s3');
   
   jest.spyOn(originalModule, 'uploadToS3').mockImplementation(
-    async (bucketType: string, key: string, buffer: Buffer, mimeType: string) => {
+    async (...args: unknown[]) => {
+      const [bucketType, key, buffer, mimeType] = args as [string, string, Buffer, string];
       const bucket = bucketType === 'receipts' ? 'test-receipts-bucket' : 'test-exports-bucket';
       await mockS3.putObject(bucket, key, buffer, mimeType);
     }
   );
 
   jest.spyOn(originalModule, 'getObjectUrl').mockImplementation(
-    (bucketType: string, key: string) => {
+    (...args: unknown[]) => {
+      const [bucketType, key] = args as [string, string];
       const bucket = bucketType === 'receipts' ? 'test-receipts-bucket' : 'test-exports-bucket';
       return `https://${bucket}.s3.amazonaws.com/${key}`;
     }

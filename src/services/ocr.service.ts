@@ -12,7 +12,12 @@ import { getPresignedDownloadUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
 import { ReceiptStatus, ReceiptFailureReason } from '../utils/enums';
-import { emitReceiptProcessed, emitReceiptProcessing } from '../socket/realtimeEvents';
+import { emitReceiptProcessed, emitReceiptProcessing, ReceiptProcessedPayload } from '../socket/realtimeEvents';
+import {
+  buildFullReceiptText,
+  inferCategoryFromReceiptText,
+  extractNotesFromLineItems,
+} from './ocr/ocrPostProcess.service';
 
 export interface OcrResult {
   vendor?: string;
@@ -426,19 +431,41 @@ export class OcrService {
         }
       }
 
+      // OCR post-processing: category inference and notes from line items
+      let companyId: mongoose.Types.ObjectId | undefined;
+      if (receiptDocUpdated?.expenseId) {
+        const expense = receiptDocUpdated.expenseId as any;
+        const report = expense.reportId as any;
+        if (report?.userId) {
+          const { User } = await import('../models/User');
+          const user = await User.findById(report.userId).select('companyId').exec();
+          companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
+        }
+      }
+      const fullText = buildFullReceiptText(result);
+      const categoryResult = await inferCategoryFromReceiptText(fullText, companyId, {
+        vendorText: result.vendor ?? undefined,
+      });
+      const categorySuggestion = categoryResult.categorySuggestion;
+      const categoryId = categoryResult.categoryId ?? null;
+      const categoryUnidentified = categoryResult.categoryUnidentified;
+      let postProcessNotes = extractNotesFromLineItems(result, {
+        vendor: result.vendor ?? undefined,
+        categoryName: categoryResult.categorySuggestion ?? undefined,
+      }) || null;
+      if (!postProcessNotes && result.notes) {
+        postProcessNotes = result.notes;
+      }
+      if (!postProcessNotes && result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
+        postProcessNotes = result.lineItems.map(item => `${item.description || ''}: ${item.amount || 0}`).join('\n');
+      }
+
       // Emit socket event for successful OCR completion
       if (userId && receiptIdStr) {
-        // Build notes from lineItems if available
-        let notes: string | null = null;
-        if (result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
-          notes = result.lineItems.map(item => `${item.description || ''}: ${item.amount || 0}`).join('\n');
-        }
-        
-        // Include duplicate flag in socket event if detected
         const duplicateFlag = (result as any).duplicateFlag || null;
         const duplicateReason = (result as any).duplicateReason || null;
-        
-        emitReceiptProcessed(userId, receiptIdStr, {
+
+        const payload: ReceiptProcessedPayload = {
           receiptId: receiptIdStr,
           status: 'COMPLETED',
           vendor: result.vendor || null,
@@ -447,11 +474,15 @@ export class OcrService {
           currency: result.currency || null,
           invoiceId: result.invoiceId || result.invoice_number || null,
           invoice_number: result.invoice_number || null,
-          notes: notes || result.notes || null,
+          notes: postProcessNotes,
           lineItems: result.lineItems || null,
           duplicateFlag: duplicateFlag,
           duplicateReason: duplicateReason,
-        });
+          categorySuggestion: categorySuggestion,
+          categoryId: categoryId ? categoryId.toString() : undefined,
+          categoryUnidentified: categoryUnidentified,
+        };
+        emitReceiptProcessed(userId, receiptIdStr, payload);
       }
 
       return job;
@@ -607,7 +638,8 @@ export class OcrService {
   "date": string | null,
   "total": number | null,
   "currency": string | null,
-  "invoice_number": string | null
+  "invoice_number": string | null,
+  "line_items": [{"description": string, "amount": number}]
 }
 
 IMPORTANT: For invoice_number, extract ANY of these if found:
@@ -624,6 +656,7 @@ Extract the vendor name (merchant/recipient name).
 Extract the date in YYYY-MM-DD format.
 Extract the total amount as a number (without currency symbol).
 Extract currency code (INR, USD, etc.).
+Extract line_items: array of purchased items, each with "description" (item name) and "amount" (price). Omit totals, tax, discount, payment lines.
 
 If unreadable, return null. No explanations.`;
 
@@ -695,6 +728,17 @@ If unreadable, return null. No explanations.`;
                              parsed.receiptNumber ||
                              null;
         
+        const lineItemsRaw = parsed.line_items || parsed.lineItems;
+        const lineItems: Array<{ description: string; amount: number }> = Array.isArray(lineItemsRaw)
+          ? lineItemsRaw
+            .filter((item: any) => item && (item.description != null || item.desc != null))
+            .map((item: any) => ({
+              description: String(item.description ?? item.desc ?? '').trim(),
+              amount: typeof item.amount === 'number' ? item.amount : parseFloat(String(item.amount || 0)) || 0,
+            }))
+            .filter((item) => item.description.length > 0)
+          : [];
+
         const result: OcrResult = {
           vendor: parsed.vendor || null,
           date: parsed.date || null,
@@ -702,9 +746,11 @@ If unreadable, return null. No explanations.`;
           currency: parsed.currency || 'INR',
           invoice_number: invoiceNumber,
           invoiceId: invoiceNumber,
+          lineItems: lineItems.length > 0 ? lineItems : undefined,
+          notes: parsed.notes || undefined,
           confidence: 0.85,
         };
-        
+
         return result;
       } catch (error) {
         // If not JSON, try to extract structured data

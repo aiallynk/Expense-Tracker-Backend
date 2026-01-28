@@ -137,9 +137,15 @@ export const updateProjectSchema = z.object({
 
 // Category DTOs
 export const createCategorySchema = z.object({
-  name: z.string().min(1),
-  code: z.string().optional(),
-  description: z.string().optional(),
+  name: z.string().min(1, 'Category name is required'),
+  code: z
+    .union([z.string(), z.null(), z.undefined()])
+    .optional()
+    .transform((v) => (v != null && String(v).trim() !== '' ? String(v).trim() : undefined)),
+  description: z
+    .union([z.string(), z.null(), z.undefined()])
+    .optional()
+    .transform((v) => (v != null && String(v).trim() !== '' ? String(v).trim() : undefined)),
 });
 
 export const updateCategorySchema = z.object({

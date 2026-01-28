@@ -80,6 +80,7 @@ export const config = {
   },
   ai: {
     disableCategoryMatching: process.env.DISABLE_AI_CATEGORY_MATCHING === 'true',
+    categoryConfidenceThreshold: parseFloat(process.env.AI_CATEGORY_CONFIDENCE_THRESHOLD || '0.6'),
   },
   analytics: {
     // Trim whitespace and newlines from API key

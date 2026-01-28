@@ -82,9 +82,11 @@ export class ApprovalMatrixNotificationService {
 
             logger.info({
                 instanceId: approvalInstance._id,
-                usersCount: usersToNotify.length,
+                currentLevel: approvalInstance.currentLevel,
+                approverIdsCount: approverIds.length,
+                usersToNotifyCount: usersToNotify.length,
                 users: usersToNotify.map((u: any) => ({ id: u._id.toString(), email: u.email })),
-            }, `Found ${usersToNotify.length} users with required approval roles`);
+            }, `Parallel/sequential approval: ${approverIds.length} approver ID(s), ${usersToNotify.length} user(s) will be notified`);
 
             // Get approver names for display
             const approverNames = usersToNotify.map(u => u.name || u.email || 'Unknown').join(', ');
