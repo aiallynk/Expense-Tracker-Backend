@@ -74,14 +74,14 @@ export interface DocumentProcessingResult {
 export class DocumentProcessingService {
   // OCR concurrency semaphore - limit to max 2 concurrent OCR calls
   private static ocrSemaphore = { count: 0, max: 2 };
-  
+
   private static async acquireOcrSlot(): Promise<void> {
     while (this.ocrSemaphore.count >= this.ocrSemaphore.max) {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     this.ocrSemaphore.count++;
   }
-  
+
   private static releaseOcrSlot(): void {
     this.ocrSemaphore.count--;
   }
@@ -112,7 +112,7 @@ export class DocumentProcessingService {
       raw?.orderId;
 
     const date = raw?.date ?? raw?.invoiceDate ?? raw?.invoice_date;
-    
+
     // Build notes from lineItems as comma-separated item descriptions (not "desc: amt")
     let notes = raw?.notes;
     if (!notes && raw?.lineItems && Array.isArray(raw.lineItems) && raw.lineItems.length > 0) {
@@ -252,9 +252,9 @@ export class DocumentProcessingService {
       };
       result.totalPages = pdfData.numpages;
 
-      logger.info({ 
-        pages: pdfData.numpages, 
-        textLength: pdfData.text.length 
+      logger.info({
+        pages: pdfData.numpages,
+        textLength: pdfData.text.length
       }, 'PDF parsed successfully');
 
       // For multi-receipt PDFs, we use AI to analyze the entire PDF
@@ -294,10 +294,10 @@ export class DocumentProcessingService {
               ...(duplicateFlag && duplicateReason ? { duplicateFlag, duplicateReason } : {}),
             });
           } else {
-              // Skip expense creation - user will create expenses manually
-              result.expensesCreated.push(null);
-              result.results?.push({ index: i, status: 'extracted', expenseId: null });
-            }
+            // Skip expense creation - user will create expenses manually
+            result.expensesCreated.push(null);
+            result.results?.push({ index: i, status: 'extracted', expenseId: null });
+          }
         } catch (error: any) {
           logger.error({ error: error.message, receipt }, 'Failed to create expense draft');
           result.errors.push(`Failed to create expense for receipt: ${error.message}`);
@@ -320,7 +320,7 @@ export class DocumentProcessingService {
         result.totalPages = 0;
         return result;
       }
-      
+
       // If we have receipts extracted, don't mark as completely failed
       // Only mark as failed if no receipts were extracted
       if (result.receipts.length === 0 && result.expensesCreated.length === 0) {
@@ -406,7 +406,7 @@ Rules:
             let content: string;
             const primaryModel = 'gpt-4o-mini';
             const fallbackModel = 'gpt-4o';
-            
+
             try {
               // Try primary model first
               const response = await openaiClient.chat.completions.create({
@@ -438,8 +438,8 @@ Rules:
             } catch (ocrError: any) {
               // Check if error is retryable (not authentication, not invalid model, etc.)
               const isRetryable = !(
-                ocrError.status === 401 || 
-                ocrError.message?.includes('authentication') || 
+                ocrError.status === 401 ||
+                ocrError.message?.includes('authentication') ||
                 ocrError.message?.includes('Unauthorized') ||
                 ocrError.message?.includes('invalid_model') ||
                 ocrError.code === 'invalid_model'
@@ -447,13 +447,13 @@ Rules:
 
               if (isRetryable) {
                 // Log fallback attempt
-                logger.warn({ 
-                  primaryModel, 
-                  fallbackModel, 
+                logger.warn({
+                  primaryModel,
+                  fallbackModel,
                   error: ocrError.message,
                   pageNumber
                 }, 'Primary OCR model failed for PDF page, attempting fallback');
-                
+
                 // Try fallback model
                 try {
                   const fallbackResponse = await openaiClient.chat.completions.create({
@@ -492,12 +492,12 @@ Rules:
                     pageNumber,
                     primaryError: ocrError.message,
                   };
-                  
+
                   // Log error details (only in non-production to avoid spam)
                   if (config.app.env !== 'production' && !config.ocr.demoMode) {
                     logger.error({ error: errorDetails }, 'Both OCR models failed for PDF page');
                   }
-                  
+
                   // OCR failure for this page - non-blocking, skip page and continue
                   continue; // Skip this page, continue with next
                 }
@@ -509,17 +509,17 @@ Rules:
                   code: ocrError.code,
                   pageNumber,
                 };
-                
+
                 // Log error details (only in non-production to avoid spam)
                 if (config.app.env !== 'production' && !config.ocr.demoMode) {
                   logger.error({ error: errorDetails }, 'Non-retryable OCR error for PDF page');
                 }
-                
+
                 // OCR failure for this page - non-blocking, skip page and continue
                 continue; // Skip this page, continue with next
               }
             }
-            
+
             // Parse OpenAI response safely
             try {
               let cleanedContent = content.trim();
@@ -590,14 +590,14 @@ Rules:
    */
   private static extractReceiptsFromText(text: string): ExtractedReceipt[] {
     const receipts: ExtractedReceipt[] = [];
-    
+
     // Split text by common receipt separators
     const sections = text.split(/(?:page|---+|={3,}|\n{3,})/i);
-    
+
     for (let i = 0; i < sections.length; i++) {
       const section = sections[i].trim();
       if (section.length < 50) continue; // Skip very short sections
-      
+
       const receipt = this.parseReceiptFromText(section);
       if (receipt && (receipt.vendor || receipt.totalAmount)) {
         receipt.pageNumber = i + 1;
@@ -605,7 +605,7 @@ Rules:
         receipts.push(receipt);
       }
     }
-    
+
     return receipts;
   }
 
@@ -730,7 +730,7 @@ Rules:
 
     try {
       const workbook = new ExcelJS.Workbook();
-      
+
       if (mimeType === 'text/csv') {
         // For CSV, create a readable stream from buffer
         const stream = Readable.from(buffer);
@@ -812,8 +812,8 @@ Rules:
 
           if (amountCol) {
             const amountValue = row.getCell(amountCol).value;
-            const amount = typeof amountValue === 'number' 
-              ? amountValue 
+            const amount = typeof amountValue === 'number'
+              ? amountValue
               : parseFloat(String(amountValue).replace(/[^0-9.-]/g, ''));
             if (!isNaN(amount) && amount > 0) {
               receipt.totalAmount = amount;
@@ -989,7 +989,7 @@ Rules:
         const primaryModel = 'gpt-4o-mini';
         const fallbackModel = 'gpt-4o';
         let ocrError: any = null;
-        
+
         try {
           // Try primary model first
           const response = await openaiClient.chat.completions.create({
@@ -1025,8 +1025,8 @@ Rules:
           ocrError = error;
           // Check if error is retryable (not authentication, not invalid model, etc.)
           const isRetryable = !(
-            error.status === 401 || 
-            error.message?.includes('authentication') || 
+            error.status === 401 ||
+            error.message?.includes('authentication') ||
             error.message?.includes('Unauthorized') ||
             error.message?.includes('invalid_model') ||
             error.code === 'invalid_model'
@@ -1034,12 +1034,12 @@ Rules:
 
           if (isRetryable) {
             // Log fallback attempt
-            logger.warn({ 
-              primaryModel, 
-              fallbackModel, 
-              error: error.message 
+            logger.warn({
+              primaryModel,
+              fallbackModel,
+              error: error.message
             }, 'Primary OCR model failed, attempting fallback');
-            
+
             // Try fallback model
             try {
               const fallbackResponse = await openaiClient.chat.completions.create({
@@ -1076,40 +1076,82 @@ Rules:
               ocrError = fallbackError;
             }
           }
-          
+
         }
-        
+
         // If we still have an error after fallback attempt, handle it
         if (!content && ocrError) {
           // OCR failure - log detailed error for debugging
           const errorDetails = {
             message: ocrError.message,
-              status: ocrError.status,
-              code: ocrError.code,
-              statusCode: ocrError.statusCode,
-              response: ocrError.response?.data || ocrError.response,
-            };
-            
-            // Log error details (only in non-production to avoid spam)
-            if (config.app.env !== 'production') {
-              const fileName = storageKey.split('/').pop() || storageKey;
-              logger.error({ error: errorDetails, fileName }, 'OpenAI OCR API call failed');
+            status: ocrError.status,
+            code: ocrError.code,
+            statusCode: ocrError.statusCode,
+            response: ocrError.response?.data || ocrError.response,
+          };
+
+          // Log error details (only in non-production to avoid spam)
+          if (config.app.env !== 'production') {
+            const fileName = storageKey.split('/').pop() || storageKey;
+            logger.error({ error: errorDetails, fileName }, 'OpenAI OCR API call failed');
+          }
+
+          // OCR failure - non-blocking, add error and continue
+          let errorMsg = `OCR failed: ${ocrError.message || 'Unknown error'}`;
+
+          // Provide helpful error messages
+          if (ocrError.message?.includes('API key') || ocrError.message?.includes('authentication')) {
+            errorMsg = 'OCR failed: Invalid or missing OPENAI_API_KEY. Please check your .env file.';
+          } else if (ocrError.message?.includes('quota') || ocrError.message?.includes('rate limit')) {
+            errorMsg = 'OCR failed: OpenAI API rate limit exceeded. Please try again later.';
+          } else if (ocrError.statusCode === 400 || ocrError.code === 'invalid_argument') {
+            errorMsg = `OCR failed: Invalid request to OpenAI API. ${ocrError.message || ''}`;
+          }
+
+          if (config.ocr.demoMode) {
+            // Demo mode: silently ignore OCR failures
+            result.receipts = [];
+            result.totalPages = 0;
+            return result;
+          }
+          result.errors.push(errorMsg);
+          result.receipts = [];
+          result.totalPages = 0;
+          return result;
+        }
+
+        // Parse OpenAI response safely (only if we have content)
+        if (content) {
+          let receipts: ExtractedReceipt[] = [];
+          try {
+            let cleanedContent = content.trim();
+            if (cleanedContent.startsWith('```json')) {
+              cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
+            } else if (cleanedContent.startsWith('```')) {
+              cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
             }
-            
-            // OCR failure - non-blocking, add error and continue
-            let errorMsg = `OCR failed: ${ocrError.message || 'Unknown error'}`;
-            
-            // Provide helpful error messages
-            if (ocrError.message?.includes('API key') || ocrError.message?.includes('authentication')) {
-              errorMsg = 'OCR failed: Invalid or missing OPENAI_API_KEY. Please check your .env file.';
-            } else if (ocrError.message?.includes('quota') || ocrError.message?.includes('rate limit')) {
-              errorMsg = 'OCR failed: OpenAI API rate limit exceeded. Please try again later.';
-            } else if (ocrError.statusCode === 400 || ocrError.code === 'invalid_argument') {
-              errorMsg = `OCR failed: Invalid request to OpenAI API. ${ocrError.message || ''}`;
-            }
-            
+
+            const parsed = JSON.parse(cleanedContent);
+            // Map response format to our internal format (support both vendor_name and vendor)
+            receipts = (parsed.receipts || []).map((r: any) => {
+              const normalized: ExtractedReceipt = {
+                vendor: r.vendor_name || r.vendor,
+                invoiceId: r.invoice_number || r.invoiceId || r.invoice_id,
+                date: r.invoice_date || r.date || r.invoiceDate,
+                totalAmount: r.total_amount || r.totalAmount,
+                currency: r.currency || 'INR',
+                tax: r.tax_amount || r.tax || r.taxAmount,
+                lineItems: r.line_items || r.lineItems,
+                sourceType: 'image' as const,
+                confidence: 0.85,
+              };
+              return this.normalizeAiReceipt(normalized);
+            });
+          } catch (parseError: any) {
+            // JSON parsing failure - non-blocking, add error
+            const errorMsg = `OCR response parsing failed: ${parseError.message}`;
             if (config.ocr.demoMode) {
-              // Demo mode: silently ignore OCR failures
+              // Demo mode: silently ignore parsing failures
               result.receipts = [];
               result.totalPages = 0;
               return result;
@@ -1119,56 +1161,14 @@ Rules:
             result.totalPages = 0;
             return result;
           }
-        
-          // Parse OpenAI response safely (only if we have content)
-          if (content) {
-            let receipts: ExtractedReceipt[] = [];
-            try {
-              let cleanedContent = content.trim();
-              if (cleanedContent.startsWith('```json')) {
-                cleanedContent = cleanedContent.replace(/^```json\s*/, '').replace(/\s*```$/, '');
-              } else if (cleanedContent.startsWith('```')) {
-                cleanedContent = cleanedContent.replace(/^```\s*/, '').replace(/\s*```$/, '');
-              }
 
-              const parsed = JSON.parse(cleanedContent);
-              // Map response format to our internal format (support both vendor_name and vendor)
-              receipts = (parsed.receipts || []).map((r: any) => {
-                const normalized: ExtractedReceipt = {
-                  vendor: r.vendor_name || r.vendor,
-                  invoiceId: r.invoice_number || r.invoiceId || r.invoice_id,
-                  date: r.invoice_date || r.date || r.invoiceDate,
-                  totalAmount: r.total_amount || r.totalAmount,
-                  currency: r.currency || 'INR',
-                  tax: r.tax_amount || r.tax || r.taxAmount,
-                  lineItems: r.line_items || r.lineItems,
-                  sourceType: 'image' as const,
-                  confidence: 0.85,
-                };
-                return this.normalizeAiReceipt(normalized);
-              });
-            } catch (parseError: any) {
-              // JSON parsing failure - non-blocking, add error
-              const errorMsg = `OCR response parsing failed: ${parseError.message}`;
-              if (config.ocr.demoMode) {
-                // Demo mode: silently ignore parsing failures
-                result.receipts = [];
-                result.totalPages = 0;
-                return result;
-              }
-              result.errors.push(errorMsg);
-              result.receipts = [];
-              result.totalPages = 0;
-              return result;
-            }
-
-            result.receipts = receipts;
-            result.totalPages = receipts.length;
-            await this.applyOcrPostProcessToReceipts(result.receipts, companyId);
-          }
-        } finally {
-          this.releaseOcrSlot();
+          result.receipts = receipts;
+          result.totalPages = receipts.length;
+          await this.applyOcrPostProcessToReceipts(result.receipts, companyId);
         }
+      } finally {
+        this.releaseOcrSlot();
+      }
 
       // Create expense drafts - ensure at least one draft is created per image
       if (result.receipts.length === 0) {
@@ -1259,7 +1259,7 @@ Rules:
         result.totalPages = 0;
         return result;
       }
-      
+
       // If we have receipts extracted, don't mark as completely failed
       // Only mark as failed if no receipts were extracted
       if (result.receipts.length === 0 && result.expensesCreated.length === 0) {
@@ -1332,8 +1332,11 @@ Rules:
           invoiceDate = receipt.date as Date;
         }
       }
-      
+
       expenseDate = invoiceDate && !isNaN(invoiceDate.getTime()) ? invoiceDate : new Date();
+
+      // CRITICAL: Check date range FIRST before creating expense
+      // This ensures duplicate detection doesn't run if date is invalid
       if (!DateUtils.isDateInReportRange(expenseDate, report.fromDate, report.toDate)) {
         logger.error({
           expenseDate: DateUtils.backendDateToFrontend(expenseDate),
@@ -1368,7 +1371,7 @@ Rules:
         invoiceDate = receipt.date as Date;
       }
     }
-    
+
     // Invoice date must be within report [fromDate, toDate] if provided
     if (invoiceDate && !isNaN(invoiceDate.getTime())) {
       if (!DateUtils.isDateInReportRange(invoiceDate, report.fromDate, report.toDate)) {
@@ -1382,7 +1385,7 @@ Rules:
         );
       }
     }
-    
+
     const invoiceId = receipt.invoiceId?.toString().trim() || undefined;
     let invoiceFingerprint: string | undefined = undefined;
     if (invoiceId && invoiceDate && !isNaN(invoiceDate.getTime()) && typeof receipt.totalAmount === 'number') {
