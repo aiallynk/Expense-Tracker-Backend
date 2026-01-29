@@ -160,7 +160,7 @@ export class ApprovalMatrixNotificationService {
                         const { NotificationDataService } = await import('./notificationData.service');
                         const { NotificationType } = await import('../models/Notification');
 
-                        await NotificationDataService.createNotification({
+                        const databaseNotification = await NotificationDataService.createNotification({
                             userId: user._id.toString(),
                             companyId: approvalInstance.companyId.toString(),
                             type: NotificationType.REPORT_PENDING_APPROVAL,
@@ -178,7 +178,15 @@ export class ApprovalMatrixNotificationService {
                                 approverNames,
                             },
                         });
-                        logger.info({ userId: user._id.toString() }, '✅ Database notification created via approval matrix');
+
+                        // The Socket.IO event is already emitted by NotificationDataService.createNotification()
+                        // But let's log that it happened
+                        logger.info({
+                            userId: user._id.toString(),
+                            notificationId: databaseNotification._id?.toString(),
+                            instanceId: approvalInstance._id.toString(),
+                            event: 'notification:new',
+                        }, '✅ Database notification created and Socket.IO event emitted for approval');
                     } catch (notifError: any) {
                         logger.error({
                             error: notifError.message || notifError,
@@ -205,8 +213,8 @@ export class ApprovalMatrixNotificationService {
                                     instanceId: approvalInstance._id.toString(),
                                 },
                             });
-                            logger.info({ 
-                                userId: user._id.toString(), 
+                            logger.info({
+                                userId: user._id.toString(),
                                 email: user.email,
                                 requestType,
                                 requestName,
@@ -221,8 +229,8 @@ export class ApprovalMatrixNotificationService {
                             // Continue - don't fail the whole notification flow
                         }
                     } else {
-                        logger.warn({ 
-                            userId: user._id.toString() 
+                        logger.warn({
+                            userId: user._id.toString()
                         }, '⚠️ User has no email address - skipping email notification');
                     }
                 } catch (error: any) {
@@ -267,7 +275,7 @@ export class ApprovalMatrixNotificationService {
         try {
             const { User } = await import('../models/User');
             const { Role } = await import('../models/Role');
-            
+
             const isApproved = status === 'APPROVED';
             const isChangesRequested = status === 'CHANGES_REQUESTED';
             const requestType = requestData.name ? 'Expense Report' : 'Request';
@@ -281,7 +289,7 @@ export class ApprovalMatrixNotificationService {
             // Extract approver information from approval instance history
             let approverName: string | undefined;
             let approverRole: string | undefined;
-            
+
             if (approvalInstance.history && approvalInstance.history.length > 0) {
                 // Get the most recent history entry for the current status
                 const relevantHistory = approvalInstance.history
@@ -292,10 +300,10 @@ export class ApprovalMatrixNotificationService {
                         return false;
                     })
                     .sort((a: any, b: any) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-                
+
                 if (relevantHistory.length > 0) {
                     const latestEntry = relevantHistory[0];
-                    
+
                     // Fetch approver user details
                     if (latestEntry.approverId) {
                         try {
@@ -310,7 +318,7 @@ export class ApprovalMatrixNotificationService {
                             logger.warn({ error, approverId: latestEntry.approverId }, 'Failed to fetch approver name');
                         }
                     }
-                    
+
                     // Fetch approver role details
                     if (latestEntry.roleId) {
                         try {
@@ -331,7 +339,7 @@ export class ApprovalMatrixNotificationService {
             // Build notification message with level information
             let notificationTitle = `${requestType} ${displayStatus}`;
             let notificationBody = `Your ${requestType.toLowerCase()} "${requestName}" has been ${displayStatus.toLowerCase()}`;
-            
+
             // Add approver information to body
             if (approverName) {
                 if (approverRole) {
@@ -340,7 +348,7 @@ export class ApprovalMatrixNotificationService {
                     notificationBody += ` by ${approverName}`;
                 }
             }
-            
+
             // Add level information for intermediate approvals
             if (isApproved && approvedLevel !== undefined && approvalInstance.status === 'PENDING') {
                 const levelName = approvedLevel === 1 ? 'L1' : approvedLevel === 2 ? 'L2' : `L${approvedLevel}`;
@@ -371,7 +379,7 @@ export class ApprovalMatrixNotificationService {
                 const approvedHistory = approvalInstance.history
                     ?.filter((h: any) => h.status === 'APPROVED')
                     .sort((a: any, b: any) => b.levelNumber - a.levelNumber);
-                
+
                 if (approvedHistory && approvedHistory.length > 0) {
                     const finalLevel = approvedHistory[0].levelNumber;
                     const levelName = finalLevel === 1 ? 'L1' : finalLevel === 2 ? 'L2' : `L${finalLevel}`;
@@ -445,17 +453,17 @@ export class ApprovalMatrixNotificationService {
             try {
                 const { NotificationDataService } = await import('./notificationData.service');
                 const { NotificationType } = await import('../models/Notification');
-                
+
                 let notificationType = NotificationType.REPORT_REJECTED;
                 if (isApproved) {
                     notificationType = NotificationType.REPORT_APPROVED;
                 } else if (isChangesRequested) {
                     notificationType = NotificationType.REPORT_CHANGES_REQUESTED;
                 }
-                
+
                 let notificationTitle = `${requestType} ${displayStatus}`;
                 let notificationDescription = `Your ${requestType.toLowerCase()} "${requestName}" has been ${displayStatus.toLowerCase()}`;
-                
+
                 // Add approver information
                 if (approverName) {
                     if (approverRole) {
@@ -464,7 +472,7 @@ export class ApprovalMatrixNotificationService {
                         notificationDescription += ` by ${approverName}`;
                     }
                 }
-                
+
                 // Add level information for intermediate approvals
                 if (isApproved && approvedLevel !== undefined && approvalInstance.status === 'PENDING') {
                     notificationTitle = `Report Approved at L${approvedLevel}`;
@@ -489,12 +497,12 @@ export class ApprovalMatrixNotificationService {
                     }
                     notificationDescription += `.`;
                 }
-                
+
                 // Add comments if available
                 if (comments && comments.trim()) {
                     notificationDescription += ` Comments: ${comments.trim()}`;
                 }
-                
+
                 await NotificationDataService.createNotification({
                     userId: requestData.userId.toString(),
                     type: notificationType,
