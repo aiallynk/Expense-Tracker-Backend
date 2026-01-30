@@ -56,10 +56,10 @@ const VENDOR_SYNONYM_KEYWORDS: Record<string, string[]> = {
   'office supplies': ['stationery', 'stationary', 'xerox', 'computer stationery', 'pen', 'pencil', 'paper', 'folder', 'file'],
   groceries: ['grocery', 'supermarket', 'provisions', 'grocery store'],
   medical: ['medical', 'pharmacy', 'chemist', 'drug'],
-  travel: ['travels', 'tour', 'cab', 'booking', 'airline', 'flight', 'hotel', 'taxi', 'uber', 'ola'],
+  travel: ['travels', 'tour', 'tours', 'tourism', 'cab', 'booking', 'airline', 'airlines', 'flight', 'flights', 'hotel', 'hotels', 'motel', 'resort', 'resorts', 'stay', 'accommodation', 'lodge', 'lodging', 'inn', 'guest house', 'guesthouse', 'hostel', 'homestay', 'room charges', 'room', 'suite', 'booking.com', 'makemytrip', 'goibibo', 'airbnb', 'oyo', 'treebo', 'fabhotels', 'cleartrip', 'yatra', 'expedia', 'agoda', 'trivago', 'indigo', 'spicejet', 'air india', 'vistara', 'go air', 'taxi', 'uber', 'ola', 'rapido', 'rail', 'railway', 'train', 'ticket', 'bus', 'travel agency', 'travel agent'],
   fuel: ['petrol', 'petrolium', 'diesel', 'gas station', 'filling station', 'fuel', 'petrol pump'],
   food: ['restaurant', 'cafe', 'bakery', 'kitchen', 'dining', 'meal', 'lunch', 'dinner', 'breakfast', 'food', 'sweet', 'emporio'],
-  'transport charges': ['transport', 'transport charges', 'delivery', 'freight', 'tempo', 'logistics', 'transportation'],
+  'transport charges': ['transport only', 'delivery', 'freight', 'tempo', 'logistics', 'transportation', 'courier', 'shipping', 'cargo'],
   'weighbridge expenses': ['weighbridge', 'peb', 'tmt', 'steel', 'weigh bridge'],
   weighbridge: ['weighbridge', 'peb', 'tmt', 'steel'],
   'staff welfare': ['staff', 'welfare', 'staff welfare', 'employee'],
@@ -237,7 +237,9 @@ async function tryAICategoryInference(
     .map((c) => (c.code ? `${c.name} (${c.code})` : c.name))
     .join('\n');
 
-  const prompt = `You are an expert at categorizing business expenses. Given the receipt text below and the list of allowed categories, choose the SINGLE best matching category.
+  const prompt = `You are an AI system specialized in classifying real-world expense receipts.
+
+Categories are predefined and must be selected carefully.
 
 Receipt text:
 ${fullText}
@@ -245,13 +247,114 @@ ${fullText}
 Allowed categories (you MUST choose exactly one from this list):
 ${categoryList}
 
-Instructions:
-- Consider every option; some categories may be more specific (e.g. Medical expenses) and others general (e.g. Others). Choose the best fit for this receipt.
-- Do not invent categories. Return only a category that appears in the list above.
-- Confidence: 0-1 how sure you are (e.g. 0.85).
+═══════════════════════════════════════════════════════════════
+CLASSIFICATION FRAMEWORK - Follow this decision process STRICTLY:
+═══════════════════════════════════════════════════════════════
+
+STEP 1: Identify CONTEXT, not just keywords
+────────────────────────────────────────────
+Do NOT classify based only on words like "charges", "invoice", or "service".
+Instead, identify the BUSINESS CONTEXT using:
+  • Vendor type (what business is this?)
+  • Nature of service (what did the customer receive?)
+  • Duration indicators (dates, nights, arrival/departure times)
+  • Line items (room, stay, nights, folio, check-in, check-out)
+  • Payment purpose (what was actually purchased?)
+
+STEP 2: Apply EXCEPTION RULES (CRITICAL - Read Carefully!)
+────────────────────────────────────────────────────────────
+
+⚠️ RULE 1: Travel vs Transport Charges (Most Common Confusion)
+   
+   Classify as TRAVEL if receipt contains ANY of:
+   ✓ Hotel, Resort, Lodge, Guest House, Motel, Inn, Hostel
+   ✓ Room Charges, Room Rent, Accommodation Charges
+   ✓ No. of Nights, Night(s), Stay duration
+   ✓ Check-in / Check-out dates
+   ✓ Arrival / Departure times
+   ✓ Folio No, GR Card No, Reservation No
+   ✓ Room Type (Deluxe, Suite, Standard, etc.)
+   ✓ Booking platforms (MakeMyTrip, Goibibo, OYO, Airbnb, etc.)
+   ✓ Flight tickets, Train tickets, Bus bookings
+   → ALWAYS classify as "Travel" even if no vehicle is explicitly mentioned
+   
+   Classify as TRANSPORT CHARGES ONLY if:
+   ✓ Delivery service (courier, shipping, freight explicitly mentioned)
+   ✓ Logistics company (DHL, Blue Dart, FedEx, etc.)
+   ✓ Cargo or freight forwarding
+   ✓ Goods transportation (tempo, truck rental for moving goods)
+   → DO NOT use Transport Charges for personal travel (taxi, cab, uber, etc.)
+   → Personal rides = Travel, NOT Transport Charges
+
+⚠️ RULE 2: Travel vs Food
+   
+   If food is part of a hotel stay (hotel restaurant, room service):
+   → Classify as TRAVEL
+   
+   If standalone restaurant bill (not inside a hotel):
+   → Classify as FOOD
+
+⚠️ RULE 3: Fuel vs Transport vs Travel
+   
+   Fuel station / Petrol pump / Diesel purchase:
+   → Classify as FUEL
+   
+   Ride service (Uber, Ola, taxi, cab, auto):
+   → Classify as TRAVEL (personal transportation)
+   
+   Delivery / Shipping / Freight service:
+   → Classify as TRANSPORT CHARGES (goods transportation)
+
+⚠️ RULE 4: Office Supplies vs Stationery vs IT
+   
+   Physical items (pens, paper, folders, files):
+   → OFFICE or STATIONERY (whichever category exists)
+   
+   Software licenses, subscriptions, cloud services:
+   → IT (if exists) or OFFICE
+
+⚠️ RULE 5: Medical Expenses
+   
+   Pharmacy, chemist, medicine, checkup, hospital:
+   → MEDICAL EXPENSES (if exists) or MEDICAL
+
+STEP 3: CONFIDENCE OVERRIDE
+────────────────────────────
+If multiple categories seem valid:
+  • Choose the category that represents the PRIMARY PURPOSE
+  • Ignore secondary or bundled services
+  
+Example: Hotel bill with restaurant charges
+  → Primary: Hotel stay
+  → Secondary: Food
+  → Classify as: TRAVEL
+
+STEP 4: VALIDATION (Final Check)
+──────────────────────────────────
+Before finalizing, ask yourself:
+"What was the user ACTUALLY PAYING FOR?"
+
+If the answer is:
+  • A place to stay (hotel, room) → TRAVEL
+  • Food delivery to their location → TRANSPORT CHARGES
+  • Eating at a restaurant → FOOD
+  • Fuel for vehicle → FUEL
+  • Medicine or treatment → MEDICAL EXPENSES
+  • Office items → OFFICE or STATIONERY
+
+═══════════════════════════════════════════════════════════════
+IMPORTANT REMINDERS:
+═══════════════════════════════════════════════════════════════
+✓ Context > Keywords: Don't just match words
+✓ Hotels are ALWAYS Travel, never Transport
+✓ Uber/Ola/Taxi = Travel, not Transport
+✓ Delivery services = Transport Charges
+✓ Choose primary purpose, not secondary items
+✓ Return only categories from the allowed list
+✓ Confidence: 0-1 (e.g., 0.95 for clear cases, 0.70 for ambiguous)
 
 Return JSON only, no other text:
-{"bestCategory": "Exact Category Name from the list", "confidence": 0.85}`;
+{"bestCategory": "Exact Category Name from the list", "confidence": 0.95, "reason": "Brief one-line explanation"}`;
 
   try {
     const timeoutPromise = new Promise<never>((_, reject) =>
@@ -385,14 +488,32 @@ export async function inferCategoryFromReceiptText(
   }
 
   if (bestScore === 0 || bestCategories.length === 0) {
-    logger.info(
-      { companyId, textPreview: normalizedText.slice(0, 100) },
-      'OCR post-process: no category matched (Uncategorized)'
+    // No category matched - find "Others" category as fallback
+    const othersCategory = categories.find(
+      (c) => c.name.trim().toLowerCase() === 'others'
     );
-    return {
-      categorySuggestion: null,
-      categoryUnidentified: true,
-    };
+
+    if (othersCategory) {
+      logger.info(
+        { companyId, textPreview: normalizedText.slice(0, 100), categoryName: 'Others' },
+        'OCR post-process: no category matched, defaulting to Others (needs manual review)'
+      );
+      return {
+        categorySuggestion: othersCategory.name,
+        categoryId: othersCategory._id,
+        categoryUnidentified: true, // Flag for manual review
+      };
+    } else {
+      // No "Others" category found either - truly uncategorized
+      logger.warn(
+        { companyId, textPreview: normalizedText.slice(0, 100) },
+        'OCR post-process: no category matched and no Others category available'
+      );
+      return {
+        categorySuggestion: null,
+        categoryUnidentified: true,
+      };
+    }
   }
 
   const compareCategories = (a: ScoredCategory, b: ScoredCategory) => {

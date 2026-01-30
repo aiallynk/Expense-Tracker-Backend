@@ -100,7 +100,7 @@ export class OcrService {
           await OcrService.processOcrJob(job.jobId);
         }
       );
-      
+
       // If job is queued (per-user limit exceeded), emit socket event
       if (queueResult.queued && userId && queueResult.position) {
         // Emit queued event to frontend
@@ -188,19 +188,19 @@ export class OcrService {
       path: 'expenseId',
       populate: { path: 'reportId' },
     });
-    
+
     let userId: string | null = null;
     let receiptIdStr: string | null = null;
-    
+
     if (receiptDoc) {
       receiptDoc.status = ReceiptStatus.PROCESSING;
       await receiptDoc.save();
-      
+
       receiptIdStr = (receiptDoc._id as mongoose.Types.ObjectId).toString();
-      
+
       // Minimal log: OCR_STARTED
       logger.info({ receiptId: receiptIdStr }, 'OCR_STARTED');
-      
+
       // Get userId for socket emission
       if (receiptDoc.expenseId) {
         const expense = receiptDoc.expenseId as any;
@@ -209,7 +209,7 @@ export class OcrService {
           userId = report.userId.toString();
         }
       }
-      
+
       // Emit processing event when OCR job starts
       if (userId && receiptIdStr) {
         emitReceiptProcessing(userId, receiptIdStr);
@@ -221,7 +221,7 @@ export class OcrService {
     }
 
     try {
-      
+
       if (!receiptPopulated) {
         throw new Error('Receipt not found for OCR job');
       }
@@ -248,39 +248,39 @@ export class OcrService {
 
       // Generate presigned GET URL (5 min expiry) for OpenAI to access image directly
       const presignedUrl = await getPresignedDownloadUrl('receipts', receiptPopulated.storageKey, 300);
-      
+
       // Track OpenAI API call time
       const openaiStartTime = Date.now();
-      
+
       // Call OpenAI Vision API with presigned URL (no base64, no memory usage)
       // Use timeout with abort controller
       const result = await this.callOpenAIVisionWithTimeout(
-        presignedUrl, 
+        presignedUrl,
         receiptPopulated.mimeType,
         config.ocr.timeoutMs
       );
-      
+
       const openaiTimeMs = Date.now() - openaiStartTime;
-      
+
       const totalProcessingTimeMs = Date.now() - ocrStartTime;
-      
+
       // Calculate queue wait time (from job creation to processing start)
       let queueWaitTimeMs = 0;
       if (job.createdAt) {
-        const createdAtTime = job.createdAt instanceof Date 
-          ? job.createdAt.getTime() 
+        const createdAtTime = job.createdAt instanceof Date
+          ? job.createdAt.getTime()
           : new Date(job.createdAt).getTime();
         queueWaitTimeMs = Math.max(0, ocrStartTime - createdAtTime);
       }
-      
+
       // Minimal log: OCR_COMPLETED
-      logger.info({ 
-        receiptId: receiptIdStr, 
+      logger.info({
+        receiptId: receiptIdStr,
         timeMs: totalProcessingTimeMs,
         queueWaitMs: queueWaitTimeMs,
         openaiMs: openaiTimeMs
       }, 'OCR_COMPLETED');
-      
+
       // Save result to both result and resultJson for compatibility
       job.status = OcrJobStatus.COMPLETED;
       job.result = result;
@@ -293,7 +293,7 @@ export class OcrService {
         path: 'expenseId',
         populate: { path: 'reportId' },
       });
-      
+
       if (receiptDocUpdated) {
         receiptDocUpdated.parsedData = result;
         receiptDocUpdated.status = ReceiptStatus.COMPLETED;
@@ -302,11 +302,11 @@ export class OcrService {
         receiptDocUpdated.openaiTimeMs = openaiTimeMs;
         receiptDocUpdated.totalPipelineMs = totalProcessingTimeMs;
         await receiptDocUpdated.save();
-        
+
         if (!receiptIdStr) {
           receiptIdStr = (receiptDocUpdated._id as mongoose.Types.ObjectId).toString();
         }
-        
+
         // Get userId from expense/report for socket emission
         if (receiptDocUpdated.expenseId) {
           const expense = receiptDocUpdated.expenseId as any;
@@ -328,7 +328,7 @@ export class OcrService {
         try {
           const expense = receiptDocUpdated.expenseId as any;
           const expenseId = (expense._id as mongoose.Types.ObjectId).toString();
-          
+
           // Get companyId for company-level duplicate detection
           const report = expense.reportId as any;
           let companyId: mongoose.Types.ObjectId | undefined;
@@ -337,10 +337,10 @@ export class OcrService {
             const user = await User.findById(report.userId).select('companyId').exec();
             companyId = user?.companyId as mongoose.Types.ObjectId | undefined;
           }
-          
+
           // Import Expense model for updating
           const { Expense } = await import('../models/Expense');
-          
+
           // Update expense with OCR data temporarily for duplicate detection
           // This ensures duplicate detection works even if expense doesn't have vendor/amount yet
           const updateData: any = {};
@@ -370,34 +370,34 @@ export class OcrService {
               updateData.invoiceId = invoiceId;
             }
           }
-          
+
           // Update expense with OCR data if we have any updates
           if (Object.keys(updateData).length > 0) {
             await Expense.findByIdAndUpdate(expenseId, updateData).exec();
             logger.debug({ expenseId, updates: Object.keys(updateData) }, 'OCR: Updated expense with OCR data for duplicate detection');
           }
-          
+
           // Run duplicate detection with company-level scope
           // Check if we have minimum required data (vendor and amount/date)
           const hasVendor = updateData.vendor || expense.vendor;
           const hasAmount = updateData.amount || expense.amount;
           const hasDate = updateData.expenseDate || updateData.invoiceDate || expense.expenseDate || expense.invoiceDate;
-          
+
           if (hasVendor && (hasAmount || hasDate)) {
             const { DuplicateDetectionService } = await import('./duplicateDetection.service');
             const duplicateResult = await DuplicateDetectionService.runDuplicateCheck(expenseId, companyId);
-            logger.info({ 
-              expenseId, 
+            logger.info({
+              expenseId,
               receiptId: receiptIdStr,
               duplicateFlag: duplicateResult.duplicateFlag,
               duplicateReason: duplicateResult.duplicateReason,
               companyId: companyId?.toString(),
             }, 'OCR: Company-level duplicate detection completed after OCR');
-            
+
             // Store duplicate result to include in socket event
             (result as any).duplicateFlag = duplicateResult.duplicateFlag;
             (result as any).duplicateReason = duplicateResult.duplicateReason;
-            
+
             // Emit expense update event to notify frontend of duplicate flag
             if (duplicateResult.duplicateFlag && report && report.userId) {
               try {
@@ -418,8 +418,8 @@ export class OcrService {
               }
             }
           } else {
-            logger.debug({ 
-              expenseId, 
+            logger.debug({
+              expenseId,
               hasVendor: !!hasVendor,
               hasAmount: !!hasAmount,
               hasDate: !!hasDate,
@@ -488,7 +488,7 @@ export class OcrService {
       return job;
     } catch (error: any) {
       const totalProcessingTimeMs = Date.now() - ocrStartTime;
-      
+
       // Determine failure reason
       let failureReason: ReceiptFailureReason = ReceiptFailureReason.API_ERROR;
       if (error.message?.includes('timeout') || error.message?.includes('timed out') || totalProcessingTimeMs >= config.ocr.timeoutMs) {
@@ -513,15 +513,15 @@ export class OcrService {
         path: 'expenseId',
         populate: { path: 'reportId' },
       });
-      
+
       if (receiptDocFailed) {
         receiptDocFailed.status = ReceiptStatus.FAILED;
         receiptDocFailed.failureReason = failureReason;
         receiptDocFailed.totalPipelineMs = totalProcessingTimeMs;
         await receiptDocFailed.save();
-        
+
         const failedReceiptIdStr = (receiptDocFailed._id as mongoose.Types.ObjectId).toString();
-        
+
         // Get userId for socket emission
         let failedUserId: string | null = null;
         if (receiptDocFailed.expenseId) {
@@ -593,8 +593,8 @@ export class OcrService {
     } catch (error: any) {
       // Check if error is retryable (not authentication, not invalid model, etc.)
       const isRetryable = !(
-        error.status === 401 || 
-        error.message?.includes('authentication') || 
+        error.status === 401 ||
+        error.message?.includes('authentication') ||
         error.message?.includes('Unauthorized') ||
         error.message?.includes('invalid_model') ||
         error.code === 'invalid_model'
@@ -602,12 +602,12 @@ export class OcrService {
 
       if (isRetryable) {
         // Log fallback attempt
-        logger.warn({ 
-          primaryModel, 
-          fallbackModel, 
-          error: error.message 
+        logger.warn({
+          primaryModel,
+          fallbackModel,
+          error: error.message
         }, 'Primary OCR model failed, attempting fallback');
-        
+
         // Try fallback model
         try {
           return await this.callOpenAIVision(presignedUrl, _mimeType, fallbackModel);
@@ -639,7 +639,7 @@ export class OcrService {
   "total": number | null,
   "currency": string | null,
   "invoice_number": string | null,
-  "line_items": [{"description": string, "amount": number}]
+  "line_items": [{"description": string, "quantity": number | null, "amount": number}]
 }
 
 IMPORTANT: For invoice_number, extract ANY of these if found:
@@ -653,10 +653,39 @@ IMPORTANT: For invoice_number, extract ANY of these if found:
 - Any unique transaction identifier
 
 Extract the vendor name (merchant/recipient name).
-Extract the date in YYYY-MM-DD format.
+
+DATE EXTRACTION - CRITICAL:
+- The receipt may show dates in various formats: dd/mm/yyyy, mm/dd/yyyy, yyyy/mm/dd, yyyy-mm-dd, dd-mm-yyyy, etc.
+- You MUST intelligently detect the correct format and convert it to YYYY-MM-DD.
+- Use these rules to determine the correct format:
+  * If year comes first (4 digits), it's likely yyyy-mm-dd or yyyy/mm/dd
+  * If day is >12, that number is definitely the day (not month)
+  * Receipts are almost always from the past or today, never future dates
+  * Consider the vendor location/currency for likely format (e.g., INR = dd/mm/yyyy, USD might be mm/dd/yyyy)
+- ALWAYS return the date in YYYY-MM-DD format, regardless of the original format on the receipt.
+- Examples:
+  * "15/03/2024" → "2024-03-15" (dd/mm/yyyy)
+  * "03/15/2024" → "2024-03-15" (mm/dd/yyyy, since 15 can't be a month)
+  * "2024/03/15" → "2024-03-15" (yyyy/mm/dd)
+  * "01/02/2024" → analyze context: if INR currency, likely "2024-02-01" (dd/mm/yyyy); if USD and vendor is US-based, could be "2024-01-02" (mm/dd/yyyy)
+
 Extract the total amount as a number (without currency symbol).
-Extract currency code (INR, USD, etc.).
-Extract line_items: array of purchased items, each with "description" (item name) and "amount" (price). Omit totals, tax, discount, payment lines.
+Extract currency code (INR, USD, EUR, etc.).
+
+LINE ITEMS EXTRACTION - CRITICAL:
+- Extract an array of purchased items with detailed information
+- For each item, extract:
+  * "description": Item name/description (e.g., "Cappuccino Large", "Notebook A4", "Taxi Ride")
+  * "quantity": Quantity purchased (e.g., 2, 1.5, null if not shown). Can be a decimal number.
+  * "amount": Price for this line item (total for quantity, not unit price)
+- IMPORTANT: Only extract actual purchased items
+- DO NOT include: subtotals, tax lines, discounts, service charges, tips, payment method lines, or the final total
+- If quantity is shown as "x2" or "2x" or just "2", extract it as the quantity value
+- Examples:
+  * "2x Coffee @ 50 = 100" → {"description": "Coffee", "quantity": 2, "amount": 100}
+  * "Pizza Large 350" → {"description": "Pizza Large", "quantity": null, "amount": 350}
+  * "3 x Pen = 45" → {"description": "Pen", "quantity": 3, "amount": 45}
+- If the receipt is poorly formatted or unclear, do your best to extract what you can
 
 If unreadable, return null. No explanations.`;
 
@@ -668,9 +697,9 @@ If unreadable, return null. No explanations.`;
           {
             role: 'user',
             content: [
-              { 
-                type: 'text', 
-                text: prompt 
+              {
+                type: 'text',
+                text: prompt
               },
               {
                 type: 'image_url',
@@ -705,29 +734,29 @@ If unreadable, return null. No explanations.`;
         const parsed = JSON.parse(cleanedContent);
         // Map simplified OpenAI response format to our internal format
         // Extract invoice number from multiple possible fields (including UPI Reference, Transaction ID, etc.)
-        const invoiceNumber = parsed.invoice_number || 
-                             parsed.invoiceId || 
-                             parsed.invoice_id || 
-                             parsed.invoiceNo || 
-                             parsed.invoice_no ||
-                             parsed.billNo ||
-                             parsed.bill_no ||
-                             parsed.upi_ref_no ||
-                             parsed.upi_reference_number ||
-                             parsed.upiRefNo ||
-                             parsed.transaction_id ||
-                             parsed.transactionId ||
-                             parsed.txn_id ||
-                             parsed.payment_reference ||
-                             parsed.paymentReference ||
-                             parsed.payment_id ||
-                             parsed.paymentId ||
-                             parsed.order_id ||
-                             parsed.orderId ||
-                             parsed.receipt_number ||
-                             parsed.receiptNumber ||
-                             null;
-        
+        const invoiceNumber = parsed.invoice_number ||
+          parsed.invoiceId ||
+          parsed.invoice_id ||
+          parsed.invoiceNo ||
+          parsed.invoice_no ||
+          parsed.billNo ||
+          parsed.bill_no ||
+          parsed.upi_ref_no ||
+          parsed.upi_reference_number ||
+          parsed.upiRefNo ||
+          parsed.transaction_id ||
+          parsed.transactionId ||
+          parsed.txn_id ||
+          parsed.payment_reference ||
+          parsed.paymentReference ||
+          parsed.payment_id ||
+          parsed.paymentId ||
+          parsed.order_id ||
+          parsed.orderId ||
+          parsed.receipt_number ||
+          parsed.receiptNumber ||
+          null;
+
         const lineItemsRaw = parsed.line_items || parsed.lineItems;
         const lineItems: Array<{ description: string; amount: number }> = Array.isArray(lineItemsRaw)
           ? lineItemsRaw
@@ -787,7 +816,7 @@ If unreadable, return null. No explanations.`;
           'Please wait a moment and try again, or check your OpenAI account limits.'
         );
       }
-      
+
       throw new Error(`OpenAI API error: ${error.message || 'Unknown error'}\nStatus: ${error.status || 'N/A'}\nCode: ${error.code || 'N/A'}`);
     }
   }
@@ -803,7 +832,7 @@ If unreadable, return null. No explanations.`;
       /store[:\s]+([^\n,]+)/i,
       /"vendor"\s*:\s*"([^"]+)"/i,
     ];
-    
+
     for (const pattern of vendorPatterns) {
       const match = content.match(pattern);
       if (match && match[1]) {
@@ -821,7 +850,7 @@ If unreadable, return null. No explanations.`;
       /\$\s*([\d,]+\.?\d*)/i,
       /(\d+\.\d{2})/,
     ];
-    
+
     for (const pattern of amountPatterns) {
       const match = content.match(pattern);
       if (match && match[1]) {
@@ -833,7 +862,7 @@ If unreadable, return null. No explanations.`;
         }
       }
     }
-    
+
     // Try to extract date - multiple patterns
     const datePatterns = [
       /date[:\s]+([\d-]+)/i,
@@ -842,7 +871,7 @@ If unreadable, return null. No explanations.`;
       /(\d{2}\/\d{2}\/\d{4})/,
       /(\d{2}-\d{2}-\d{4})/,
     ];
-    
+
     for (const pattern of datePatterns) {
       const match = content.match(pattern);
       if (match && match[1]) {
@@ -850,14 +879,14 @@ If unreadable, return null. No explanations.`;
         break;
       }
     }
-    
+
     // Try to extract currency
     const currencyMatch = content.match(/"currency"\s*:\s*"([^"]+)"/i) ||
-                         content.match(/currency[:\s]+([A-Z]{3})/i);
+      content.match(/currency[:\s]+([A-Z]{3})/i);
     if (currencyMatch) {
       result.currency = currencyMatch[1].trim().toUpperCase();
     }
-    
+
     // Category matching is now handled separately via AI service
 
     return result;
