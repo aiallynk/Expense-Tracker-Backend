@@ -11,10 +11,10 @@ router.use(authMiddleware);
 
 // User endpoints
 router.get('/', ProjectsController.getAll);
-router.get('/:id', ProjectsController.getById);
-
-// Admin endpoints (company admin)
+// Specific paths before /:id so they are not matched as id
 router.get('/admin/list', requireCompanyAdmin, ProjectsController.getAdminProjects);
+router.get('/eligible-managers', requireCompanyAdmin, ProjectsController.getEligibleManagers);
+router.get('/:id', ProjectsController.getById);
 
 router.post('/', requireCompanyAdmin, ProjectsController.create);
 router.patch('/:id', requireCompanyAdmin, ProjectsController.update);

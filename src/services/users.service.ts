@@ -2,6 +2,7 @@ import bcrypt from 'bcrypt';
 import mongoose from 'mongoose';
 
 import { CompanyAdmin, ICompanyAdmin } from '../models/CompanyAdmin';
+import { Role } from '../models/Role';
 import { User, IUser } from '../models/User';
 import { emitUserCreated, emitUserUpdated, emitToUser } from '../socket/realtimeEvents';
 import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
@@ -276,6 +277,39 @@ export class UsersService {
     ]);
 
     return { users, total };
+  }
+
+  /**
+   * Get users eligible as project managers: company roles (EMPLOYEE, MANAGER, BUSINESS_HEAD, ACCOUNTANT)
+   * or users who have at least one custom role (Role type CUSTOM) for the company.
+   */
+  static async getEligibleProjectManagers(companyId: string): Promise<IUser[]> {
+    const companyObjectId = new mongoose.Types.ObjectId(companyId);
+    const customRoles = await Role.find({
+      companyId: companyObjectId,
+      type: 'CUSTOM',
+      isActive: true,
+    })
+      .select('_id')
+      .lean()
+      .exec();
+    const customRoleIds = customRoles.map((r) => r._id);
+
+    const query: any = {
+      companyId: companyObjectId,
+      status: UserStatus.ACTIVE,
+      $or: [
+        { role: { $in: [UserRole.EMPLOYEE, UserRole.MANAGER, UserRole.BUSINESS_HEAD, UserRole.ACCOUNTANT] } },
+        ...(customRoleIds.length > 0 ? [{ roles: { $in: customRoleIds } }] : []),
+      ],
+    };
+
+    return User.find(query)
+      .select('_id name email role')
+      .populate('roles', 'name type')
+      .sort({ name: 1 })
+      .lean()
+      .exec() as unknown as Promise<IUser[]>;
   }
 
   static async getUserById(id: string, companyId?: string): Promise<IUser | null> {

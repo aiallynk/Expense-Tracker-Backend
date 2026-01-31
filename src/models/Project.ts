@@ -8,7 +8,7 @@ export enum ProjectStatus {
 
 export interface IProject extends Document {
   name: string;
-  code?: string;
+  code: string;
   description?: string;
   companyId: mongoose.Types.ObjectId;
   costCentreId?: mongoose.Types.ObjectId;
@@ -34,6 +34,7 @@ const projectSchema = new Schema<IProject>(
     },
     code: {
       type: String,
+      required: true,
       trim: true,
       uppercase: true,
     },
@@ -95,11 +96,18 @@ const projectSchema = new Schema<IProject>(
   }
 );
 
-// Indexes - name must be unique within a company
+projectSchema.pre('save', function (next) {
+  if (typeof this.code === 'string') {
+    this.code = this.code.trim().toUpperCase();
+  }
+  next();
+});
+
+// Indexes - name and code must be unique within a company
 projectSchema.index({ companyId: 1, name: 1 }, { unique: true });
 projectSchema.index({ companyId: 1, status: 1 });
 projectSchema.index({ companyId: 1, costCentreId: 1, status: 1 });
-projectSchema.index({ companyId: 1, code: 1 }, { unique: true, sparse: true });
+projectSchema.index({ companyId: 1, code: 1 }, { unique: true });
 projectSchema.index({ managerId: 1 });
 
 export const Project = mongoose.model<IProject>('Project', projectSchema);

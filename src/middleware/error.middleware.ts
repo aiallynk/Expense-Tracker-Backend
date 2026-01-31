@@ -55,6 +55,22 @@ export const errorMiddleware = (
     return;
   }
 
+  // MongoDB duplicate key (E11000) - e.g. projects companyId+code or companyId+name
+  const errAny = err as AppError & { code?: number };
+  if (errAny.code === 11000) {
+    res.status(400).json({
+      success: false,
+      message:
+        err.message?.includes('companyId_1_name_1')
+          ? 'A project with this name already exists for your company.'
+          : err.message?.includes('companyId_1_code_1')
+            ? 'A project with this code already exists for your company.'
+            : 'A record with this value already exists.',
+      code: 'DUPLICATE_KEY',
+    });
+    return;
+  }
+
   // Custom application error
   const statusCode = err.statusCode || 500;
   const message = err.message || 'Internal server error';

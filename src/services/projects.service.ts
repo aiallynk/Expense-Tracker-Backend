@@ -6,10 +6,10 @@ import { ProjectStakeholderService } from './projectStakeholder.service';
 
 interface CreateProjectInput {
   name: string;
-  code?: string;
+  code: string;
   description?: string;
   companyId: string;
-  costCentreId: string;
+  costCentreId?: string;
   managerId?: string;
   startDate?: string;
   endDate?: string;
@@ -70,23 +70,53 @@ export class ProjectsService {
   }
 
   static async createProject(data: CreateProjectInput): Promise<IProject> {
+    if (!data.name || typeof data.name !== 'string' || !data.name.trim()) {
+      throw new Error('Project name is required');
+    }
+    if (!data.code || typeof data.code !== 'string' || !data.code.trim()) {
+      throw new Error('Project code is required');
+    }
     if (!data.costCentreId && !data.isGlobal) {
       throw new Error('Cost centre is required for non-global projects');
     }
-    const project = new Project({
-      name: data.name,
-      code: data.code,
-      description: data.description,
+    const codeValue = data.code.trim().toUpperCase();
+
+    const startDateVal =
+      data.startDate != null && String(data.startDate).trim() !== ''
+        ? new Date(data.startDate)
+        : undefined;
+    const endDateVal =
+      data.endDate != null && String(data.endDate).trim() !== ''
+        ? new Date(data.endDate)
+        : undefined;
+    const validStartDate =
+      startDateVal != null && !Number.isNaN(startDateVal.getTime()) ? startDateVal : undefined;
+    const validEndDate =
+      endDateVal != null && !Number.isNaN(endDateVal.getTime()) ? endDateVal : undefined;
+
+    const budgetNum =
+      data.budget != null && typeof data.budget === 'number' && Number.isFinite(data.budget) && data.budget >= 0
+        ? data.budget
+        : undefined;
+
+    const projectData: Record<string, unknown> = {
+      name: data.name.trim(),
+      code: codeValue,
+      description:
+        data.description != null && String(data.description).trim() !== ''
+          ? data.description
+          : undefined,
       companyId: new mongoose.Types.ObjectId(data.companyId),
       costCentreId: data.costCentreId ? new mongoose.Types.ObjectId(data.costCentreId) : undefined,
       managerId: data.managerId ? new mongoose.Types.ObjectId(data.managerId) : undefined,
-      startDate: data.startDate ? new Date(data.startDate) : undefined,
-      endDate: data.endDate ? new Date(data.endDate) : undefined,
-      budget: data.budget,
+      startDate: validStartDate,
+      endDate: validEndDate,
+      budget: budgetNum,
       status: (data.status as ProjectStatus) || ProjectStatus.ACTIVE,
-      isGlobal: data.isGlobal || false,
-    });
-    
+      isGlobal: data.isGlobal ?? false,
+    };
+    const project = new Project(projectData);
+
     const saved = await project.save();
 
     // Skip populate in test environment to avoid model registration issues
@@ -115,7 +145,14 @@ export class ProjectsService {
     }
 
     if (data.code !== undefined) {
-      project.code = data.code;
+      const codeVal =
+        typeof data.code === 'string' && data.code.trim()
+          ? data.code.trim().toUpperCase()
+          : undefined;
+      if (!codeVal) {
+        throw new Error('Project code is required');
+      }
+      project.code = codeVal;
     }
 
     if (data.description !== undefined) {
