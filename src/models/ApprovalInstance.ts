@@ -17,6 +17,18 @@ export interface IApprovalHistory {
     comments?: string;
 }
 
+/** Per-instance override levels (e.g. from EmployeeApprovalProfile). When set, used instead of matrix.levels. */
+export interface IApprovalLevelOverride {
+    levelNumber: number;
+    enabled: boolean;
+    approvalType: string;
+    parallelRule?: string;
+    approverRoleIds?: mongoose.Types.ObjectId[];
+    approverUserIds?: mongoose.Types.ObjectId[];
+    conditions?: any[];
+    skipAllowed?: boolean;
+}
+
 export interface IApprovalInstance extends Document {
     companyId: mongoose.Types.ObjectId;
     matrixId: mongoose.Types.ObjectId;
@@ -25,6 +37,8 @@ export interface IApprovalInstance extends Document {
     currentLevel: number;
     status: ApprovalStatus;
     history: IApprovalHistory[];
+    /** When set (e.g. personalized matrix), used instead of matrix.levels for this instance. */
+    effectiveLevels?: IApprovalLevelOverride[];
     createdAt: Date;
     updatedAt: Date;
 }
@@ -73,6 +87,7 @@ const ApprovalInstanceSchema = new Schema<IApprovalInstance>(
             default: ApprovalStatus.PENDING,
         },
         history: [ApprovalHistorySchema],
+        effectiveLevels: [{ type: Schema.Types.Mixed }],
     },
     {
         timestamps: true,

@@ -13,7 +13,7 @@ import {
 } from '../models/ExpenseReport';
 import { Project } from '../models/Project';
 import { User } from '../models/User';
-import { emitCompanyAdminDashboardUpdate, emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
+import { emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
 import { buildCompanyQuery } from '../utils/companyAccess';
 import { CreateReportDto, UpdateReportDto, ReportFiltersDto } from '../utils/dtoTypes';
 import { ExpenseReportStatus, UserRole, ExpenseStatus, AuditAction } from '../utils/enums';
@@ -22,8 +22,10 @@ import { getPaginationOptions, createPaginatedResult } from '../utils/pagination
 import { ApprovalService } from './ApprovalService';
 import { AuditService } from './audit.service';
 import { BusinessHeadSelectionService } from './businessHeadSelection.service';
-import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
+import { enqueueAnalyticsEvent } from './companyAnalyticsSnapshot.service';
+import { EmployeeApprovalProfileService } from './EmployeeApprovalProfileService';
 import { NotificationService } from './notification.service';
+import { ApprovalType, ParallelRule } from '../models/ApprovalMatrix';
 
 import { logger } from '@/config/logger';
 import { config } from '@/config/index';
@@ -144,17 +146,14 @@ export class ReportsService {
       );
       logger.info('Audit log created successfully');
 
-      // Emit company admin dashboard update if user has a company
+      // Enqueue analytics update (background worker will refresh snapshot)
       try {
         const user = await User.findById(userId).select('companyId').exec();
         if (user && user.companyId) {
-          const companyId = user.companyId.toString();
-          const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-          emitCompanyAdminDashboardUpdate(companyId, stats);
+          enqueueAnalyticsEvent({ companyId: user.companyId.toString(), event: 'REBUILD_SNAPSHOT' });
         }
       } catch (error) {
-        // Don't fail report creation if dashboard update fails
-        logger.error({ error }, 'Error emitting company admin dashboard update');
+        logger.error({ error }, 'Error enqueueing analytics update');
       }
 
       logger.info('ReportsService.createReport - Report creation completed successfully');
@@ -755,6 +754,44 @@ export class ReportsService {
     return saved;
   }
 
+  /**
+   * Build effective matrix levels from an employee's personalized approval profile.
+   * Used when the report submitter has an active EmployeeApprovalProfile (personalized matrix).
+   */
+  private static buildEffectiveLevelsFromProfile(approverChain: Array<{ level: number; mode: string; approvalType?: string | null; roles: string[]; approverUserIds?: string[] }>): Array<{
+    levelNumber: number;
+    enabled: boolean;
+    approvalType: string;
+    parallelRule?: string;
+    approverRoleIds: mongoose.Types.ObjectId[];
+    approverUserIds: mongoose.Types.ObjectId[];
+    conditions: any[];
+    skipAllowed: boolean;
+  }> {
+    return approverChain.map((lvl) => {
+      const approvalType = (lvl.mode === 'PARALLEL' ? ApprovalType.PARALLEL : ApprovalType.SEQUENTIAL) as string;
+      const parallelRule = lvl.mode === 'PARALLEL' && (lvl.approvalType === 'ANY' || lvl.approvalType === 'ALL')
+        ? (lvl.approvalType === 'ANY' ? ParallelRule.ANY : ParallelRule.ALL)
+        : undefined;
+      const approverRoleIds = (lvl.roles || [])
+        .filter((r) => r && mongoose.Types.ObjectId.isValid(r))
+        .map((r) => new mongoose.Types.ObjectId(r));
+      const approverUserIds = (lvl.approverUserIds || [])
+        .filter((id) => id && mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+      return {
+        levelNumber: lvl.level,
+        enabled: true,
+        approvalType,
+        parallelRule,
+        approverRoleIds,
+        approverUserIds,
+        conditions: [],
+        skipAllowed: false,
+      };
+    });
+  }
+
   static async computeApproverChain(report: IExpenseReport): Promise<IApprover[]> {
     const approvers: IApprover[] = [];
     const reportUser = await User.findById(report.userId);
@@ -1352,6 +1389,26 @@ export class ReportsService {
         }, 'Failed to apply voucher to report');
         throw error; // Re-throw to prevent submission if voucher application fails
       }
+
+      // Refresh report instance to get latest version (since applyVoucherToReport modified it)
+      const refreshedReport = await ExpenseReport.findById(id);
+      if (refreshedReport) {
+        // Update local properties that might be used later
+        report.appliedVouchers = refreshedReport.appliedVouchers;
+        report.advanceCashId = refreshedReport.advanceCashId;
+        report.advanceAppliedAmount = refreshedReport.advanceAppliedAmount;
+        report.advanceCurrency = refreshedReport.advanceCurrency;
+        // Important: update version key to avoid VersionError on save
+        report.increment(); // Or just replace the object?
+        // Better to just replace the object properties or restart with fresh object, 
+        // but 'report' is const reference to the object? No it is from findById.
+        // Let's just update the internal state or re-assign if it was let.
+        // Since 'report' is const (from line 1260), we can't reassign it.
+        // But we can mutate it or use the refreshed one.
+        // However, subsequent code uses 'report'. 
+        // We should manually sync the version and modified fields.
+        (report as any).__v = refreshedReport.__v;
+      }
     }
 
     // Track approvers for audit/logging without relying on a scoped variable
@@ -1367,12 +1424,31 @@ export class ReportsService {
           reportUser.companyId as mongoose.Types.ObjectId
         );
 
-        // Initiate approval using the ApprovalService (Matrix-based)
+        // Personalized matrix: use employee's approval profile when set (includes selected approver users per level)
+        let effectiveMatrixLevels: Array<{ levelNumber: number; enabled: boolean; approvalType: string; parallelRule?: string; approverRoleIds: mongoose.Types.ObjectId[]; approverUserIds: mongoose.Types.ObjectId[]; conditions: any[]; skipAllowed: boolean }> | null = null;
+        const profile = await EmployeeApprovalProfileService.getActive(
+          (report.userId as mongoose.Types.ObjectId).toString(),
+          reportUser.companyId.toString()
+        );
+        if (profile?.approverChain?.length) {
+          effectiveMatrixLevels = this.buildEffectiveLevelsFromProfile(profile.approverChain as any);
+          logger.info({
+            reportId: id,
+            userId: report.userId,
+            levelsCount: effectiveMatrixLevels.length,
+          }, 'Using personalized approval matrix for report submission');
+        }
+
+        const initialData: any = effectiveMatrixLevels
+          ? { requestData: report, effectiveMatrix: { levels: effectiveMatrixLevels } }
+          : report;
+
+        // Initiate approval using the ApprovalService (Matrix-based or personalized)
         const approvalInstance = await ApprovalService.initiateApproval(
           reportUser.companyId.toString(),
           id,
           'EXPENSE_REPORT',
-          report
+          initialData
         );
         approvalInstanceIdForAudit = (approvalInstance._id as any)?.toString?.() || String(approvalInstance._id);
 
@@ -1400,20 +1476,23 @@ export class ReportsService {
         // This allows the approval UI to show additional approver remarks
         // Additional approvers are added after L2 (or after last normal approver)
         if (additionalApprovers.length > 0) {
-          // Get the max level from ApprovalMatrix to determine where to insert additional approvers
-          const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
-          const matrix = await ApprovalMatrix.findOne({
-            companyId: reportUser.companyId,
-            isActive: true
-          }).exec();
-
+          // Get the max level from effective matrix (personalized) or company ApprovalMatrix
           let maxLevel = 2; // Default to L2
-          if (matrix && matrix.levels) {
-            const enabledLevels = matrix.levels
-              .filter((l: any) => l.enabled !== false)
-              .map((l: any) => l.levelNumber);
-            if (enabledLevels.length > 0) {
-              maxLevel = Math.max(...enabledLevels);
+          if (effectiveMatrixLevels?.length) {
+            maxLevel = Math.max(...effectiveMatrixLevels.map((l) => l.levelNumber), 2);
+          } else {
+            const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
+            const matrix = await ApprovalMatrix.findOne({
+              companyId: reportUser.companyId,
+              isActive: true
+            }).exec();
+            if (matrix && matrix.levels) {
+              const enabledLevels = matrix.levels
+                .filter((l: any) => l.enabled !== false)
+                .map((l: any) => l.levelNumber);
+              if (enabledLevels.length > 0) {
+                maxLevel = Math.max(...enabledLevels);
+              }
             }
           }
 
@@ -1566,6 +1645,18 @@ export class ReportsService {
     } catch (error) {
       logger.error({ error }, 'Error emitting manager real-time events');
       // Don't fail report submission if real-time events fail
+    }
+
+    // Enqueue analytics update (REPORT_SUBMITTED)
+    try {
+      if (reportUser && reportUser.companyId) {
+        enqueueAnalyticsEvent({
+          companyId: reportUser.companyId.toString(),
+          event: 'REPORT_SUBMITTED',
+        });
+      }
+    } catch (error) {
+      logger.error({ error }, 'Error enqueueing analytics update after submit');
     }
 
     return saved;
@@ -1937,17 +2028,19 @@ export class ReportsService {
       { status: newStatus }
     );
 
-    // Emit company admin dashboard update if report user has a company
+    // Enqueue analytics update (REPORT_APPROVED or REPORT_REJECTED)
     try {
       const reportUser = await User.findById(saved.userId).select('companyId').exec();
       if (reportUser && reportUser.companyId) {
         const companyId = reportUser.companyId.toString();
-        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-        emitCompanyAdminDashboardUpdate(companyId, stats);
+        enqueueAnalyticsEvent({
+          companyId,
+          event: saved.status === ExpenseReportStatus.APPROVED ? 'REPORT_APPROVED' : 'REPORT_REJECTED',
+          reportId: id,
+        });
       }
     } catch (error) {
-      // Don't fail report update if dashboard update fails
-      logger.error({ error }, 'Error emitting company admin dashboard update');
+      logger.error({ error }, 'Error enqueueing analytics update');
     }
 
     // Notify employee
@@ -2005,16 +2098,13 @@ export class ReportsService {
     // Log audit
     await AuditService.log(userId, 'ExpenseReport', reportId, AuditAction.DELETE);
 
-    // Emit socket events
+    // Enqueue analytics rebuild after report deletion
     try {
       if (user && user.companyId) {
-        const companyId = user.companyId.toString();
-        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-        emitCompanyAdminDashboardUpdate(companyId, stats);
+        enqueueAnalyticsEvent({ companyId: user.companyId.toString(), event: 'REBUILD_SNAPSHOT' });
       }
     } catch (error) {
-      // Don't fail deletion if real-time updates fail
-      logger.error({ error }, 'Error emitting company admin dashboard update after report deletion');
+      logger.error({ error }, 'Error enqueueing analytics update after report deletion');
     }
 
     emitManagerDashboardUpdate(reportUserId);
@@ -2164,6 +2254,17 @@ export class ReportsService {
         },
         'Settlement processed successfully'
       );
+
+      // Enqueue analytics update (SETTLEMENT_COMPLETED)
+      try {
+        enqueueAnalyticsEvent({
+          companyId: user.companyId.toString(),
+          event: 'SETTLEMENT_COMPLETED',
+          reportId,
+        });
+      } catch (error) {
+        logger.error({ error }, 'Error enqueueing analytics update after settlement');
+      }
 
       // Notify report owner that settlement is done
       try {

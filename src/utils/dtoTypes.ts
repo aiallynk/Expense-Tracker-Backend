@@ -43,6 +43,13 @@ export const updateProfileSchema = z.object({
   profileImage: z.string().url().optional().nullable(),
   companyId: z.string().optional(),
   departmentId: z.string().optional(),
+  notificationSettings: z.object({
+    email: z.boolean().optional(),
+    push: z.boolean().optional(),
+    expenseUpdates: z.boolean().optional(),
+    reportStatus: z.boolean().optional(),
+    approvalAlerts: z.boolean().optional(),
+  }).optional(),
 });
 
 // Helper to transform empty strings to undefined

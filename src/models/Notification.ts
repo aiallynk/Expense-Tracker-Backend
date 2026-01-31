@@ -41,6 +41,7 @@ export interface INotification extends Document {
   isBroadcast?: boolean; // Flag to identify broadcast notifications
   createdAt: Date;
   updatedAt: Date;
+  notification_key?: string;
 }
 
 const notificationSchema = new Schema<INotification>(
@@ -97,6 +98,10 @@ const notificationSchema = new Schema<INotification>(
       type: Boolean,
       default: false,
     },
+    notification_key: {
+      type: String,
+      required: false,
+    },
   },
   {
     timestamps: true,
@@ -107,6 +112,7 @@ const notificationSchema = new Schema<INotification>(
 notificationSchema.index({ userId: 1, read: 1, createdAt: -1 });
 notificationSchema.index({ companyId: 1, read: 1, createdAt: -1 });
 notificationSchema.index({ createdAt: -1 });
+notificationSchema.index({ notification_key: 1 }, { unique: true, sparse: true });
 
 export const Notification = mongoose.model<INotification>('Notification', notificationSchema);
 

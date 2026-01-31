@@ -352,6 +352,14 @@ export interface ReceiptProcessedPayload {
   categorySuggestion?: string | null;
   categoryId?: string;
   categoryUnidentified?: boolean;
+  /** True if receipt is handwritten; user should recheck. */
+  isHandwritten?: boolean;
+  /** Field names to highlight for review (e.g. "date", "vendor", "total"). */
+  doubtfulFields?: string[];
+  /** True if date was ambiguous (e.g. dd-mm-yy) and user should confirm. */
+  dateReviewRecommended?: boolean;
+  /** Exchange rate if present on receipt. */
+  exchangeRate?: number | null;
 }
 
 // Emit receipt processed event to user

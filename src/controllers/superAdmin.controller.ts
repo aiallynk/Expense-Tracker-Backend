@@ -836,6 +836,13 @@ export class SuperAdminController {
       return;
     }
 
+    // Snapshot for reports/financial (single source of truth)
+    const { getSnapshotForDashboard } = await import('../services/companyAnalyticsSnapshot.service');
+    const snapshot = await getSnapshotForDashboard(companyId);
+    const totalReports = snapshot?.totalReports ?? 0;
+    const approvedReports = snapshot?.approvedReports ?? 0;
+    const rejectedReports = snapshot?.rejectedReports ?? 0;
+
     // Calculate date range
     const now = new Date();
     const startDate = new Date();
@@ -910,13 +917,20 @@ export class SuperAdminController {
       // Use default values
     }
 
-    // Reports Analytics
-    const [totalReports, approvedReports, pendingReports, rejectedReports] = await Promise.all([
-      ExpenseReport.countDocuments({ userId: { $in: userIds } }),
-      ExpenseReport.countDocuments({ userId: { $in: userIds }, status: ExpenseReportStatus.APPROVED }),
-      ExpenseReport.countDocuments({ userId: { $in: userIds }, status: ExpenseReportStatus.PENDING_APPROVAL_L1 }),
-      ExpenseReport.countDocuments({ userId: { $in: userIds }, status: ExpenseReportStatus.REJECTED })
-    ]);
+    // Reports Analytics (counts from snapshot; pending from single query)
+    const pendingReports = await ExpenseReport.countDocuments({
+      userId: { $in: userIds },
+      status: {
+        $in: [
+          ExpenseReportStatus.SUBMITTED,
+          ExpenseReportStatus.PENDING_APPROVAL_L1,
+          ExpenseReportStatus.PENDING_APPROVAL_L2,
+          ExpenseReportStatus.PENDING_APPROVAL_L3,
+          ExpenseReportStatus.PENDING_APPROVAL_L4,
+          ExpenseReportStatus.PENDING_APPROVAL_L5,
+        ],
+      },
+    });
 
     const reportsThisMonth = await ExpenseReport.countDocuments({
       userId: { $in: userIds },
@@ -988,26 +1002,8 @@ export class SuperAdminController {
     });
     const ocrContribution = totalReceipts > 0 ? (ocrReceipts / totalReceipts * 100) : 0;
 
-    // Financial Analytics (using only company primary currency)
-    let totalRevenue = 0;
-    try {
-      const monthlyRevenue = await ExpenseReport.aggregate([
-        {
-          $match: {
-            userId: { $in: userIds },
-            status: ExpenseReportStatus.APPROVED,
-            approvedAt: { $gte: startDate },
-            currency: companyCurrency // Only use primary company currency
-          }
-        },
-        { $group: { _id: '$currency', total: { $sum: '$totalAmount' } } }
-      ]);
-
-      totalRevenue = monthlyRevenue.reduce((sum, item) => sum + item.total, 0);
-    } catch (revenueError: any) {
-      logger.warn({ error: revenueError.message }, 'Revenue aggregation failed');
-      totalRevenue = 0;
-    }
+    // Financial Analytics (from snapshot – single source of truth)
+    const totalRevenue = snapshot?.totalExpenseAmount ?? snapshot?.approvedExpenseAmount ?? 0;
 
     // Calculate MRR based on time range (normalize to monthly value)
     let mrrContribution;

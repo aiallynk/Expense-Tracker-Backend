@@ -82,12 +82,15 @@ export class TestNotificationController {
             },
           });
 
-          notifications.push(notification);
+          if (notification) {
+            notifications.push(notification);
 
-          // Emit real-time event to user
-          emitNotificationToUser(userId, notification.toObject());
+            // Emit real-time event to user
+            emitNotificationToUser(userId, notification.toObject());
 
-          notificationsCreated++;
+            notificationsCreated++;
+          }
+
         } catch (error: any) {
           logger.error({ error: error.message || error, userId }, 'Error creating notification for user');
         }

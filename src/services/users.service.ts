@@ -3,14 +3,14 @@ import mongoose from 'mongoose';
 
 import { CompanyAdmin, ICompanyAdmin } from '../models/CompanyAdmin';
 import { User, IUser } from '../models/User';
-import { emitCompanyAdminDashboardUpdate, emitUserCreated, emitUserUpdated, emitToUser } from '../socket/realtimeEvents';
+import { emitUserCreated, emitUserUpdated, emitToUser } from '../socket/realtimeEvents';
 import { UpdateProfileDto, UpdateUserDto } from '../utils/dtoTypes';
 import { UserRole, UserStatus, AuditAction } from '../utils/enums';
 
 // import { AuthRequest } from '../middleware/auth.middleware'; // Unused
 
 import { AuditService } from './audit.service';
-import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
+import { enqueueAnalyticsEvent } from './companyAnalyticsSnapshot.service';
 import { SystemAnalyticsService } from './systemAnalytics.service';
 
 import { logger } from '@/config/logger';
@@ -86,6 +86,16 @@ export class UsersService {
 
     if (data.profileImage !== undefined) {
       user.profileImage = data.profileImage || undefined;
+    }
+
+    if (data.notificationSettings !== undefined) {
+      user.notificationSettings = {
+        push: data.notificationSettings.push ?? user.notificationSettings?.push ?? true,
+        email: data.notificationSettings.email ?? user.notificationSettings?.email ?? true,
+        expenseUpdates: data.notificationSettings.expenseUpdates ?? user.notificationSettings?.expenseUpdates ?? true,
+        reportStatus: data.notificationSettings.reportStatus ?? user.notificationSettings?.reportStatus ?? true,
+        approvalAlerts: data.notificationSettings.approvalAlerts ?? user.notificationSettings?.approvalAlerts ?? true
+      };
     }
 
     // Track if company or department changed
@@ -425,9 +435,8 @@ export class UsersService {
           emitUserCreated(companyId, formattedUser);
         }
 
-        // Emit dashboard stats update for company admin
-        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-        emitCompanyAdminDashboardUpdate(companyId, stats);
+        // Enqueue analytics snapshot refresh for company admin
+        enqueueAnalyticsEvent({ companyId, event: 'REBUILD_SNAPSHOT' });
 
         // Update super admin dashboard analytics in real-time
         try {
@@ -575,9 +584,8 @@ export class UsersService {
         };
         emitUserUpdated(companyId, formattedUser);
 
-        // Emit dashboard stats update
-        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-        emitCompanyAdminDashboardUpdate(companyId, stats);
+        // Enqueue analytics snapshot refresh
+        enqueueAnalyticsEvent({ companyId, event: 'REBUILD_SNAPSHOT' });
       } catch (error) {
         // Don't fail user update if real-time updates fail
         logger.error({ error }, 'Error emitting real-time updates');
@@ -604,7 +612,7 @@ export class UsersService {
     for (const userId of userIds) {
       try {
         const user = await User.findById(userId);
-        
+
         if (!user) {
           failed++;
           errors.push(`User ${userId} not found`);
@@ -626,21 +634,21 @@ export class UsersService {
             await AuditService.log(requestingUserId, 'User', userId, AuditAction.UPDATE);
             updated++;
             break;
-          
+
           case 'deactivate':
             user.status = UserStatus.INACTIVE;
             await user.save();
             await AuditService.log(requestingUserId, 'User', userId, AuditAction.UPDATE);
             updated++;
             break;
-          
+
           case 'delete':
             // Permanent delete: remove user from database
             await user.deleteOne();
             await AuditService.log(requestingUserId, 'User', userId, AuditAction.DELETE);
             updated++;
             break;
-          
+
           default:
             failed++;
             errors.push(`Invalid action: ${action}`);
@@ -673,13 +681,12 @@ export class UsersService {
       }
     }
 
-    // Emit dashboard stats update for company if applicable
+    // Enqueue analytics snapshot refresh for company if applicable
     if (companyId && updated > 0) {
       try {
-        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-        emitCompanyAdminDashboardUpdate(companyId, stats);
+        enqueueAnalyticsEvent({ companyId, event: 'REBUILD_SNAPSHOT' });
       } catch (error) {
-        logger.error({ error, companyId }, 'Error emitting dashboard update after bulk action');
+        logger.error({ error, companyId }, 'Error enqueueing analytics update after bulk action');
       }
     }
 

@@ -5,7 +5,7 @@ import { asyncHandler } from '../middleware/error.middleware';
 import { ExpensesService } from '../services/expenses.service';
 import { ExportService } from '../services/export.service';
 import { ReportsService } from '../services/reports.service';
-import { emitCompanyAdminDashboardUpdate } from '../socket/realtimeEvents';
+import { getDashboardPayload, enqueueAnalyticsEvent, rebuildSnapshotsForCompany } from '../services/companyAnalyticsSnapshot.service';
 import {
   reportFiltersSchema,
   expenseFiltersSchema,
@@ -254,149 +254,90 @@ export class AdminController {
     });
   });
 
-  // Dashboard
+  // Dashboard – read from company_analytics_snapshot only (no aggregation)
   static getDashboard = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const { ExpenseReport } = await import('../models/ExpenseReport');
-    const { Expense: ExpenseModel } = await import('../models/Expense');
-    const { User } = await import('../models/User');
     const { CompanyAdmin } = await import('../models/CompanyAdmin');
-
-    // Build query filters based on user role
-    let reportQuery: any = {};
-    let expenseQuery: any = {};
-    let userQuery: any = {};
+    const { ExpenseReport } = await import('../models/ExpenseReport');
+    const { User } = await import('../models/User');
     let companyId: string | undefined;
 
-    // If user is COMPANY_ADMIN, filter by their company
     if (req.user!.role === 'COMPANY_ADMIN') {
       const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
       if (companyAdmin && companyAdmin.companyId) {
         companyId = companyAdmin.companyId.toString();
-        
-        // Get all user IDs in this company
-        const companyUsers = await User.find({ companyId: companyAdmin.companyId })
-          .select('_id')
-          .exec();
-        const userIds = companyUsers.map(u => u._id);
-
-        // Filter reports and expenses by company users
-        reportQuery = { userId: { $in: userIds } };
-        expenseQuery = { userId: { $in: userIds } };
-        userQuery = { companyId: companyAdmin.companyId };
       }
     }
 
-    // Calculate date range for this month
-    const now = new Date();
-    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-
-    // BUSINESS RULE: Only expenses from FULLY APPROVED reports should be included in dashboard analytics
-    // Exclude: DRAFT, SUBMITTED, PENDING_APPROVAL_L*, CHANGES_REQUESTED, REJECTED
-    // Include ONLY: APPROVED
-    const approvedReportStatuses = [
-      ExpenseReportStatus.APPROVED,
-    ];
-
-    // Get approved reports first
-    const approvedReportsList = await ExpenseReport.find({
-      ...reportQuery,
-      status: { $in: approvedReportStatuses },
-    })
-      .select('_id')
-      .exec();
-
-    const approvedReportIds = approvedReportsList.map((r) => r._id);
-
-    // Build month query for expenses - only from approved reports
-    const monthExpenseQuery: any = {
-      ...expenseQuery,
-      expenseDate: {
-        $gte: startOfMonth,
-        $lte: endOfMonth,
-      },
-    };
-
-    // Only include expenses from approved reports
-    if (approvedReportIds.length > 0) {
-      monthExpenseQuery.reportId = { $in: approvedReportIds };
-    } else {
-      // No approved reports → no approved spend this month
-      monthExpenseQuery.reportId = { $in: [] }; // Empty array ensures no matches
+    if (!companyId) {
+      return res.status(200).json({
+        success: true,
+        data: {
+          totalReports: 0,
+          totalExpenses: 0,
+          pendingReports: 0,
+          approvedReports: 0,
+          totalAmount: 0,
+          totalAmountThisMonth: 0,
+          totalUsers: 0,
+          employees: 0,
+          managers: 0,
+          businessHeads: 0,
+        },
+      }) as any;
     }
 
-    const [
-      totalReports,
-      totalExpenses,
-      pendingReports,
-      approvedReports,
-      totalAmount,
-      totalAmountThisMonth,
-      totalUsers,
-    ] = await Promise.all([
-      ExpenseReport.countDocuments(reportQuery),
-      ExpenseModel.countDocuments(expenseQuery),
-      ExpenseReport.countDocuments({ ...reportQuery, status: ExpenseReportStatus.SUBMITTED }),
-      ExpenseReport.countDocuments({ ...reportQuery, status: { $in: approvedReportStatuses } }),
-      ExpenseReport.aggregate([
-        { $match: { ...reportQuery, status: ExpenseReportStatus.APPROVED } },
-        { $group: { _id: null, total: { $sum: '$totalAmount' } } },
-      ]),
-      ExpenseModel.aggregate([
-        { $match: monthExpenseQuery },
-        { $group: { _id: null, total: { $sum: '$amount' } } },
-      ]),
-      User.countDocuments(userQuery),
-    ]);
-
-    // Calculate user breakdown
-    let employees = 0;
-    let managers = 0;
-    let businessHeads = 0;
-    
-    if (userQuery.companyId) {
-      const companyUsers = await User.find(userQuery).select('role').exec();
-      employees = companyUsers.filter(u => u.role === 'EMPLOYEE').length;
-      managers = companyUsers.filter(u => u.role === 'MANAGER').length;
-      businessHeads = companyUsers.filter(u => u.role === 'BUSINESS_HEAD').length;
-    }
-
-    const dashboardData = {
-      totalReports,
-      totalExpenses,
-      pendingReports,
-      approvedReports,
-      totalAmount: totalAmount[0]?.total || 0,
-      totalAmountThisMonth: totalAmountThisMonth[0]?.total || 0,
-      totalUsers: totalUsers || 0,
-      employees,
-      managers,
-      businessHeads,
-    };
-
-    // Emit real-time update if company admin
-    if (req.user!.role === 'COMPANY_ADMIN' && companyId) {
+    const dashboardData = await getDashboardPayload(companyId);
+    const snapshot = await import('../services/companyAnalyticsSnapshot.service').then(
+      (m) => m.getSnapshotForDashboard(companyId)
+    );
+    if (!snapshot || (snapshot.totalExpenseAmount === 0 && snapshot.approvedReports === 0)) {
       try {
-        emitCompanyAdminDashboardUpdate(companyId, dashboardData);
-      } catch (error) {
-        // Don't fail the request if WebSocket emit fails
-        logger.error({ error }, 'Error emitting company admin dashboard update');
+        enqueueAnalyticsEvent({ companyId, event: 'REBUILD_SNAPSHOT' });
+      } catch (_) {
+        // ignore
       }
     }
+    const companyUsers = await User.find({ companyId }).select('_id').exec();
+    const userIds = companyUsers.map((u) => u._id);
+    const [pendingReports, totalExpenses] = await Promise.all([
+      userIds.length > 0
+        ? ExpenseReport.countDocuments({
+            userId: { $in: userIds },
+            status: {
+              $in: [
+                ExpenseReportStatus.SUBMITTED,
+                ExpenseReportStatus.PENDING_APPROVAL_L1,
+                ExpenseReportStatus.PENDING_APPROVAL_L2,
+                ExpenseReportStatus.PENDING_APPROVAL_L3,
+                ExpenseReportStatus.PENDING_APPROVAL_L4,
+                ExpenseReportStatus.PENDING_APPROVAL_L5,
+              ],
+            },
+          })
+        : 0,
+      userIds.length > 0
+        ? (await import('../models/Expense')).Expense.countDocuments({ userId: { $in: userIds } })
+        : 0,
+    ]);
 
     res.status(200).json({
       success: true,
-      data: dashboardData,
+      data: {
+        ...dashboardData,
+        pendingReports,
+        totalExpenses,
+      },
     });
   });
 
-  // Company Analytics
+  // Company Analytics – reports/financial from snapshot; OCR/storage/API from existing sources
   static getCompanyAnalytics = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { ExpenseReport } = await import('../models/ExpenseReport');
     const { Expense: ExpenseModel } = await import('../models/Expense');
     const { Receipt } = await import('../models/Receipt');
     const { User } = await import('../models/User');
     const { CompanyAdmin } = await import('../models/CompanyAdmin');
+    const { getSnapshotForDashboard } = await import('../services/companyAnalyticsSnapshot.service');
 
     const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
     const cacheKey = cacheKeys.companyAnalytics(companyId, req.query);
@@ -418,11 +359,11 @@ export class AdminController {
       .exec();
     const userIds = companyUsers.map(u => u._id);
 
-    // Calculate date ranges
+    // Snapshot for reports/financial (single source of truth)
+    const snapshot = await getSnapshotForDashboard(companyId);
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
-    // const startOfYear = new Date(now.getFullYear(), 0, 1); // Not currently used
 
     // OCR Analytics
     const ocrStats = await ExpenseModel.aggregate([
@@ -464,48 +405,26 @@ export class AdminController {
       }
     ]);
 
-    // Reports Analytics
-    const reportStats = await ExpenseReport.aggregate([
-      { $match: { userId: { $in: userIds } } },
-      {
-        $group: {
-          _id: null,
-          totalReports: { $sum: 1 },
-          approvedReports: {
-            $sum: { $cond: [{ $eq: ['$status', 'APPROVED'] }, 1, 0] }
-          },
-          pendingReports: {
-            $sum: { $cond: [{ $eq: ['$status', 'SUBMITTED'] }, 1, 0] }
-          },
-          rejectedReports: {
-            $sum: { $cond: [{ $eq: ['$status', 'REJECTED'] }, 1, 0] }
-          },
-          avgApprovalTime: {
-            $avg: {
-              $cond: [
-                { $and: [{ $ne: ['$approvedAt', null] }, { $ne: ['$submittedAt', null] }] },
-                { $divide: [{ $subtract: ['$approvedAt', '$submittedAt'] }, 86400000] }, // Convert to days
-                null
-              ]
-            }
-          },
-          monthlyReports: {
-            $sum: {
-              $cond: [
-                {
-                  $and: [
-                    { $gte: ['$createdAt', startOfMonth] },
-                    { $lte: ['$createdAt', endOfMonth] }
-                  ]
-                },
-                1,
-                0
-              ]
-            }
-          }
-        }
-      }
-    ]);
+    // Reports analytics from snapshot (no aggregation)
+    const totalReports = snapshot?.totalReports ?? 0;
+    const approvedReports = snapshot?.approvedReports ?? 0;
+    const rejectedReports = snapshot?.rejectedReports ?? 0;
+    const pendingReportsAgg =
+      userIds.length > 0
+        ? await ExpenseReport.countDocuments({
+            userId: { $in: userIds },
+            status: {
+              $in: [
+                ExpenseReportStatus.SUBMITTED,
+                ExpenseReportStatus.PENDING_APPROVAL_L1,
+                ExpenseReportStatus.PENDING_APPROVAL_L2,
+                ExpenseReportStatus.PENDING_APPROVAL_L3,
+                ExpenseReportStatus.PENDING_APPROVAL_L4,
+                ExpenseReportStatus.PENDING_APPROVAL_L5,
+              ],
+            },
+          })
+        : 0;
 
     // API Usage Analytics
     const apiStats = await ExpenseModel.aggregate([
@@ -559,25 +478,9 @@ export class AdminController {
       }
     ]);
 
-    // Financial Analytics
-    const financialStats = await ExpenseReport.aggregate([
-      {
-        $match: {
-          userId: { $in: userIds },
-          status: 'APPROVED'
-        }
-      },
-      {
-        $group: {
-          _id: null,
-          totalApprovedAmount: { $sum: '$totalAmount' },
-          avgReportAmount: { $avg: '$totalAmount' },
-          totalReports: { $sum: 1 }
-        }
-      }
-    ]);
+    const totalApprovedAmount = snapshot?.totalExpenseAmount ?? snapshot?.approvedExpenseAmount ?? 0;
 
-    // Compile analytics response
+    // Compile analytics response (reports + financial from snapshot)
     const analytics = {
       ocrUsage: {
         totalLifetime: ocrStats[0]?.totalOCR || 0,
@@ -587,14 +490,14 @@ export class AdminController {
         avgProcessingTime: Math.round((ocrStats[0]?.avgProcessingTime || 0) / 1000) // Convert to seconds
       },
       reports: {
-        totalCreated: reportStats[0]?.totalReports || 0,
-        perMonth: reportStats[0]?.monthlyReports || 0,
-        approvalRate: reportStats[0]?.totalReports > 0 ? Math.round((reportStats[0]?.approvedReports || 0) / reportStats[0].totalReports * 100) : 0,
-        avgApprovalTime: Math.round(reportStats[0]?.avgApprovalTime || 0),
+        totalCreated: totalReports,
+        perMonth: totalReports, // snapshot is current month
+        approvalRate: totalReports > 0 ? Math.round((approvedReports / totalReports) * 100) : 0,
+        avgApprovalTime: 0, // not in snapshot; could add if needed
         statusBreakdown: {
-          approved: reportStats[0]?.approvedReports || 0,
-          pending: reportStats[0]?.pendingReports || 0,
-          rejected: reportStats[0]?.rejectedReports || 0
+          approved: approvedReports,
+          pending: pendingReportsAgg,
+          rejected: rejectedReports
         }
       },
       apiUsage: {
@@ -611,10 +514,13 @@ export class AdminController {
         ocrContribution: storageStats[0]?.totalFiles > 0 ? Math.round((storageStats[0]?.ocrFiles || 0) / storageStats[0].totalFiles * 100) : 0
       },
       financial: {
-        mrrContribution: Math.floor((financialStats[0]?.totalApprovedAmount || 0) / 12), // Monthly average
-        arrProjection: (financialStats[0]?.totalApprovedAmount || 0), // Annual projection
+        mrrContribution: Math.floor((totalApprovedAmount || 0) / 12), // Monthly average
+        arrProjection: totalApprovedAmount || 0, // Annual projection
         costPerOCR: 0.019, // Mock - would calculate from actual costs
-        efficiencyRatio: userIds.length > 0 ? Math.round((financialStats[0]?.totalApprovedAmount || 0) / userIds.length) : 0
+        efficiencyRatio: userIds.length > 0 ? Math.round((totalApprovedAmount || 0) / userIds.length) : 0,
+        voucherUsedAmount: snapshot?.voucherUsedAmount ?? 0,
+        employeePaidAmount: snapshot?.employeePaidAmount ?? 0,
+        categoryBreakdown: snapshot?.categoryBreakdown ?? {}
       }
     };
 
@@ -630,6 +536,20 @@ export class AdminController {
       data: result,
       cached: cacheService.get(cacheKey) === result
     });
+  });
+
+  // Rebuild company analytics snapshot (recompute from APPROVED reports/expenses)
+  static rebuildCompanyAnalytics = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { CompanyAdmin } = await import('../models/CompanyAdmin');
+    const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    if (req.user!.role === 'COMPANY_ADMIN') {
+      const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+      if (!companyAdmin || companyAdmin.companyId.toString() !== companyId) {
+        return res.status(403).json({ success: false, message: 'Access denied' }) as any;
+      }
+    }
+    await rebuildSnapshotsForCompany(companyId);
+    res.status(200).json({ success: true, message: 'Analytics snapshot rebuilt' });
   });
 
   // Company Mini Stats (lightweight)
@@ -1027,9 +947,8 @@ export class AdminController {
       },
     ]);
 
-    const totalStorageGB = totalStorageResult[0]?.totalSizeBytes 
-      ? totalStorageResult[0].totalSizeBytes / (1024 * 1024 * 1024) 
-      : 0;
+    const totalSizeBytes = totalStorageResult[0]?.totalSizeBytes ?? 0;
+    const totalStorageGB = totalSizeBytes ? totalSizeBytes / (1024 * 1024 * 1024) : 0;
 
     // Calculate cumulative storage - get total storage up to each month
     const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1086,8 +1005,172 @@ export class AdminController {
       data: {
         storageGrowth: formattedStorageGrowth,
         totalStorageGB: parseFloat(totalStorageGB.toFixed(2)),
+        totalStorageBytes: totalSizeBytes,
         year,
       },
+    });
+  });
+
+  /**
+   * Day-wise expense totals for a selected month (company-scoped for COMPANY_ADMIN).
+   * GET /admin/analytics/expenses-daily?month=1&year=2026
+   * Returns realtime data: one point per day (01 to last day of month) with amount and count.
+   */
+  static getExpensesDaily = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { Expense: ExpenseModel } = await import('../models/Expense');
+    const { User } = await import('../models/User');
+    const { CompanyAdmin } = await import('../models/CompanyAdmin');
+
+    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
+    const monthZero = Math.max(1, Math.min(12, month));
+    const yearNum = Math.max(2020, Math.min(2100, year));
+
+    let userIds: any[] = [];
+    if (req.user!.role === 'COMPANY_ADMIN') {
+      const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+      if (!companyAdmin || !companyAdmin.companyId) {
+        return res.status(200).json({ success: true, data: { daily: [] } }) as any;
+      }
+      const companyUsers = await User.find({ companyId: companyAdmin.companyId }).select('_id').exec();
+      userIds = companyUsers.map((u) => u._id);
+    }
+    if (userIds.length === 0) {
+      return res.status(200).json({ success: true, data: { daily: [] } }) as any;
+    }
+
+    const startOfMonth = new Date(yearNum, monthZero - 1, 1);
+    const endOfMonth = new Date(yearNum, monthZero, 0, 23, 59, 59, 999);
+
+    const daily = await ExpenseModel.aggregate([
+      {
+        $match: {
+          userId: { $in: userIds },
+          expenseDate: { $gte: startOfMonth, $lte: endOfMonth },
+        },
+      },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$expenseDate' },
+            month: { $month: '$expenseDate' },
+            day: { $dayOfMonth: '$expenseDate' },
+          },
+          amount: { $sum: '$amount' },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { '_id.day': 1 } },
+    ]);
+
+    const daysInMonth = new Date(yearNum, monthZero, 0).getDate();
+    const byDay = new Map<number, { amount: number; count: number }>();
+    for (let d = 1; d <= daysInMonth; d++) {
+      byDay.set(d, { amount: 0, count: 0 });
+    }
+    daily.forEach((row: any) => {
+      const day = row._id.day;
+      byDay.set(day, { amount: row.amount, count: row.count });
+    });
+
+    const dailyArray = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const v = byDay.get(d)!;
+      const dateStr = `${yearNum}-${String(monthZero).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      dailyArray.push({ date: dateStr, day: d, amount: v.amount, count: v.count });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: { daily: dailyArray },
+    });
+  });
+
+  /**
+   * Day-wise OCR token consumption for a selected month (company-scoped for COMPANY_ADMIN).
+   * GET /admin/analytics/ocr-daily?month=1&year=2026
+   * Returns tokens consumed per day (from completed OCR jobs).
+   */
+  static getOcrUsageDaily = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { OcrJob } = await import('../models/OcrJob');
+    const { User } = await import('../models/User');
+    const { CompanyAdmin } = await import('../models/CompanyAdmin');
+
+    const year = parseInt(req.query.year as string) || new Date().getFullYear();
+    const month = parseInt(req.query.month as string) || new Date().getMonth() + 1;
+    const monthZero = Math.max(1, Math.min(12, month));
+    const yearNum = Math.max(2020, Math.min(2100, year));
+
+    let userIds: any[] = [];
+    if (req.user!.role === 'COMPANY_ADMIN') {
+      const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+      if (!companyAdmin || !companyAdmin.companyId) {
+        return res.status(200).json({ success: true, data: { daily: [] } }) as any;
+      }
+      const companyUsers = await User.find({ companyId: companyAdmin.companyId }).select('_id').exec();
+      userIds = companyUsers.map((u) => u._id);
+    }
+    if (userIds.length === 0) {
+      return res.status(200).json({ success: true, data: { daily: [] } }) as any;
+    }
+
+    const startOfMonth = new Date(yearNum, monthZero - 1, 1);
+    const endOfMonth = new Date(yearNum, monthZero, 0, 23, 59, 59, 999);
+
+    const daily = await OcrJob.aggregate([
+      { $match: { status: 'COMPLETED', completedAt: { $gte: startOfMonth, $lte: endOfMonth } } },
+      {
+        $lookup: {
+          from: 'receipts',
+          localField: 'receiptId',
+          foreignField: '_id',
+          as: 'receipt',
+        },
+      },
+      { $unwind: '$receipt' },
+      {
+        $lookup: {
+          from: 'expenses',
+          localField: 'receipt.expenseId',
+          foreignField: '_id',
+          as: 'expense',
+        },
+      },
+      { $unwind: '$expense' },
+      { $match: { 'expense.userId': { $in: userIds } } },
+      {
+        $group: {
+          _id: {
+            year: { $year: '$completedAt' },
+            month: { $month: '$completedAt' },
+            day: { $dayOfMonth: '$completedAt' },
+          },
+          tokens: { $sum: { $ifNull: ['$totalTokens', 0] } },
+          count: { $sum: 1 },
+        },
+      },
+      { $sort: { '_id.day': 1 } },
+    ]);
+
+    const daysInMonth = new Date(yearNum, monthZero, 0).getDate();
+    const byDay = new Map<number, { tokens: number; count: number }>();
+    for (let d = 1; d <= daysInMonth; d++) {
+      byDay.set(d, { tokens: 0, count: 0 });
+    }
+    daily.forEach((row: any) => {
+      byDay.set(row._id.day, { tokens: row.tokens, count: row.count });
+    });
+
+    const dailyArray = [];
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateStr = `${yearNum}-${String(monthZero).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const v = byDay.get(d) || { tokens: 0, count: 0 };
+      dailyArray.push({ date: dateStr, day: d, tokens: v.tokens, count: v.count });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: { daily: dailyArray },
     });
   });
 

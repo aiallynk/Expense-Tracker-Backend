@@ -207,7 +207,7 @@ export class VoucherReturnService {
 
       // Emit real-time update for voucher return (for liabilities update)
       try {
-        const { emitVoucherUpdated, emitCompanyAdminDashboardUpdate } = await import('../socket/realtimeEvents');
+        const { emitVoucherUpdated } = await import('../socket/realtimeEvents');
         const companyId = returnRequest.companyId.toString();
         
         // Emit voucher updated event
@@ -222,14 +222,9 @@ export class VoucherReturnService {
           returnedBy: voucher.returnedBy,
         });
         
-        // Emit dashboard update to refresh liabilities in real-time
-        try {
-          const { CompanyAdminDashboardService } = await import('./companyAdminDashboard.service');
-          const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-          emitCompanyAdminDashboardUpdate(companyId, stats);
-        } catch (dashboardError) {
-          logger.error({ error: dashboardError, companyId }, 'Failed to emit dashboard update after voucher return approval');
-        }
+        // Enqueue analytics snapshot refresh
+        const { enqueueAnalyticsEvent } = await import('./companyAnalyticsSnapshot.service');
+        enqueueAnalyticsEvent({ companyId, event: 'REBUILD_SNAPSHOT' });
       } catch (error) {
         logger.error({ error, requestId: params.requestId }, 'Failed to emit voucher updated event');
         // Don't fail transaction if real-time update fails
@@ -520,7 +515,7 @@ export class VoucherReturnService {
 
       // Emit real-time update for voucher return (for liabilities update)
       try {
-        const { emitVoucherUpdated, emitCompanyAdminDashboardUpdate } = await import('../socket/realtimeEvents');
+        const { emitVoucherUpdated } = await import('../socket/realtimeEvents');
         const companyId = voucher.companyId.toString();
         
         // Emit voucher updated event
@@ -535,14 +530,9 @@ export class VoucherReturnService {
           returnedBy: voucher.returnedBy,
         });
         
-        // Emit dashboard update to refresh liabilities in real-time
-        try {
-          const { CompanyAdminDashboardService } = await import('./companyAdminDashboard.service');
-          const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-          emitCompanyAdminDashboardUpdate(companyId, stats);
-        } catch (dashboardError) {
-          logger.error({ error: dashboardError, companyId }, 'Failed to emit dashboard update after voucher return');
-        }
+        // Enqueue analytics snapshot refresh
+        const { enqueueAnalyticsEvent } = await import('./companyAnalyticsSnapshot.service');
+        enqueueAnalyticsEvent({ companyId, event: 'REBUILD_SNAPSHOT' });
       } catch (error) {
         logger.error({ error, voucherId: params.voucherId }, 'Failed to emit voucher updated event');
         // Don't fail transaction if real-time update fails

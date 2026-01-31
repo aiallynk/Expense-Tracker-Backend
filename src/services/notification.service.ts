@@ -502,40 +502,7 @@ export class NotificationService {
       return;
     }
 
-    // Send broadcast notification to role_MANAGER topic (Firebase FCM)
-    // Add deduplication check to prevent duplicate notifications
-    const notificationKey = `report_submitted_${report._id}_managers`;
-    try {
-      // Check if we've already sent this notification recently (last 10 seconds for stricter deduplication)
-      const recentNotification = this.checkRecentNotification(notificationKey, 10000);
-      if (recentNotification) {
-        logger.info({ reportId: report._id }, '⚠️ Skipping duplicate manager notification (sent recently within 10 seconds)');
-      } else {
-        const managerTopic = getRoleTopic('MANAGER');
-        const messageId = await this.sendBroadcastToTopic(
-          {
-            title: 'New Expense Report Submitted',
-            body: `Report "${report.name}" has been submitted for your approval`,
-            data: {
-              type: 'REPORT_SUBMITTED',
-              reportId: report._id.toString(),
-              action: 'REPORT_SUBMITTED',
-              companyId: reportOwner.companyId?.toString() || '',
-            },
-          },
-          managerTopic
-        );
-        logger.info({ reportId: report._id, topic: managerTopic, messageId }, '✅ Broadcast notification sent to role_MANAGER topic');
-
-        // Mark this notification as sent
-        this.markNotificationSent(notificationKey);
-      }
-    } catch (error: any) {
-      logger.error({ error: error.message || error, reportId: report._id }, '❌ Failed to send broadcast notification to role_MANAGER topic');
-      // Continue to create DB records even if FCM fails
-    }
-
-    // Create DB notification records for all Level 1 approvers (for UI display)
+    // Create DB notification records and Send Unicast Notifications (Push/Email)
     const { NotificationDataService } = await import('./notificationData.service');
     const { NotificationType } = await import('../models/Notification');
 
@@ -556,17 +523,47 @@ export class NotificationService {
         continue;
       }
 
-      // Verify approver is from same company as report owner
-      if (reportOwner.companyId) {
-        const approverUser = await User.findById(approverId).select('companyId').exec();
-        if (approverUser?.companyId?.toString() !== reportOwner.companyId.toString()) {
+      // Fetch approver details including notification settings
+      const approverUser = await User.findById(approverId).select('email companyId notificationSettings').exec();
+      if (!approverUser) {
+        logger.warn({ approverId }, 'Approver user not found');
+        continue;
+      }
+
+      // Verify approver is from same company as report owner (if report owner has company)
+      if (reportOwner.companyId && approverUser.companyId) {
+        if (approverUser.companyId.toString() !== reportOwner.companyId.toString()) {
           logger.warn(`Skipping notification to approver ${approverId} - different company`);
           continue;
         }
+      } else if (reportOwner.companyId && !approverUser.companyId) {
+        // Edge case: approver has no company? Skip to be safe
+        logger.warn(`Skipping notification to approver ${approverId} - no company`);
+        continue;
+      }
+
+      // Check Notification Settings
+      const settings: any = approverUser.notificationSettings || {};
+      const allowPush = settings.push !== false;
+      const allowEmail = settings.email !== false;
+      const allowApprovalAlerts = settings.approvalAlerts !== false;
+
+      // 1. Push Notification
+      if (allowApprovalAlerts && allowPush) {
+        await this.sendPushToUser(approverId, {
+          title: 'New Expense Report Submitted',
+          body: `Report "${report.name}" has been submitted by ${reportOwner.name || reportOwner.email || 'an employee'} for your approval`,
+          data: {
+            type: 'REPORT_SUBMITTED',
+            reportId: report._id.toString(),
+            action: 'REPORT_SUBMITTED',
+            companyId: reportOwner.companyId?.toString() || '',
+          },
+        });
       }
 
       try {
-        // Create notification record in database (for UI display)
+        // 2. Create notification record in database (Always create for UI)
         try {
           await NotificationDataService.createNotification({
             userId: approverId,
@@ -585,17 +582,16 @@ export class NotificationService {
           });
           logger.info({ approverId, reportId: report._id }, '✅ Notification record created in database');
         } catch (notifError: any) {
-          logger.error({ 
-            error: notifError.message || notifError, 
-            approverId, 
-            reportId: report._id 
+          logger.error({
+            error: notifError.message || notifError,
+            approverId,
+            reportId: report._id
           }, '❌ Failed to create notification record - continuing with email');
         }
 
-        // Send email to specific approver
-        try {
-          const approverUser = await User.findById(approverId).select('email').exec();
-          if (approverUser?.email) {
+        // 3. Send email to specific approver
+        if (approverUser.email && allowEmail && allowApprovalAlerts) {
+          try {
             await this.sendEmail({
               to: approverUser.email,
               subject: `New Expense Report: ${report.name}`,
@@ -608,22 +604,19 @@ export class NotificationService {
               },
             });
             logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
-          } else {
-            logger.warn({ approverId }, '⚠️ Approver has no email address - skipping email');
+          } catch (emailError: any) {
+            logger.error({
+              error: emailError.message || emailError,
+              approverId,
+              reportId: report._id
+            }, '❌ Failed to send email notification');
           }
-        } catch (emailError: any) {
-          logger.error({ 
-            error: emailError.message || emailError, 
-            approverId, 
-            reportId: report._id 
-          }, '❌ Failed to send email notification');
         }
       } catch (error: any) {
-        logger.error({ 
-          error: error.message || error, 
-          approverId, 
+        logger.error({
+          error: error.message || error,
+          approverId,
           reportId: report._id,
-          stack: error.stack 
         }, '❌ Unexpected error in notification flow');
       }
     }
@@ -704,67 +697,95 @@ export class NotificationService {
     report: any,
     status: ExpenseReportStatus.APPROVED | ExpenseReportStatus.REJECTED
   ): Promise<void> {
-    const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
+    const reportOwner = await User.findById(report.userId).select('name email companyId notificationSettings').exec();
 
     if (!reportOwner) {
+      return;
+    }
+
+    const settings: any = reportOwner.notificationSettings || {};
+    const allowPush = settings.push !== false;
+    const allowEmail = settings.email !== false;
+    const allowReportStatus = settings.reportStatus !== false;
+
+    if (!allowReportStatus) {
+      logger.info({ userId: report.userId }, 'Skipping report status notification: User preference');
       return;
     }
 
     const isApproved = status === ExpenseReportStatus.APPROVED;
 
     // Send push notification
-    await this.sendPushToUser(report.userId.toString(), {
-      title: isApproved ? 'Report Approved' : 'Report Rejected',
-      body: `Your expense report "${report.name}" has been ${status.toLowerCase()}`,
-      data: {
-        type: isApproved ? 'REPORT_APPROVED' : 'REPORT_REJECTED',
-        reportId: report._id.toString(),
-        action: isApproved ? 'REPORT_APPROVED' : 'REPORT_REJECTED',
-      },
-    });
+    if (allowPush) {
+      await this.sendPushToUser(report.userId.toString(), {
+        title: isApproved ? 'Report Approved' : 'Report Rejected',
+        body: `Your expense report "${report.name}" has been ${status.toLowerCase()}`,
+        data: {
+          type: isApproved ? 'REPORT_APPROVED' : 'REPORT_REJECTED',
+          reportId: report._id.toString(),
+          action: isApproved ? 'REPORT_APPROVED' : 'REPORT_REJECTED',
+        },
+      });
+    }
 
     // Send email
-    await this.sendEmail({
-      to: reportOwner.email,
-      subject: `Expense Report ${isApproved ? 'Approved' : 'Rejected'}: ${report.name}`,
-      template: isApproved ? 'report_approved' : 'report_rejected',
-      data: {
-        reportName: report.name,
-        reportId: report._id.toString(),
-        totalAmount: report.totalAmount,
-        currency: report.currency,
-      },
-    });
+    if (reportOwner.email && allowEmail) {
+      await this.sendEmail({
+        to: reportOwner.email,
+        subject: `Expense Report ${isApproved ? 'Approved' : 'Rejected'}: ${report.name}`,
+        template: isApproved ? 'report_approved' : 'report_rejected',
+        data: {
+          reportName: report.name,
+          reportId: report._id.toString(),
+          totalAmount: report.totalAmount,
+          currency: report.currency,
+        },
+      });
+    }
   }
 
   static async notifyReportChangesRequested(report: any): Promise<void> {
-    const reportOwner = await User.findById(report.userId).select('name email companyId').exec();
+    const reportOwner = await User.findById(report.userId).select('name email companyId notificationSettings').exec();
 
     if (!reportOwner) {
       return;
     }
 
+    const settings: any = reportOwner.notificationSettings || {};
+    const allowPush = settings.push !== false;
+    const allowEmail = settings.email !== false;
+    const allowReportStatus = settings.reportStatus !== false;
+
+    if (!allowReportStatus) {
+      logger.info({ userId: report.userId }, 'Skipping changes requested notification: User preference');
+      return;
+    }
+
     // Send push notification
-    await this.sendPushToUser(report.userId.toString(), {
-      title: 'Changes Requested',
-      body: `Your expense report "${report.name}" requires changes. Please review and resubmit.`,
-      data: {
-        type: 'REPORT_CHANGES_REQUESTED',
-        reportId: report._id.toString(),
-        action: 'REPORT_CHANGES_REQUESTED',
-      },
-    });
+    if (allowPush) {
+      await this.sendPushToUser(report.userId.toString(), {
+        title: 'Changes Requested',
+        body: `Your expense report "${report.name}" requires changes. Please review and resubmit.`,
+        data: {
+          type: 'REPORT_CHANGES_REQUESTED',
+          reportId: report._id.toString(),
+          action: 'REPORT_CHANGES_REQUESTED',
+        },
+      });
+    }
 
     // Send email
-    await this.sendEmail({
-      to: reportOwner.email,
-      subject: `Changes Requested: ${report.name}`,
-      template: 'report_changes_requested',
-      data: {
-        reportName: report.name,
-        reportId: report._id.toString(),
-      },
-    });
+    if (reportOwner.email && allowEmail) {
+      await this.sendEmail({
+        to: reportOwner.email,
+        subject: `Changes Requested: ${report.name}`,
+        template: 'report_changes_requested',
+        data: {
+          reportName: report.name,
+          reportId: report._id.toString(),
+        },
+      });
+    }
   }
 
   static async notifyNextApprover(report: any, approvers: any[]): Promise<void> {
@@ -942,7 +963,7 @@ export class NotificationService {
           const requesterName = approvalData.requesterName || 'An employee';
           const roleNames = approvalData.roleNames || 'N/A';
           const level = approvalData.level ? `Level ${approvalData.level}` : 'N/A';
-          
+
           html = `
             <h2>New Approval Required</h2>
             <p>A new ${requestType} requires your approval:</p>
@@ -1002,19 +1023,19 @@ export class NotificationService {
             logger.error({ resetLink, fullData: data }, 'Reset link is empty or undefined in password_reset template');
             throw new Error('Reset link is required for password reset email');
           }
-          
+
           // Ensure URL starts with https://
-          const safeResetLink = resetLink.startsWith('http://') || resetLink.startsWith('https://') 
-            ? resetLink 
+          const safeResetLink = resetLink.startsWith('http://') || resetLink.startsWith('https://')
+            ? resetLink
             : `https://${resetLink}`;
-          
+
           // Log the link being used (truncated for security)
-          logger.info({ 
+          logger.info({
             resetLinkPrefix: safeResetLink.substring(0, 50) + '...',
             linkLength: safeResetLink.length,
             startsWithHttps: safeResetLink.startsWith('https://')
           }, 'Generating password reset email HTML');
-          
+
           // Gmail-safe email template - simple HTML, no complex styling
           // Using only inline styles, plain anchor tags, no buttons or JS
           html = `
@@ -1092,11 +1113,11 @@ export class NotificationService {
 
       const client = getResendClient();
       if (!client) {
-        const errorMsg = config.resend.apiKey 
+        const errorMsg = config.resend.apiKey
           ? 'Resend client failed to initialize - check API key validity'
           : 'RESEND_API_KEY not configured - email notifications are disabled';
-        logger.error({ 
-          to: data.to, 
+        logger.error({
+          to: data.to,
           subject: data.subject,
           apiKeyConfigured: !!config.resend.apiKey,
           fromEmail: fromEmail,
@@ -1106,10 +1127,10 @@ export class NotificationService {
         throw new Error(errorMsg);
       }
 
-      logger.info({ 
-        to: data.to, 
+      logger.info({
+        to: data.to,
         from: fromEmail,
-        subject: data.subject 
+        subject: data.subject
       }, 'Attempting to send email via Resend');
 
       const result = await client.emails.send({
@@ -1119,18 +1140,18 @@ export class NotificationService {
         html,
       });
 
-      logger.info({ 
-        to: data.to, 
+      logger.info({
+        to: data.to,
         subject: data.subject,
-        result: result.data || result.error 
+        result: result.data || result.error
       }, 'Email send result from Resend');
     } catch (error: any) {
-      logger.error({ 
+      logger.error({
         error: error.message || error,
         errorDetails: error,
         to: data.to,
         subject: data.subject,
-        stack: error.stack 
+        stack: error.stack
       }, 'Error sending email via Resend');
       // Don't throw - emails are non-critical
     }

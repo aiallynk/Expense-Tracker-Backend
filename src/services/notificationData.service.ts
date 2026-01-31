@@ -3,7 +3,7 @@ import mongoose from 'mongoose';
 import { CompanyAdmin } from '../models/CompanyAdmin';
 import { Notification, INotification, NotificationType } from '../models/Notification';
 import { User } from '../models/User';
-import { emitToCompanyAdmin , CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
+import { emitToCompanyAdmin, CompanyAdminEvent, emitNotificationToUser } from '../socket/realtimeEvents';
 import { BroadcastTargetType } from '../utils/enums';
 
 import { logger } from '@/config/logger';
@@ -22,7 +22,8 @@ export class NotificationDataService {
     description: string;
     link?: string;
     metadata?: Record<string, any>;
-  }): Promise<INotification> {
+    notificationKey?: string;
+  }): Promise<INotification | null> {
     let userId: string | undefined = data.userId;
     let companyId: string | undefined = data.companyId;
 
@@ -40,11 +41,15 @@ export class NotificationDataService {
     // If companyId is provided but no userId, notify all company admins for that company
     if (companyId && !userId) {
       const companyAdmins = await CompanyAdmin.find({ companyId }).select('_id').exec();
-      
+
       // Create notifications for all company admins
       const notifications = await Promise.all(
-        companyAdmins.map(admin => 
-          Notification.create({
+        companyAdmins.map(admin => {
+          // Generate key for each admin if a base key was provided, or skip if not unique per admin
+          // For broadcast-like events, we might need a unique key per user
+          const key = data.notificationKey ? `${data.notificationKey}:${admin._id}` : undefined;
+
+          return Notification.create({
             userId: admin._id,
             companyId: new mongoose.Types.ObjectId(companyId!),
             type: data.type,
@@ -53,13 +58,21 @@ export class NotificationDataService {
             link: data.link,
             metadata: data.metadata,
             read: false,
-          })
-        )
+            notification_key: key
+          }).catch(err => {
+            // Ignore duplicate key errors silently
+            if (err.code === 11000) return null;
+            throw err;
+          });
+        })
       );
 
+      // Filter out nulls (duplicates)
+      const validNotifications = notifications.filter(n => n !== null) as unknown as INotification[];
+
       // Emit real-time update to all company admins and individual users
-      if (notifications.length > 0) {
-        notifications.forEach(notification => {
+      if (validNotifications.length > 0) {
+        validNotifications.forEach(notification => {
           const userId = notification.userId.toString();
           emitToCompanyAdmin(
             companyId!,
@@ -68,41 +81,51 @@ export class NotificationDataService {
           );
           emitNotificationToUser(userId, notification.toObject());
         });
+        return validNotifications[0];
       }
-
-      return notifications[0]; // Return first notification
+      return null;
     }
 
     if (!userId) {
       throw new Error('Either userId or companyAdminId must be provided');
     }
 
-    const notification = await Notification.create({
-      userId: new mongoose.Types.ObjectId(userId),
-      companyId: companyId ? new mongoose.Types.ObjectId(companyId) : undefined,
-      type: data.type,
-      title: data.title,
-      description: data.description,
-      link: data.link,
-      metadata: data.metadata,
-      read: false,
-    });
+    try {
+      const notification = await Notification.create({
+        userId: new mongoose.Types.ObjectId(userId),
+        companyId: companyId ? new mongoose.Types.ObjectId(companyId) : undefined,
+        type: data.type,
+        title: data.title,
+        description: data.description,
+        link: data.link,
+        metadata: data.metadata,
+        read: false,
+        notification_key: data.notificationKey,
+      });
 
-    // Emit real-time update to user's socket room
-    emitNotificationToUser(userId, notification.toObject());
+      // Emit real-time update to user's socket room
+      emitNotificationToUser(userId, notification.toObject());
 
-    // Also emit to company admin room if companyId is provided
-    if (companyId) {
-      emitToCompanyAdmin(
-        companyId,
-        CompanyAdminEvent.NOTIFICATION_CREATED,
-        notification.toObject()
-      );
+      // Also emit to company admin room if companyId is provided
+      if (companyId) {
+        emitToCompanyAdmin(
+          companyId,
+          CompanyAdminEvent.NOTIFICATION_CREATED,
+          notification.toObject()
+        );
+      }
+
+      logger.debug(`Created notification: ${notification._id} for user ${userId}`);
+
+      return notification;
+    } catch (error: any) {
+      // Silently ignore duplicate key errors (Idempotency)
+      if (error.code === 11000) {
+        logger.info({ notificationKey: data.notificationKey, userId }, '✅ Idempotency: Duplicate notification ignored');
+        return null;
+      }
+      throw error;
     }
-
-    logger.debug(`Created notification: ${notification._id} for user ${userId}`);
-    
-    return notification;
   }
 
   /**
@@ -162,7 +185,7 @@ export class NotificationDataService {
    */
   static async markAsRead(notificationId: string, userId: string): Promise<INotification | null> {
     const notification = await Notification.findById(notificationId).exec();
-    
+
     if (!notification) {
       return null;
     }

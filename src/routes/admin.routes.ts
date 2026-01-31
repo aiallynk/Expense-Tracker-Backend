@@ -25,6 +25,8 @@ router.use(authMiddleware);
 router.get('/summary/dashboard', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getDashboard);
 router.get('/summary/dashboard/filtered', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getFilteredDashboard);
 router.get('/summary/storage-growth', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getStorageGrowth);
+router.get('/analytics/expenses-daily', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getExpensesDaily);
+router.get('/analytics/ocr-daily', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.getOcrUsageDaily);
 router.get('/export/csv', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkCsvExport);
 router.get('/export/excel', requireServiceAccountReadOnly, validateServiceAccountEndpoint, AdminController.bulkExcelExport);
 
@@ -55,9 +57,12 @@ router.post('/expenses/:id/reject', AdminController.rejectExpense);
 router.get('/summary/dashboard', AdminController.getDashboard);
 router.get('/summary/dashboard/filtered', AdminController.getFilteredDashboard);
 router.get('/summary/storage-growth', AdminController.getStorageGrowth);
+router.get('/analytics/expenses-daily', AdminController.getExpensesDaily);
+router.get('/analytics/ocr-daily', AdminController.getOcrUsageDaily);
 
 // Company Analytics
 router.get('/companies/:id/analytics', AdminController.getCompanyAnalytics);
+router.post('/companies/:id/analytics/rebuild', AdminController.rebuildCompanyAnalytics);
 router.get('/companies/:id/mini-stats', AdminController.getCompanyMiniStats);
 
 // Insight Detection (Admin only - triggers alerts)

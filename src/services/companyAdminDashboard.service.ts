@@ -4,30 +4,29 @@ import { CompanyAdmin } from '../models/CompanyAdmin';
 import { User } from '../models/User';
 import { emitCompanyAdminDashboardUpdate } from '../socket/realtimeEvents';
 import { ExpenseReportStatus } from '../utils/enums';
+import { getDashboardPayload } from './companyAnalyticsSnapshot.service';
 
 import { logger } from '@/config/logger';
 
 
 export class CompanyAdminDashboardService {
   /**
-   * Collect and emit dashboard stats for all companies
+   * Collect and emit dashboard stats for all companies (from snapshot only).
    */
   static async collectAndEmitDashboardStats(): Promise<void> {
     try {
-      // Get all company admins with their company IDs
       const companyAdmins = await CompanyAdmin.find({})
         .select('companyId')
         .populate('companyId', '_id')
         .exec();
 
-      // Process each company
       for (const admin of companyAdmins) {
         if (!admin.companyId) continue;
 
         const companyId = (admin.companyId as any)._id?.toString() || admin.companyId.toString();
 
         try {
-          const stats = await this.getDashboardStatsForCompany(companyId);
+          const stats = await getDashboardPayload(companyId);
           emitCompanyAdminDashboardUpdate(companyId, stats);
         } catch (error) {
           logger.error({ error, companyId }, 'Error collecting dashboard stats for company');

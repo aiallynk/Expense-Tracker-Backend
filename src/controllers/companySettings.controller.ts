@@ -3,6 +3,7 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { CompanyAdmin } from '../models/CompanyAdmin';
+import { Company } from '../models/Company';
 import { CompanySettingsService } from '../services/companySettings.service';
 
 export class CompanySettingsController {
@@ -25,6 +26,16 @@ export class CompanySettingsController {
 
     const companyId = companyAdmin.companyId.toString();
     const settings = await CompanySettingsService.getSettingsByCompanyId(companyId);
+    const settingsObj = settings.toObject();
+
+    // If general.companyName is empty, use the main Company name so the Settings page shows and edits the canonical name
+    if (!settingsObj.general?.companyName?.trim()) {
+      const company = await Company.findById(companyId).select('name').lean().exec();
+      if (company?.name) {
+        settingsObj.general = settingsObj.general || {};
+        settingsObj.general.companyName = company.name;
+      }
+    }
 
     // Fetch company roles for frontend (real-time roles)
     // Only return CUSTOM roles, exclude SYSTEM roles
@@ -38,7 +49,7 @@ export class CompanySettingsController {
     res.status(200).json({
       success: true,
       data: {
-        ...settings.toObject(),
+        ...settingsObj,
         roles, // Include roles in response for frontend
       },
     });

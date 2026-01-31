@@ -30,6 +30,14 @@ export interface OcrResult {
   confidence?: number;
   invoice_number?: string;
   invoiceId?: string;
+  /** True if the receipt appears to be handwritten (so user should recheck). */
+  isHandwritten?: boolean;
+  /** Field names that are doubtful and should be highlighted for user review (e.g. "date", "vendor", "total"). */
+  doubtfulFields?: string[];
+  /** True if date format was ambiguous (e.g. 26-01-23) and user should confirm. */
+  dateReviewRecommended?: boolean;
+  /** Exchange rate if present on receipt (for multi-currency). */
+  exchangeRate?: number | null;
 }
 
 export class OcrService {
@@ -254,11 +262,12 @@ export class OcrService {
 
       // Call OpenAI Vision API with presigned URL (no base64, no memory usage)
       // Use timeout with abort controller
-      const result = await this.callOpenAIVisionWithTimeout(
+      const { result: ocrResult, usage: tokenUsage } = await this.callOpenAIVisionWithTimeout(
         presignedUrl,
         receiptPopulated.mimeType,
         config.ocr.timeoutMs
       );
+      const result = ocrResult;
 
       const openaiTimeMs = Date.now() - openaiStartTime;
 
@@ -286,6 +295,9 @@ export class OcrService {
       job.result = result;
       job.resultJson = result;
       job.completedAt = new Date();
+      if (tokenUsage?.total_tokens != null) {
+        job.totalTokens = tokenUsage.total_tokens;
+      }
       await job.save();
 
       // Update receipt with parsedData and status
@@ -457,7 +469,7 @@ export class OcrService {
         postProcessNotes = result.notes;
       }
       if (!postProcessNotes && result.lineItems && Array.isArray(result.lineItems) && result.lineItems.length > 0) {
-        postProcessNotes = result.lineItems.map(item => `${item.description || ''}: ${item.amount || 0}`).join('\n');
+        postProcessNotes = result.lineItems.map((item: { description: string; amount: number }) => `${item.description || ''}: ${item.amount || 0}`).join('\n');
       }
 
       // Emit socket event for successful OCR completion
@@ -481,6 +493,10 @@ export class OcrService {
           categorySuggestion: categorySuggestion,
           categoryId: categoryId ? categoryId.toString() : undefined,
           categoryUnidentified: categoryUnidentified,
+          isHandwritten: result.isHandwritten ?? undefined,
+          doubtfulFields: result.doubtfulFields ?? undefined,
+          dateReviewRecommended: result.dateReviewRecommended ?? undefined,
+          exchangeRate: result.exchangeRate ?? undefined,
         };
         emitReceiptProcessed(userId, receiptIdStr, payload);
       }
@@ -553,7 +569,7 @@ export class OcrService {
     presignedUrl: string,
     _mimeType: string,
     timeoutMs: number
-  ): Promise<OcrResult> {
+  ): Promise<{ result: OcrResult; usage?: { total_tokens: number } }> {
     // Create timeout promise
     const timeoutPromise = new Promise<never>((_, reject) => {
       setTimeout(() => {
@@ -563,11 +579,10 @@ export class OcrService {
 
     // Race between OCR call and timeout
     try {
-      const result = await Promise.race([
+      return await Promise.race([
         this.callOpenAIVisionWithFallback(presignedUrl, _mimeType),
         timeoutPromise,
       ]);
-      return result;
     } catch (error: any) {
       // Check if timeout occurred
       if (error.message?.includes('timed out')) {
@@ -583,7 +598,7 @@ export class OcrService {
   private static async callOpenAIVisionWithFallback(
     presignedUrl: string,
     _mimeType: string
-  ): Promise<OcrResult> {
+  ): Promise<{ result: OcrResult; usage?: { total_tokens: number } }> {
     const primaryModel = 'gpt-4o-mini';
     const fallbackModel = 'gpt-4o';
 
@@ -631,61 +646,49 @@ export class OcrService {
     presignedUrl: string,
     _mimeType: string,
     model: string = getVisionModel()
-  ): Promise<OcrResult> {
-    const prompt = `Extract receipt data from this image. Return JSON only:
+  ): Promise<{ result: OcrResult; usage?: { total_tokens: number } }> {
+    const prompt = `Extract receipt data from this image. The receipt may be PRINTED or HANDWRITTEN, and may be in English, Hindi, Marathi, or other Indian languages. Return JSON only:
 {
   "vendor": string | null,
   "date": string | null,
   "total": number | null,
   "currency": string | null,
   "invoice_number": string | null,
-  "line_items": [{"description": string, "quantity": number | null, "amount": number}]
+  "line_items": [{"description": string, "quantity": number | null, "amount": number}],
+  "is_handwritten": boolean,
+  "doubtful_fields": string[] | null,
+  "date_review_recommended": boolean,
+  "exchange_rate": number | null
 }
 
-IMPORTANT: For invoice_number, extract ANY of these if found:
-- Invoice ID / Invoice Number
-- UPI Ref No / UPI Reference Number
-- Transaction ID / Transaction Reference
-- Payment Reference / Payment ID
-- Bill Number / Bill No
-- Receipt Number / Receipt No
-- Order ID / Order Number
-- Any unique transaction identifier
+HANDWRITTEN RECEIPTS:
+- If the receipt is handwritten (fully or partly), set "is_handwritten": true.
+- For handwritten text, extract as best you can. For any field where you are unsure (e.g. unclear digits, ambiguous characters), add that field name to "doubtful_fields" so the user can recheck. Use field names: "vendor", "date", "total", "invoice_number", "line_items", "currency".
+- Support handwritten text in English, Hindi (Devanagari), and Marathi (Devanagari). Extract dates, numbers, and names correctly for Indian language receipts.
 
-Extract the vendor name (merchant/recipient name).
+VENDOR NAME:
+- Extract the merchant/shop/recipient name clearly. For handwritten or faded text, still attempt extraction and add "vendor" to doubtful_fields if uncertain.
+- For UPI/payment receipts, vendor is often the recipient name or app name.
+
+TRANSACTION / INVOICE NUMBER:
+- ALWAYS try to extract ANY of: Invoice Number, Invoice No, Bill No, Receipt No, UPI Ref No, UPI Reference Number, Transaction ID, Transaction Reference, Txn ID, Payment Reference, Payment ID, Order ID, Order Number. Put the value in "invoice_number".
+- For payment slips, look for "Transaction ID", "UTR", "Reference No", "Payment Ref".
 
 DATE EXTRACTION - CRITICAL:
-- The receipt may show dates in various formats: dd/mm/yyyy, mm/dd/yyyy, yyyy/mm/dd, yyyy-mm-dd, dd-mm-yyyy, etc.
-- You MUST intelligently detect the correct format and convert it to YYYY-MM-DD.
-- Use these rules to determine the correct format:
-  * If year comes first (4 digits), it's likely yyyy-mm-dd or yyyy/mm/dd
-  * If day is >12, that number is definitely the day (not month)
-  * Receipts are almost always from the past or today, never future dates
-  * Consider the vendor location/currency for likely format (e.g., INR = dd/mm/yyyy, USD might be mm/dd/yyyy)
-- ALWAYS return the date in YYYY-MM-DD format, regardless of the original format on the receipt.
-- Examples:
-  * "15/03/2024" → "2024-03-15" (dd/mm/yyyy)
-  * "03/15/2024" → "2024-03-15" (mm/dd/yyyy, since 15 can't be a month)
-  * "2024/03/15" → "2024-03-15" (yyyy/mm/dd)
-  * "01/02/2024" → analyze context: if INR currency, likely "2024-02-01" (dd/mm/yyyy); if USD and vendor is US-based, could be "2024-01-02" (mm/dd/yyyy)
+- Support formats: dd/mm/yyyy, dd-mm-yyyy, mm/dd/yyyy, yyyy-mm-dd, and 2-digit year (dd-mm-yy, dd/mm/yy).
+- If the date uses 2-digit year (e.g. 26-01-23, 15/03/24), convert to YYYY-MM-DD using sensible century (e.g. 23 → 2023, 24 → 2024) and set "date_review_recommended": true so the user can confirm.
+- If day > 12, that number is the day (not month). For INR/Indian receipts, prefer dd/mm/yyyy when ambiguous.
+- Always return date in YYYY-MM-DD. If format is ambiguous (e.g. 01-02-24 could be Jan 2 or Feb 1), pick the most likely and set date_review_recommended: true.
 
-Extract the total amount as a number (without currency symbol).
-Extract currency code (INR, USD, EUR, etc.).
+EXCHANGE RATE:
+- If the receipt shows an exchange rate (e.g. "1 USD = 83.50 INR"), extract it as a number in "exchange_rate". Otherwise null.
 
-LINE ITEMS EXTRACTION - CRITICAL:
-- Extract an array of purchased items with detailed information
-- For each item, extract:
-  * "description": Item name/description (e.g., "Cappuccino Large", "Notebook A4", "Taxi Ride")
-  * "quantity": Quantity purchased (e.g., 2, 1.5, null if not shown). Can be a decimal number.
-  * "amount": Price for this line item (total for quantity, not unit price)
-- IMPORTANT: Only extract actual purchased items
-- DO NOT include: subtotals, tax lines, discounts, service charges, tips, payment method lines, or the final total
-- If quantity is shown as "x2" or "2x" or just "2", extract it as the quantity value
-- Examples:
-  * "2x Coffee @ 50 = 100" → {"description": "Coffee", "quantity": 2, "amount": 100}
-  * "Pizza Large 350" → {"description": "Pizza Large", "quantity": null, "amount": 350}
-  * "3 x Pen = 45" → {"description": "Pen", "quantity": 3, "amount": 45}
-- If the receipt is poorly formatted or unclear, do your best to extract what you can
+CURRENCY & TOTAL:
+- Extract total amount as a number (no symbol). Extract currency code (INR, USD, etc.).
+- For multi-currency receipts, extract both amounts if shown and exchange_rate if present.
+
+LINE ITEMS:
+- Extract each item: description, quantity (if shown), amount. For handwritten lists, do your best and add "line_items" to doubtful_fields if unclear.
 
 If unreadable, return null. No explanations.`;
 
@@ -720,6 +723,10 @@ If unreadable, return null. No explanations.`;
       if (!content) {
         throw new Error('No response from OpenAI');
       }
+
+      const usage = response.usage
+        ? { total_tokens: response.usage.total_tokens ?? (response.usage.prompt_tokens || 0) + (response.usage.completion_tokens || 0) }
+        : undefined;
 
       // Clean the content - remove markdown code blocks if present
       let cleanedContent = content.trim();
@@ -768,25 +775,35 @@ If unreadable, return null. No explanations.`;
             .filter((item) => item.description.length > 0)
           : [];
 
+        const doubtfulFieldsRaw = parsed.doubtful_fields ?? parsed.doubtfulFields;
+        const doubtfulFields: string[] = Array.isArray(doubtfulFieldsRaw)
+          ? doubtfulFieldsRaw.filter((f: any) => typeof f === 'string').map((f: string) => f.trim()).filter(Boolean)
+          : [];
+
         const result: OcrResult = {
           vendor: parsed.vendor || null,
           date: parsed.date || null,
-          totalAmount: parsed.total || null,
+          totalAmount: parsed.total != null ? Number(parsed.total) : undefined,
           currency: parsed.currency || 'INR',
           invoice_number: invoiceNumber,
           invoiceId: invoiceNumber,
           lineItems: lineItems.length > 0 ? lineItems : undefined,
           notes: parsed.notes || undefined,
           confidence: 0.85,
+          isHandwritten: Boolean(parsed.is_handwritten ?? parsed.isHandwritten),
+          doubtfulFields: doubtfulFields.length > 0 ? doubtfulFields : undefined,
+          dateReviewRecommended: Boolean(parsed.date_review_recommended ?? parsed.dateReviewRecommended),
+          exchangeRate: parsed.exchange_rate != null ? Number(parsed.exchange_rate) : parsed.exchangeRate != null ? Number(parsed.exchangeRate) : undefined,
         };
 
-        return result;
+        return { result, usage };
       } catch (error) {
         // If not JSON, try to extract structured data
         const parsed = this.parseUnstructuredResponse(cleanedContent);
-        return parsed;
+        return { result: parsed, usage };
       }
     } catch (error: any) {
+      // usage is not available on error path
       // Provide more helpful error messages
       if (error.message?.includes('model') || error.code === 'invalid_model' || error.status === 404) {
         throw new Error(

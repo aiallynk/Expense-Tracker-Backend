@@ -12,6 +12,7 @@ export interface IOcrJob extends Document {
   resultJson?: Record<string, any>;
   errorJson?: Record<string, any>;
   completedAt?: Date;
+  totalTokens?: number;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,6 +53,10 @@ const ocrJobSchema = new Schema<IOcrJob>(
     },
     completedAt: {
       type: Date,
+    },
+    totalTokens: {
+      type: Number,
+      default: undefined,
     },
   },
   {

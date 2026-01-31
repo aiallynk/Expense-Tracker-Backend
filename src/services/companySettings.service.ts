@@ -1,6 +1,7 @@
 import mongoose from 'mongoose';
 
 import { CompanySettings, ICompanySettings } from '../models/CompanySettings';
+import { Company } from '../models/Company';
 
 import { logger } from '@/config/logger';
 
@@ -101,6 +102,13 @@ export class CompanySettingsService {
       
       settings.updatedBy = userId as any;
       await settings.save();
+    }
+
+    // When company name is updated in settings, sync it to the main Company document so it reflects everywhere
+    const newCompanyName = updates.general?.companyName;
+    if (typeof newCompanyName === 'string' && newCompanyName.trim()) {
+      await Company.findByIdAndUpdate(companyId, { name: newCompanyName.trim() }).exec();
+      logger.info(`Company name synced to main Company document for company ${companyId}`);
     }
 
     logger.info(`Company settings updated for company ${companyId} by user ${userId}`);

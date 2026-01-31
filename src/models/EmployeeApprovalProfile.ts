@@ -5,6 +5,7 @@ export interface IApproverLevel {
   mode: 'SEQUENTIAL' | 'PARALLEL';
   approvalType: 'ANY' | 'ALL' | null;
   roles: string[]; // Internal roleId refs (as String)
+  approverUserIds?: string[]; // Optional: specific user IDs for this level (when role has multiple users)
 }
 
 export interface IEmployeeApprovalProfile extends Document {
@@ -26,6 +27,7 @@ const ApproverLevelSchema = new Schema<IApproverLevel>({
   mode: { type: String, enum: ['SEQUENTIAL', 'PARALLEL'], required: true },
   approvalType: { type: String, enum: ['ANY', 'ALL', null], default: null },
   roles: [{ type: String, required: true }],
+  approverUserIds: [{ type: String }],
 }, { _id: false });
 
 const EmployeeApprovalProfileSchema = new Schema<IEmployeeApprovalProfile>({

@@ -28,6 +28,13 @@ export interface IUser extends Document {
   }>;
   createdAt: Date;
   updatedAt: Date;
+  notificationSettings?: {
+    email: boolean;
+    push: boolean;
+    expenseUpdates: boolean;
+    reportStatus: boolean;
+    approvalAlerts: boolean;
+  };
   comparePassword(candidatePassword: string): Promise<boolean>;
 }
 
@@ -124,6 +131,13 @@ const userSchema = new Schema<IUser>(
         },
       },
     ],
+    notificationSettings: {
+      email: { type: Boolean, default: true },
+      push: { type: Boolean, default: true },
+      expenseUpdates: { type: Boolean, default: true },
+      reportStatus: { type: Boolean, default: true },
+      approvalAlerts: { type: Boolean, default: true },
+    },
   },
   {
     timestamps: true,

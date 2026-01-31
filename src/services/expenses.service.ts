@@ -4,14 +4,13 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { Expense, IExpense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
-import { emitCompanyAdminDashboardUpdate } from '../socket/realtimeEvents';
 import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
 import { CreateExpenseDto, UpdateExpenseDto, ExpenseFiltersDto } from '../utils/dtoTypes';
 import { ExpenseStatus, ExpenseReportStatus , AuditAction } from '../utils/enums';
 import { getPaginationOptions, createPaginatedResult } from '../utils/pagination';
 
 import { AuditService } from './audit.service';
-import { CompanyAdminDashboardService } from './companyAdminDashboard.service';
+import { enqueueAnalyticsEvent } from './companyAnalyticsSnapshot.service';
 import { ProjectStakeholderService } from './projectStakeholder.service';
 import { ReportsService } from './reports.service';
 import { CompanySettingsService } from './companySettings.service';
@@ -243,17 +242,19 @@ export class ExpensesService {
       AuditAction.CREATE
     );
 
-    // Emit company admin dashboard update if user has a company
+    // Enqueue analytics update (EXPENSE_ADDED; worker no-ops unless report is APPROVED)
     try {
       const user = await User.findById(userId).select('companyId').exec();
       if (user && user.companyId) {
-        const companyId = user.companyId.toString();
-        const stats = await CompanyAdminDashboardService.getDashboardStatsForCompany(companyId);
-        emitCompanyAdminDashboardUpdate(companyId, stats);
+        enqueueAnalyticsEvent({
+          companyId: user.companyId.toString(),
+          event: 'EXPENSE_ADDED',
+          reportId,
+          userId,
+        });
       }
     } catch (error) {
-      // Don't fail expense creation if dashboard update fails
-      logger.error({ error }, 'Error emitting company admin dashboard update');
+      logger.error({ error }, 'Error enqueueing analytics update');
     }
 
     // Refetch to include duplicateFlag / duplicateReason set by DuplicateDetectionService

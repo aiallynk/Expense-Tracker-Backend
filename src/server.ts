@@ -15,6 +15,7 @@ import { schedulerService } from './services/scheduler.service';
 import { initializeSocketServer } from './socket/socketServer';
 import { startExchangeRateWorker } from './worker/exchangeRate.worker';
 import { startInProcessOcrWorker, stopInProcessOcrWorker } from './worker/ocr.inProcessWorker';
+import { startAnalyticsSnapshotWorker, stopAnalyticsSnapshotWorker } from './worker/analyticsSnapshot.worker';
 
 import { logger } from '@/config/logger';
 
@@ -79,6 +80,14 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
     logger.info('In-process OCR worker stopped');
   } catch (error) {
     logger.error({ error }, 'Error stopping in-process OCR worker');
+  }
+
+  // Stop analytics snapshot worker
+  try {
+    stopAnalyticsSnapshotWorker();
+    logger.info('Analytics snapshot worker stopped');
+  } catch (error) {
+    logger.error({ error }, 'Error stopping analytics snapshot worker');
   }
 
   // Give connections time to close (max 10 seconds)
@@ -232,6 +241,9 @@ const initializeServices = async (): Promise<void> => {
 
     // Start in-process OCR worker (processes queued OCR jobs)
     startInProcessOcrWorker();
+
+    // Start analytics snapshot worker (processes queued analytics events)
+    startAnalyticsSnapshotWorker();
 
     logger.info('Periodic analytics services started');
   } catch (error) {

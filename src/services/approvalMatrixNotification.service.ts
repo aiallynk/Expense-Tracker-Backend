@@ -22,17 +22,54 @@ export class ApprovalMatrixNotificationService {
         requestData: any
     ): Promise<void> {
         try {
-            // Get approver IDs for the current level (handles both user and role based)
-            let approverIds = [];
+            // STEP 1: VALIDATE REQUIRED DATA (STRICT)
+            if (!approvalInstance || !approvalInstance.companyId) {
+                logger.error('Missing approval instance or companyId');
+                return;
+            }
+
+            // Hydrate request data if missing fields
+            let report = requestData;
+            if (approvalInstance.requestType === 'EXPENSE_REPORT') {
+                const { ExpenseReport } = await import('../models/ExpenseReport');
+                report = await ExpenseReport.findById(approvalInstance.requestId)
+                    .populate('userId', 'name email companyId')
+                    .lean()
+                    .exec();
+            }
+
+            if (!report) {
+                logger.error({ requestId: approvalInstance.requestId }, 'Request data not found for notification');
+                return;
+            }
+
+            if (!report.userId) {
+                logger.error({ reportId: report._id }, 'Report owner (userId) missing');
+                return;
+            }
+
+            const requester = report.userId;
+            const requesterName = requester.name || requester.email || 'An employee';
+            const requesterEmail = requester.email;
+
+            // Get company details
+            const { Company } = await import('../models/Company');
+            const company = await Company.findById(approvalInstance.companyId).select('name logoUrl').lean().exec();
+            const companyName = company?.name || 'NexPense';
+
+            // STEP 2: RESOLVE APPROVERS
+            let approverIds: string[] = [];
             let isUserBasedApproval = false;
 
             if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
-                // New format: specific users
-                approverIds = currentLevelConfig.approverUserIds.map((id: any) => id.toString());
+                approverIds = currentLevelConfig.approverUserIds
+                    .map((id: any) => (id._id || id).toString())
+                    .filter((id: string) => id && id !== '[object Object]');
                 isUserBasedApproval = true;
             } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
-                // Old format: roles
-                approverIds = currentLevelConfig.approverRoleIds.map((id: any) => id.toString());
+                approverIds = currentLevelConfig.approverRoleIds
+                    .map((id: any) => (id._id || id).toString())
+                    .filter((id: string) => id && id !== '[object Object]');
                 isUserBasedApproval = false;
             }
 
@@ -41,220 +78,132 @@ export class ApprovalMatrixNotificationService {
                 return;
             }
 
-            logger.info({
-                instanceId: approvalInstance._id,
-                currentLevel: approvalInstance.currentLevel,
-                approverIds: approverIds.map((id: any) => id.toString()),
-                isUserBasedApproval,
-            }, 'Sending approval notifications');
-
             let usersToNotify = [];
-
             if (isUserBasedApproval) {
-                // New format: directly find the specific users
                 usersToNotify = await User.find({
                     _id: { $in: approverIds },
                     status: 'ACTIVE',
                     companyId: approvalInstance.companyId,
                 })
-                    .select('_id email name roles')
+                    .select('_id email name roles notificationSettings')
                     .populate('roles', 'name')
                     .exec();
             } else {
-                // Old format: find users with the specified roles
                 usersToNotify = await User.find({
                     roles: { $in: approverIds },
                     status: 'ACTIVE',
                     companyId: approvalInstance.companyId,
                 })
-                    .select('_id email name roles')
+                    .select('_id email name roles notificationSettings')
                     .populate('roles', 'name')
                     .exec();
             }
 
             if (usersToNotify.length === 0) {
-                logger.warn({
-                    instanceId: approvalInstance._id,
-                    approverIds: approverIds.map((r: any) => r.toString()),
-                }, 'No active users found with required approval roles');
+                logger.warn({ instanceId: approvalInstance._id }, 'No active users found with required approval roles');
                 return;
             }
 
-            logger.info({
-                instanceId: approvalInstance._id,
-                currentLevel: approvalInstance.currentLevel,
-                approverIdsCount: approverIds.length,
-                usersToNotifyCount: usersToNotify.length,
-                users: usersToNotify.map((u: any) => ({ id: u._id.toString(), email: u.email })),
-            }, `Parallel/sequential approval: ${approverIds.length} approver ID(s), ${usersToNotify.length} user(s) will be notified`);
+            // STEP 3: SEND NOTIFICATIONS
+            const requestType = 'Expense Report';
+            const requestName = report.name || 'Unnamed Request';
 
-            // Get approver names for display
-            const approverNames = usersToNotify.map(u => u.name || u.email || 'Unknown').join(', ');
-
-            // Get role names for email display
-            let roleNames = 'N/A';
-            if (!isUserBasedApproval && currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
-                // For role-based approval, get role names
-                const { Role } = await import('../models/Role');
-                const roles = await Role.find({
-                    _id: { $in: currentLevelConfig.approverRoleIds },
-                    companyId: approvalInstance.companyId,
-                })
-                    .select('name')
-                    .exec();
-                roleNames = roles.map(r => r.name).join(', ') || 'N/A';
-            } else if (isUserBasedApproval) {
-                // For user-based approval, get the user's roles
-                const { Role } = await import('../models/Role');
-                const allUserRoleIds = new Set<string>();
-                usersToNotify.forEach((u: any) => {
-                    if (u.roles && Array.isArray(u.roles)) {
-                        u.roles.forEach((roleId: any) => {
-                            allUserRoleIds.add(roleId.toString());
-                        });
-                    }
-                });
-                if (allUserRoleIds.size > 0) {
-                    const roles = await Role.find({
-                        _id: { $in: Array.from(allUserRoleIds) },
-                        companyId: approvalInstance.companyId,
-                    })
-                        .select('name')
-                        .exec();
-                    roleNames = roles.map(r => r.name).join(', ') || 'N/A';
-                }
-            }
-
-            // Prepare notification payload
-            const requestType = requestData.name ? 'Expense Report' : 'Request';
-            const requestName = requestData.name || 'Unnamed Request';
-
-            // Get requester info
-            const requester = await User.findById(requestData.userId)
-                .select('name email')
-                .exec();
-            const requesterName = requester?.name || requester?.email || 'An employee';
-
-            // Send notifications to each user
             for (const userObj of usersToNotify) {
                 const user = userObj as any;
+                const userId = user._id.toString();
+
+                // IDEMPOTENCY KEY
+                const notificationKey = `${approvalInstance.companyId}:${report._id}:${userId}:APPROVAL_REQUIRED`;
+
+                const settings = user.notificationSettings || {};
+                const allowPush = settings.push !== false;
+                const allowEmail = settings.email !== false;
+                const allowApprovalAlerts = settings.approvalAlerts !== false;
+
+                if (!allowApprovalAlerts) continue;
+
+                // 1. Create DB Record (Source of Truth)
                 try {
-                    // 1. Send Push Notification
-                    await NotificationService.sendPushToUser(user._id.toString(), {
+                    const { NotificationDataService } = await import('./notificationData.service');
+                    const { NotificationType } = await import('../models/Notification');
+                    const approverNames = user.name || user.email;
+
+                    await NotificationDataService.createNotification({
+                        userId: userId,
+                        companyId: approvalInstance.companyId.toString(),
+                        type: NotificationType.REPORT_PENDING_APPROVAL,
+                        title: 'New Approval Required',
+                        description: `${requestType} "${requestName}" submitted by ${requesterName} requires your approval`,
+                        link: `/approvals/pending?reportId=${report._id}`,
+                        metadata: {
+                            instanceId: approvalInstance._id.toString(),
+                            requestId: report._id.toString(),
+                            requestType,
+                            requestName,
+                            requesterName,
+                            level: approvalInstance.currentLevel,
+                            totalAmount: report.totalAmount,
+                            currency: report.currency,
+                            approverNames
+                        },
+                        notificationKey
+                    });
+                } catch (e: any) {
+                    logger.debug({ userId, error: e.message }, 'DB notification skipped (duplicate)');
+                }
+
+                // 2. Push Notification
+                if (allowPush) {
+                    await NotificationService.sendPushToUser(userId, {
                         title: 'New Approval Required',
                         body: `${requestType} "${requestName}" requires your approval`,
                         data: {
                             type: 'APPROVAL_REQUIRED',
                             instanceId: approvalInstance._id.toString(),
-                            requestId: approvalInstance.requestId.toString(),
-                            requestType: approvalInstance.requestType,
+                            requestId: report._id.toString(),
                             action: 'APPROVAL_REQUIRED',
-                            companyId: approvalInstance.companyId.toString(),
-                            level: approvalInstance.currentLevel.toString(),
+                            notificationKey
                         },
                     });
-                    logger.debug({ userId: user._id.toString() }, '✅ Push notification sent');
+                }
 
-                    // 2. Create Database Notification Record (for UI inbox)
-                    try {
-                        const { NotificationDataService } = await import('./notificationData.service');
-                        const { NotificationType } = await import('../models/Notification');
-
-                        const databaseNotification = await NotificationDataService.createNotification({
-                            userId: user._id.toString(),
-                            companyId: approvalInstance.companyId.toString(),
-                            type: NotificationType.REPORT_PENDING_APPROVAL,
-                            title: 'New Approval Required',
-                            description: `${requestType} "${requestName}" submitted by ${requesterName} requires your approval (as ${approverNames})`,
-                            link: `/approvals`, // Unified approval inbox
-                            metadata: {
-                                instanceId: approvalInstance._id.toString(),
-                                requestId: approvalInstance.requestId.toString(),
-                                requestType: approvalInstance.requestType,
-                                requestName,
-                                requesterId: requestData.userId.toString(),
-                                requesterName,
-                                level: approvalInstance.currentLevel,
-                                approverNames,
-                            },
-                        });
-
-                        // The Socket.IO event is already emitted by NotificationDataService.createNotification()
-                        // But let's log that it happened
-                        logger.info({
-                            userId: user._id.toString(),
-                            notificationId: databaseNotification._id?.toString(),
-                            instanceId: approvalInstance._id.toString(),
-                            event: 'notification:new',
-                        }, '✅ Database notification created and Socket.IO event emitted for approval');
-                    } catch (notifError: any) {
-                        logger.error({
-                            error: notifError.message || notifError,
-                            userId: user._id.toString(),
-                            instanceId: approvalInstance._id.toString(),
-                        }, '❌ Failed to create database notification via approval matrix');
-                        // Continue - don't fail the whole notification flow
-                    }
-
-                    // 3. Send Email Notification
-                    if (user.email) {
-                        try {
-                            await NotificationService.sendEmail({
-                                to: user.email,
-                                subject: `New Approval Required: ${requestName}`,
-                                template: 'approval_required',
-                                data: {
-                                    requestType: requestType || 'Request',
-                                    requestName: requestName || 'Unnamed Request',
-                                    requesterName: requesterName || 'An employee',
-                                    roleNames: roleNames || 'N/A',
-                                    level: approvalInstance.currentLevel || 'N/A',
-                                    approverNames: approverNames || 'N/A',
-                                    instanceId: approvalInstance._id.toString(),
-                                },
-                            });
-                            logger.info({
-                                userId: user._id.toString(),
-                                email: user.email,
-                                requestType,
-                                requestName,
-                            }, '✅ Email notification sent via approval matrix');
-                        } catch (emailError: any) {
-                            logger.error({
-                                error: emailError.message || emailError,
-                                userId: user._id.toString(),
-                                email: user.email,
-                                instanceId: approvalInstance._id.toString(),
-                            }, '❌ Failed to send email notification via approval matrix');
-                            // Continue - don't fail the whole notification flow
-                        }
-                    } else {
-                        logger.warn({
-                            userId: user._id.toString()
-                        }, '⚠️ User has no email address - skipping email notification');
-                    }
-                } catch (error: any) {
-                    logger.error({
-                        error: error.message || error,
-                        userId: user._id.toString(),
+                // 3. Email Notification
+                if (allowEmail && user.email) {
+                    const emailData = {
+                        requestType,
+                        requestName,
+                        requesterName,
+                        requesterEmail: requesterEmail || '',
+                        roleNames: 'Approver',
+                        level: approvalInstance.currentLevel,
+                        approverNames: user.name || user.email,
                         instanceId: approvalInstance._id.toString(),
-                    }, 'Error sending notification to user');
-                    // Continue with other users even if one fails
+                        reportId: report._id.toString(),
+                        totalAmount: report.totalAmount,
+                        currency: report.currency,
+                        companyName: companyName,
+                        approvalLink: `https://nexpense.aially.in/approvals/pending?reportId=${report._id}`
+                    };
+
+                    if (!emailData.reportId || !emailData.totalAmount || !emailData.currency) {
+                        logger.error({ userId }, 'Skipping email: Missing data');
+                        continue;
+                    }
+
+                    try {
+                        await NotificationService.sendEmail({
+                            to: user.email,
+                            subject: `Approval Required – ${requestName} | ${companyName}`,
+                            template: 'approval_required',
+                            data: emailData,
+                        });
+                    } catch (e: any) {
+                        logger.error({ userId, error: e.message }, 'Email failed');
+                    }
                 }
             }
-
-            logger.info({
-                instanceId: approvalInstance._id,
-                notifiedUsers: usersToNotify.length,
-                roles: approverNames,
-            }, `✅ Approval notifications sent to ${usersToNotify.length} users`);
-
         } catch (error: any) {
-            logger.error({
-                error: error.message || error,
-                instanceId: approvalInstance?._id?.toString(),
-            }, 'Error in notifyApprovalRequired');
-            // Don't throw - notifications are non-critical
+            logger.error({ error: error.message, instanceId: approvalInstance?._id }, 'notifyApprovalRequired failed');
         }
     }
 
@@ -407,49 +356,72 @@ export class ApprovalMatrixNotificationService {
                 }
             }
 
-            // Send push notification to requester
-            await NotificationService.sendPushToUser(requestData.userId.toString(), {
-                title: notificationTitle,
-                body: notificationBody,
-                data: {
-                    type: isApproved ? 'REQUEST_APPROVED' : isChangesRequested ? 'CHANGES_REQUESTED' : 'REQUEST_REJECTED',
-                    instanceId: approvalInstance._id.toString(),
-                    requestId: approvalInstance.requestId.toString(),
-                    requestType: approvalInstance.requestType,
-                    action: isApproved ? 'REQUEST_APPROVED' : isChangesRequested ? 'CHANGES_REQUESTED' : 'REQUEST_REJECTED',
-                    level: approvedLevel,
-                    approverName: approverName,
-                    approverRole: approverRole,
-                    comments: comments || '',
-                },
-            });
-
-            // Get requester info for email
+            // Get requester info and Check Notification Settings
             const requester = await User.findById(requestData.userId)
-                .select('email name')
+                .select('active email name notificationSettings')
                 .exec();
 
-            if (requester?.email) {
-                let template = 'request_rejected';
-                if (isApproved) template = 'request_approved';
-                if (isChangesRequested) template = 'report_changes_requested';
-
-                await NotificationService.sendEmail({
-                    to: requester.email,
-                    subject: `${requestType} ${displayStatus}: ${requestName}`,
-                    template,
-                    data: {
-                        requestType,
-                        requestName,
-                        reportName: requestName, // Some templates use reportName
-                        status: displayStatus,
-                        comments: comments || '',
-                        instanceId: approvalInstance._id.toString(),
-                    },
-                });
+            if (!requester) {
+                logger.warn({ userId: requestData.userId }, 'Requester not found for notifications');
+                return;
             }
 
-            // Create database notification record
+            const settings: any = requester.notificationSettings || {};
+            const allowPush = settings.push !== false;
+            const allowEmail = settings.email !== false;
+            const allowReportStatus = settings.reportStatus !== false;
+
+            if (allowReportStatus) {
+                // Send push notification to requester
+                if (allowPush) {
+                    await NotificationService.sendPushToUser(requestData.userId.toString(), {
+                        title: notificationTitle,
+                        body: notificationBody,
+                        data: {
+                            type: isApproved ? 'REQUEST_APPROVED' : isChangesRequested ? 'CHANGES_REQUESTED' : 'REQUEST_REJECTED',
+                            instanceId: approvalInstance._id.toString(),
+                            requestId: approvalInstance.requestId.toString(),
+                            requestType: approvalInstance.requestType,
+                            action: isApproved ? 'REQUEST_APPROVED' : isChangesRequested ? 'CHANGES_REQUESTED' : 'REQUEST_REJECTED',
+                            level: approvedLevel,
+                            approverName: approverName,
+                            approverRole: approverRole,
+                            comments: comments || '',
+                        },
+                    });
+                } else {
+                    logger.debug({ userId: requestData.userId }, 'Push notification skipped (user preference)');
+                }
+
+                // Send email
+                if (requester.email && allowEmail) {
+                    let template = 'request_rejected';
+                    if (isApproved) template = 'request_approved';
+                    if (isChangesRequested) template = 'report_changes_requested';
+
+                    await NotificationService.sendEmail({
+                        to: requester.email,
+                        subject: `${requestType} ${displayStatus}: ${requestName}`,
+                        template,
+                        data: {
+                            requestType,
+                            requestName,
+                            reportName: requestName, // Some templates use reportName
+                            status: displayStatus,
+                            comments: comments || '',
+                            instanceId: approvalInstance._id.toString(),
+                        },
+                    });
+                } else if (!requester.email) {
+                    // Log handled by skipping
+                } else {
+                    logger.debug({ userId: requestData.userId }, 'Email notification skipped (user preference)');
+                }
+            } else {
+                logger.info({ userId: requestData.userId }, 'Skipping notification: User disabled report status updates');
+            }
+
+            // Create database notification record (Always create this, regardless of Push/Email settings)
             try {
                 const { NotificationDataService } = await import('./notificationData.service');
                 const { NotificationType } = await import('../models/Notification');
@@ -461,7 +433,7 @@ export class ApprovalMatrixNotificationService {
                     notificationType = NotificationType.REPORT_CHANGES_REQUESTED;
                 }
 
-                let notificationTitle = `${requestType} ${displayStatus}`;
+                let notificationTitleStr = `${requestType} ${displayStatus}`;
                 let notificationDescription = `Your ${requestType.toLowerCase()} "${requestName}" has been ${displayStatus.toLowerCase()}`;
 
                 // Add approver information
@@ -475,7 +447,7 @@ export class ApprovalMatrixNotificationService {
 
                 // Add level information for intermediate approvals
                 if (isApproved && approvedLevel !== undefined && approvalInstance.status === 'PENDING') {
-                    notificationTitle = `Report Approved at L${approvedLevel}`;
+                    notificationTitleStr = `Report Approved at L${approvedLevel}`;
                     notificationDescription = `Your expense report "${requestName}" has been approved at Level ${approvedLevel}`;
                     if (approverName) {
                         if (approverRole) {
@@ -486,7 +458,7 @@ export class ApprovalMatrixNotificationService {
                     }
                     notificationDescription += `. It is now pending approval at the next level.`;
                 } else if (isApproved && approvedLevel !== undefined) {
-                    notificationTitle = `Report Approved at L${approvedLevel}`;
+                    notificationTitleStr = `Report Approved at L${approvedLevel}`;
                     notificationDescription = `Your expense report "${requestName}" has been approved at Level ${approvedLevel}`;
                     if (approverName) {
                         if (approverRole) {
@@ -506,7 +478,7 @@ export class ApprovalMatrixNotificationService {
                 await NotificationDataService.createNotification({
                     userId: requestData.userId.toString(),
                     type: notificationType,
-                    title: notificationTitle,
+                    title: notificationTitleStr,
                     description: notificationDescription,
                     link: `/reports/${approvalInstance.requestId.toString()}`,
                     companyId: requestData.companyId?.toString() || (requestData.userId?.companyId?.toString()),

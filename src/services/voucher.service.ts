@@ -92,7 +92,7 @@ export class VoucherService {
     try {
       const employee = await User.findById(employeeObjectId).select('name email').exec();
       const employeeName = (employee as any)?.name || (employee as any)?.email || 'Employee';
-      
+
       await LedgerService.createEntry({
         companyId: params.companyId,
         entryType: LedgerEntryType.VOUCHER_ISSUED,
@@ -160,31 +160,33 @@ export class VoucherService {
     // Users should be able to use any voucher they have, regardless of project/cost centre matching
     // Project/cost centre is metadata for tracking, not a restriction on usage
 
-    // Exclude vouchers already used in submitted reports (if reportId provided, exclude it)
-    // Note: Vouchers can be used across multiple reports, so we only exclude if already used in OTHER reports
-    let usedVoucherIds: mongoose.Types.ObjectId[] = [];
+    // ✅ FIX: Allow partially used vouchers to be reused across multiple reports
+    // As long as remainingAmount > 0, the voucher should be available
+    // The query above already filters by remainingAmount > 0, so we don't need to exclude
+    // vouchers that are used in other reports.
+
+    // Only exclude vouchers that are already used in THIS SPECIFIC report
+    // (to prevent applying the same voucher twice to the same report)
+    let excludedVoucherIds: mongoose.Types.ObjectId[] = [];
     if (params.reportId) {
-      // Only exclude vouchers used in OTHER reports (not the current one)
-      const usedInOtherReports = await VoucherUsage.find({
-        reportId: { $ne: new mongoose.Types.ObjectId(params.reportId) },
+      // Exclude vouchers already used in THIS report
+      const usedInThisReport = await VoucherUsage.find({
+        reportId: new mongoose.Types.ObjectId(params.reportId),
         status: VoucherUsageStatus.APPLIED,
       })
         .distinct('voucherId')
         .exec();
-      
-      usedVoucherIds = usedInOtherReports;
-      
+
+      excludedVoucherIds = usedInThisReport;
+
       logger.info({
         reportId: params.reportId,
-        usedInOtherReportsCount: usedVoucherIds.length,
-        usedVoucherIds: usedVoucherIds.map(id => id.toString()),
-      }, 'Vouchers used in other reports');
+        excludedVoucherIds: excludedVoucherIds.map(id => id.toString()),
+      }, 'Vouchers already used in THIS report (excluded)');
     }
-    // Note: We don't exclude vouchers used in submitted reports when reportId is provided
-    // because vouchers can be reused across multiple reports
 
-    if (usedVoucherIds.length > 0) {
-      query._id = { $nin: usedVoucherIds };
+    if (excludedVoucherIds.length > 0) {
+      query._id = { $nin: excludedVoucherIds };
     }
 
     // Debug logging
@@ -193,7 +195,7 @@ export class VoucherService {
       employeeId: params.employeeId,
       reportId: params.reportId,
       query: JSON.stringify(query),
-      usedVoucherIdsCount: usedVoucherIds.length,
+      excludedVoucherIdsCount: excludedVoucherIds.length,
     }, 'Fetching available vouchers');
 
     // First, let's check all vouchers for this user to debug
@@ -251,17 +253,17 @@ export class VoucherService {
     if (!mongoose.Types.ObjectId.isValid(params.voucherId)) {
       throw new Error(`Invalid voucher ID format: ${params.voucherId}`);
     }
-    
+
     // Validate reportId format
     if (!mongoose.Types.ObjectId.isValid(params.reportId)) {
       throw new Error(`Invalid report ID format: ${params.reportId}`);
     }
-    
+
     // Validate userId format
     if (!mongoose.Types.ObjectId.isValid(params.userId)) {
       throw new Error(`Invalid user ID format: ${params.userId}`);
     }
-    
+
     const session = await mongoose.startSession();
     session.startTransaction();
 
