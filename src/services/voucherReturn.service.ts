@@ -168,9 +168,11 @@ export class VoucherReturnService {
         (voucher.totalAmount ?? 0) - (voucher.usedAmount ?? 0) - voucher.returnedAmount
       );
 
-      // If fully returned, mark as RETURNED
+      // If fully returned, mark as RETURNED and set returnedBy/returnedAt
       if (voucher.remainingAmount === 0) {
         voucher.status = AdvanceCashStatus.RETURNED;
+        voucher.returnedBy = adminObjectId;
+        voucher.returnedAt = new Date();
       } else {
         // Update status based on remaining amount
         voucher.status = VoucherService.calculateVoucherStatus(voucher);

@@ -32,6 +32,9 @@ router.put('/settings/self-approval', CompanySettingsController.updateSelfApprov
 // POST /api/v1/company-admin/settings/reset - Reset settings to default
 router.post('/settings/reset', CompanySettingsController.resetSettings);
 
+// POST /api/v1/company-admin/flush-data - Permanently delete company data (expenses, reports, users)
+router.post('/flush-data', CompanySettingsController.flushData);
+
 // Approval Rules routes
 // GET /api/v1/company-admin/approval-rules - Get all approval rules
 router.get('/approval-rules', ApprovalRulesController.getApprovalRules);

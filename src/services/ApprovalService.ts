@@ -1391,8 +1391,8 @@ export class ApprovalService {
               requestData,
             });
           } else {
-            // Notify next matrix level approvers
-            const nextLevelConfig = (matrix as any).levels?.find((l: any) => l.levelNumber === instance.currentLevel);
+            // Notify next matrix level approvers (use virtualMatrix so personalized effectiveLevels are used)
+            const nextLevelConfig = (virtualMatrix as any).levels?.find((l: any) => l.levelNumber === instance.currentLevel);
             if (nextLevelConfig) {
               await NotificationQueueService.enqueue('APPROVAL_REQUIRED', {
                 approvalInstance: instance,

@@ -5,6 +5,7 @@ import { asyncHandler } from '../middleware/error.middleware';
 import { CompanyAdmin } from '../models/CompanyAdmin';
 import { Company } from '../models/Company';
 import { CompanySettingsService } from '../services/companySettings.service';
+import { flushCompanyData } from '../services/flushData.service';
 
 export class CompanySettingsController {
   /**
@@ -174,6 +175,56 @@ export class CompanySettingsController {
       success: true,
       message: 'Settings reset to default successfully',
       data: settings,
+    });
+  });
+
+  /**
+   * Flush (permanently delete) company data by category.
+   * POST /api/v1/company-admin/flush-data
+   * Body: { flushAll?: boolean, flushExpenses?: boolean, flushReports?: boolean, flushUsers?: boolean }
+   */
+  static flushData = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
+    if (!companyAdmin || !companyAdmin.companyId) {
+      res.status(404).json({
+        success: false,
+        message: 'Company admin not found or company not associated',
+        code: 'COMPANY_NOT_FOUND',
+      });
+      return;
+    }
+    const companyId = companyAdmin.companyId.toString();
+    const body = req.body as {
+      flushAll?: boolean;
+      flushExpenses?: boolean;
+      flushReports?: boolean;
+      flushUsers?: boolean;
+    };
+    const flushAll = Boolean(body.flushAll);
+    const flushExpenses = flushAll || Boolean(body.flushExpenses);
+    const flushReports = flushAll || Boolean(body.flushReports);
+    const flushUsers = flushAll || Boolean(body.flushUsers);
+
+    if (!flushExpenses && !flushReports && !flushUsers) {
+      res.status(400).json({
+        success: false,
+        message: 'Select at least one option: expenses, reports, or users',
+        code: 'VALIDATION_ERROR',
+      });
+      return;
+    }
+
+    const result = await flushCompanyData({
+      companyId,
+      flushExpenses,
+      flushReports,
+      flushUsers,
+    });
+
+    res.status(200).json({
+      success: true,
+      message: 'Flush completed',
+      data: result,
     });
   });
 }

@@ -38,9 +38,12 @@ export class ApprovalRecordService {
         session.startTransaction();
 
         try {
-            // Get current level configuration
+            // Get current level configuration: prefer instance effectiveLevels (personalized matrix) when set
             const currentLevel = approvalInstance.currentLevel;
-            const currentLevelConfig = matrix.levels.find((l) => l.levelNumber === currentLevel);
+            const levelsToUse = (approvalInstance as any).effectiveLevels?.length
+                ? (approvalInstance as any).effectiveLevels
+                : matrix.levels || [];
+            const currentLevelConfig = levelsToUse.find((l: any) => l.levelNumber === currentLevel);
 
             if (!currentLevelConfig) {
                 throw new Error(`Level ${currentLevel} not found in approval matrix`);

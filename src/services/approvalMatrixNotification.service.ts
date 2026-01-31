@@ -50,12 +50,6 @@ export class ApprovalMatrixNotificationService {
 
             const requester = report.userId;
             const requesterName = requester.name || requester.email || 'An employee';
-            const requesterEmail = requester.email;
-
-            // Get company details
-            const { Company } = await import('../models/Company');
-            const company = await Company.findById(approvalInstance.companyId).select('name logoUrl').lean().exec();
-            const companyName = company?.name || 'NexPense';
 
             // STEP 2: RESOLVE APPROVERS
             let approverIds: string[] = [];
@@ -117,7 +111,6 @@ export class ApprovalMatrixNotificationService {
 
                 const settings = user.notificationSettings || {};
                 const allowPush = settings.push !== false;
-                const allowEmail = settings.email !== false;
                 const allowApprovalAlerts = settings.approvalAlerts !== false;
 
                 if (!allowApprovalAlerts) continue;
@@ -167,40 +160,7 @@ export class ApprovalMatrixNotificationService {
                     });
                 }
 
-                // 3. Email Notification
-                if (allowEmail && user.email) {
-                    const emailData = {
-                        requestType,
-                        requestName,
-                        requesterName,
-                        requesterEmail: requesterEmail || '',
-                        roleNames: 'Approver',
-                        level: approvalInstance.currentLevel,
-                        approverNames: user.name || user.email,
-                        instanceId: approvalInstance._id.toString(),
-                        reportId: report._id.toString(),
-                        totalAmount: report.totalAmount,
-                        currency: report.currency,
-                        companyName: companyName,
-                        approvalLink: `https://nexpense.aially.in/approvals/pending?reportId=${report._id}`
-                    };
-
-                    if (!emailData.reportId || !emailData.totalAmount || !emailData.currency) {
-                        logger.error({ userId }, 'Skipping email: Missing data');
-                        continue;
-                    }
-
-                    try {
-                        await NotificationService.sendEmail({
-                            to: user.email,
-                            subject: `Approval Required – ${requestName} | ${companyName}`,
-                            template: 'approval_required',
-                            data: emailData,
-                        });
-                    } catch (e: any) {
-                        logger.error({ userId, error: e.message }, 'Email failed');
-                    }
-                }
+                // Email notification to approver when approval request is assigned is disabled (in-app and push only).
             }
         } catch (error: any) {
             logger.error({ error: error.message, instanceId: approvalInstance?._id }, 'notifyApprovalRequired failed');

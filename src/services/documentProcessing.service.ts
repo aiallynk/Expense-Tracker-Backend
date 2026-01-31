@@ -628,16 +628,23 @@ Rules:
       }
     }
 
-    // Try to extract invoice ID / bill number
+    // Try to extract invoice ID / bill number / transaction reference (multiple patterns for accuracy)
     const invoicePatterns = [
-      /(?:invoice|inv|bill|receipt)\s*(?:no|number|#)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{2,})/im,
-      /(?:gstin|gst)\s*(?:no|number|#)?[:\s]*([A-Z0-9]{8,})/im, // fallback identifier if present
+      /(?:invoice|inv|bill|receipt)\s*(?:no|number|#)?[:\s]*([A-Z0-9][A-Z0-9\-\/\s]{2,50})/im,
+      /(?:transaction|txn|payment)\s*(?:id|ref|reference)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
+      /(?:upi|ref|reference)\s*(?:no|number)?[:\s]*([A-Z0-9][A-Z0-9\-\s]{4,50})/im,
+      /(?:utr|order)\s*(?:no|number|id)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
+      /(?:gstin|gst)\s*(?:no|number|#)?[:\s]*([A-Z0-9]{8,})/im,
+      /(?:vpa|bank)\s*(?:ref|reference)?[:\s]*([A-Z0-9@\.\-]{4,50})/im,
     ];
     for (const pattern of invoicePatterns) {
       const match = text.match(pattern);
       if (match && match[1]) {
-        receipt.invoiceId = match[1].trim().substring(0, 50);
-        break;
+        const val = match[1].trim().substring(0, 50);
+        if (val.length >= 2) {
+          receipt.invoiceId = val;
+          break;
+        }
       }
     }
 

@@ -670,9 +670,11 @@ VENDOR NAME:
 - Extract the merchant/shop/recipient name clearly. For handwritten or faded text, still attempt extraction and add "vendor" to doubtful_fields if uncertain.
 - For UPI/payment receipts, vendor is often the recipient name or app name.
 
-TRANSACTION / INVOICE NUMBER:
-- ALWAYS try to extract ANY of: Invoice Number, Invoice No, Bill No, Receipt No, UPI Ref No, UPI Reference Number, Transaction ID, Transaction Reference, Txn ID, Payment Reference, Payment ID, Order ID, Order Number. Put the value in "invoice_number".
-- For payment slips, look for "Transaction ID", "UTR", "Reference No", "Payment Ref".
+TRANSACTION / INVOICE NUMBER (CRITICAL — extract as accurately as possible):
+- ALWAYS try to extract ANY identifier: Invoice Number, Invoice No, Bill No, Receipt No, UPI Ref No, UPI Reference Number, Transaction ID, Transaction Reference, Txn ID, Txn Ref, Payment Reference, Payment ID, Order ID, Order Number, Ref No, Reference No, UTR, UTR No, VPA Ref, Bank Ref. Put the value in "invoice_number".
+- Look in headers, footers, and small print. Values are often alphanumeric (e.g. INV-2024-001, TXN123456, 123456789012).
+- If you SEE an invoice/bill/transaction/reference number on the receipt but cannot read it clearly (blurry, handwritten, cropped), add "invoice_number" to "doubtful_fields" so the user is prompted to enter it manually.
+- If the field is clearly present but in an unusual format, still extract the raw string and add "invoice_number" to doubtful_fields if uncertain.
 
 DATE EXTRACTION - CRITICAL:
 - Support formats: dd/mm/yyyy, dd-mm-yyyy, mm/dd/yyyy, yyyy-mm-dd, and 2-digit year (dd-mm-yy, dd/mm/yy).
@@ -740,7 +742,7 @@ If unreadable, return null. No explanations.`;
       try {
         const parsed = JSON.parse(cleanedContent);
         // Map simplified OpenAI response format to our internal format
-        // Extract invoice number from multiple possible fields (including UPI Reference, Transaction ID, etc.)
+        // Extract invoice number from multiple possible fields (including UPI Reference, Transaction ID, UTR, etc.)
         const invoiceNumber = parsed.invoice_number ||
           parsed.invoiceId ||
           parsed.invoice_id ||
@@ -754,6 +756,8 @@ If unreadable, return null. No explanations.`;
           parsed.transaction_id ||
           parsed.transactionId ||
           parsed.txn_id ||
+          parsed.txn_ref ||
+          parsed.txnRef ||
           parsed.payment_reference ||
           parsed.paymentReference ||
           parsed.payment_id ||
@@ -762,6 +766,17 @@ If unreadable, return null. No explanations.`;
           parsed.orderId ||
           parsed.receipt_number ||
           parsed.receiptNumber ||
+          parsed.ref_no ||
+          parsed.refNo ||
+          parsed.reference_no ||
+          parsed.referenceNumber ||
+          parsed.ref_number ||
+          parsed.refNumber ||
+          parsed.utr ||
+          parsed.utr_no ||
+          parsed.utrNo ||
+          parsed.vpa_ref ||
+          parsed.bank_ref ||
           null;
 
         const lineItemsRaw = parsed.line_items || parsed.lineItems;
@@ -776,9 +791,14 @@ If unreadable, return null. No explanations.`;
           : [];
 
         const doubtfulFieldsRaw = parsed.doubtful_fields ?? parsed.doubtfulFields;
-        const doubtfulFields: string[] = Array.isArray(doubtfulFieldsRaw)
+        let doubtfulFields: string[] = Array.isArray(doubtfulFieldsRaw)
           ? doubtfulFieldsRaw.filter((f: any) => typeof f === 'string').map((f: string) => f.trim()).filter(Boolean)
           : [];
+        // If invoice number was not extracted, add invoiceId to doubtfulFields so UI highlights the field for manual entry
+        const hasInvoiceInDoubtful = doubtfulFields.some((f: string) => f === 'invoice_number' || f === 'invoiceId');
+        if ((!invoiceNumber || String(invoiceNumber).trim() === '') && !hasInvoiceInDoubtful) {
+          doubtfulFields = [...doubtfulFields, 'invoiceId'];
+        }
 
         const result: OcrResult = {
           vendor: parsed.vendor || null,
@@ -904,7 +924,31 @@ If unreadable, return null. No explanations.`;
       result.currency = currencyMatch[1].trim().toUpperCase();
     }
 
-    // Category matching is now handled separately via AI service
+    // Try to extract invoice ID / transaction reference (multiple patterns for accuracy)
+    const invoicePatterns = [
+      /"invoice_number"\s*:\s*"([^"]*)"/i,
+      /"invoiceId"\s*:\s*"([^"]*)"/i,
+      /(?:invoice|inv|bill|receipt)\s*(?:no|number|#)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{2,50})/im,
+      /(?:transaction|txn|payment)\s*(?:id|ref|reference)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
+      /(?:upi|ref|reference)\s*(?:no|number)?[:\s]*([A-Z0-9][A-Z0-9\-\s]{4,50})/im,
+      /(?:utr|order)\s*(?:no|number|id)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
+      /(?:gstin|gst)\s*(?:no|number)?[:\s]*([A-Z0-9]{8,})/im,
+    ];
+    for (const pattern of invoicePatterns) {
+      const match = content.match(pattern);
+      if (match && match[1]) {
+        const val = match[1].trim().substring(0, 100);
+        if (val.length >= 2) {
+          result.invoiceId = val;
+          result.invoice_number = val;
+          break;
+        }
+      }
+    }
+    // If still no invoice ID, mark for user to enter manually
+    if (!result.invoiceId || String(result.invoiceId).trim() === '') {
+      result.doubtfulFields = [...(result.doubtfulFields || []), 'invoiceId'];
+    }
 
     return result;
   }
