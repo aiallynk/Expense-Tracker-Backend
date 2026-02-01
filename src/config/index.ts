@@ -67,8 +67,25 @@ export const config = {
     maxGlobalOcr: parseInt(process.env.MAX_GLOBAL_OCR || process.env.OCR_CONCURRENCY || '20', 10),
     // Per-user throttling limit: max concurrent OCR jobs per user (from env)
     maxPerUserOcr: parseInt(process.env.MAX_PER_USER_OCR || process.env.OCR_PER_USER_CONCURRENCY || '3', 10),
+    // Traffic-aware dispatcher: BLAST (low traffic) vs CONTROLLED (high traffic)
+    // BLAST: batch completion time ~ MAX(single receipt time). Per-user >= 10 so 10 receipts start in parallel.
+    blast: {
+      maxGlobalOcr: parseInt(process.env.OCR_BLAST_MAX_GLOBAL || process.env.MAX_GLOBAL_OCR || '40', 10),
+      maxPerUserOcr: parseInt(process.env.OCR_BLAST_MAX_PER_USER || process.env.MAX_PER_USER_OCR || '10', 10),
+    },
+    controlled: {
+      maxGlobalOcr: parseInt(process.env.OCR_CONTROLLED_MAX_GLOBAL || process.env.MAX_GLOBAL_OCR || '20', 10),
+      maxPerUserOcr: parseInt(process.env.OCR_CONTROLLED_MAX_PER_USER || process.env.MAX_PER_USER_OCR || '3', 10),
+    },
+    // Thresholds: switch to CONTROLLED when active users or active OCR jobs exceed these
+    activeUsersBlastThreshold: parseInt(process.env.OCR_ACTIVE_USERS_BLAST_THRESHOLD || '10', 10),
+    activeOcrJobsControlledThreshold: parseInt(process.env.OCR_ACTIVE_JOBS_CONTROLLED_THRESHOLD || '50', 10),
     // Single retry on failure (manual retry via UI, not automatic)
     retry: 1,
+    // Max automatic retry attempts for transient failures (429, 5xx, timeout)
+    retryMaxAttempts: parseInt(process.env.OCR_RETRY_MAX_ATTEMPTS || '3', 10),
+    // Base delay in ms for exponential backoff (1s, 2s, 4s, ...)
+    retryBackoffBaseMs: parseInt(process.env.OCR_RETRY_BACKOFF_BASE_MS || '1000', 10),
     // 30 second timeout per receipt
     timeout: 30000,
     // OCR timeout in milliseconds (from env, defaults to 30s)

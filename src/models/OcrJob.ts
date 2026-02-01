@@ -12,6 +12,7 @@ export interface IOcrJob extends Document {
   resultJson?: Record<string, any>;
   errorJson?: Record<string, any>;
   completedAt?: Date;
+  startedAt?: Date;
   totalTokens?: number;
   createdAt: Date;
   updatedAt: Date;
@@ -54,6 +55,9 @@ const ocrJobSchema = new Schema<IOcrJob>(
     completedAt: {
       type: Date,
     },
+    startedAt: {
+      type: Date,
+    },
     totalTokens: {
       type: Number,
       default: undefined,
@@ -67,6 +71,7 @@ const ocrJobSchema = new Schema<IOcrJob>(
 // Indexes
 ocrJobSchema.index({ receiptId: 1 });
 ocrJobSchema.index({ status: 1, createdAt: 1 });
+ocrJobSchema.index({ status: 1, updatedAt: 1 });
 
 export const OcrJob = mongoose.model<IOcrJob>('OcrJob', ocrJobSchema);
 

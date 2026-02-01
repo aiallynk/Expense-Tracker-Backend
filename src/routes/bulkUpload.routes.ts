@@ -4,7 +4,12 @@ import { BulkUploadController } from '../controllers/bulkUpload.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { bulkUploadRateLimiter } from '../middleware/rateLimit.middleware';
 import { validate } from '../middleware/validate.middleware';
-import { bulkDocumentUploadIntentSchema, bulkDocumentConfirmSchema } from '../utils/dtoTypes';
+import {
+  bulkDocumentUploadIntentSchema,
+  bulkDocumentConfirmSchema,
+  batchUploadIntentSchema,
+  batchUploadConfirmSchema,
+} from '../utils/dtoTypes';
 
 const router = Router();
 
@@ -31,6 +36,48 @@ router.post(
   bulkUploadRateLimiter,
   validate(bulkDocumentConfirmSchema),
   BulkUploadController.confirmUpload
+);
+
+/**
+ * POST /bulk-upload/batch-intent
+ * Batch-first: create all receipts for a batch, return presigned URLs. One call for entire batch.
+ */
+router.post(
+  '/bulk-upload/batch-intent',
+  bulkUploadRateLimiter,
+  validate(batchUploadIntentSchema),
+  BulkUploadController.createBatchIntent
+);
+
+/**
+ * POST /bulk-upload/batch-confirm
+ * Batch-first: confirm all receipts, create expense drafts, enqueue all OCR jobs. Respond once.
+ */
+router.post(
+  '/bulk-upload/batch-confirm',
+  bulkUploadRateLimiter,
+  validate(batchUploadConfirmSchema),
+  BulkUploadController.confirmBatch
+);
+
+/**
+ * GET /bulk-upload/batch/:batchId/status
+ * Get batch progress (totalReceipts, completedReceipts, failedReceipts, status).
+ */
+router.get(
+  '/bulk-upload/batch/:batchId/status',
+  bulkUploadRateLimiter,
+  BulkUploadController.getBatchStatus
+);
+
+/**
+ * POST /bulk-upload/batch/:batchId/retry-failed
+ * Re-enqueue OCR for failed receipts in the batch only.
+ */
+router.post(
+  '/bulk-upload/batch/:batchId/retry-failed',
+  bulkUploadRateLimiter,
+  BulkUploadController.retryFailedReceipts
 );
 
 /**

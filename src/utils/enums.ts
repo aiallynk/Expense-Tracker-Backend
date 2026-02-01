@@ -60,6 +60,13 @@ export enum ReceiptFailureReason {
   API_ERROR = 'API_ERROR',
 }
 
+export enum BatchStatus {
+  UPLOADING = 'UPLOADING',
+  PROCESSING = 'PROCESSING',
+  COMPLETED = 'COMPLETED',
+  PARTIAL = 'PARTIAL',
+}
+
 export enum NotificationPlatform {
   ANDROID = 'android',
   IOS = 'ios',

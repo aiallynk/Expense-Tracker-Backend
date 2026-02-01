@@ -7,7 +7,8 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { Receipt } from '../models/Receipt';
 import { DocumentProcessingService } from '../services/documentProcessing.service';
-import { bulkDocumentUploadIntentSchema, bulkDocumentConfirmSchema } from '../utils/dtoTypes';
+import { BatchUploadService } from '../services/batchUpload.service';
+import { bulkDocumentUploadIntentSchema, bulkDocumentConfirmSchema, batchUploadIntentSchema, batchUploadConfirmSchema } from '../utils/dtoTypes';
 import { getPresignedUploadUrl, getObjectUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
@@ -106,11 +107,15 @@ export class BulkUploadController {
       // Always return HTTP 200 - OCR failures are non-blocking
       let result: any;
       try {
-        // Update receipt to confirm upload
+        // Update receipt to confirm upload (non-blocking; invalid receiptId must not abort)
         if (data.receiptId) {
-          await Receipt.findByIdAndUpdate(data.receiptId, {
-            uploadConfirmed: true,
-          });
+          try {
+            await Receipt.findByIdAndUpdate(data.receiptId, {
+              uploadConfirmed: true,
+            });
+          } catch (_) {
+            // Ignore invalid receiptId so processDocument still runs
+          }
         }
 
         result = await DocumentProcessingService.processDocument(
@@ -160,26 +165,32 @@ export class BulkUploadController {
         };
       }
 
-      const createdExpenseIds = (result.expensesCreated || []).filter(
+      const createdExpenseIds = (result?.expensesCreated || []).filter(
         (id: any): id is string => typeof id === 'string' && id.length > 0
       );
 
-      // Update receipt with processing results
+      // Update receipt with processing results (non-blocking; invalid receiptId must not cause 500)
       if (data.receiptId) {
-        await Receipt.findByIdAndUpdate(data.receiptId, {
-          parsedData: {
-            isBulkDocument: true,
-            reportId: data.reportId,
-            receiptsExtracted: result.receipts.length,
-            expensesLinked: createdExpenseIds,
-            processedAt: new Date(),
-          },
-        });
+        try {
+          await Receipt.findByIdAndUpdate(data.receiptId, {
+            parsedData: {
+              isBulkDocument: true,
+              reportId: data.reportId,
+              receiptsExtracted: (result?.receipts || []).length,
+              expensesLinked: createdExpenseIds,
+              processedAt: new Date(),
+            },
+          });
+        } catch (updateErr: any) {
+          logger.warn({ receiptId: data.receiptId, error: updateErr?.message }, 'Failed to update receipt parsedData (non-fatal)');
+        }
       }
 
       // Log summary - only one log per batch
-      const ocrFailures = result.errors.filter((e: string) => e.includes('OCR') || e.includes('parsing')).length;
-      if (ocrFailures > 0 && result.receipts.length === 0) {
+      const errorsList = result?.errors ?? [];
+      const ocrFailures = errorsList.filter((e: string) => e.includes('OCR') || e.includes('parsing')).length;
+      const receiptsList = result?.receipts ?? [];
+      if (ocrFailures > 0 && receiptsList.length === 0) {
         logger.warn({
           userId,
           reportId: data.reportId,
@@ -189,32 +200,128 @@ export class BulkUploadController {
         logger.info({
           userId,
           reportId: data.reportId,
-          receiptsFound: result.receipts.length,
+          receiptsFound: receiptsList.length,
           expensesCreated: createdExpenseIds.length,
-          errors: result.errors.length,
+          errors: errorsList.length,
         }, 'Bulk document processed');
       }
 
       // Always return HTTP 200 - success is true if any receipts were extracted
       res.status(200).json({
-        success: result.receipts.length > 0,
+        success: receiptsList.length > 0,
         data: {
-          documentType: result.documentType,
-          totalPages: result.totalPages,
-          receiptsExtracted: result.receipts.length,
-          expensesCreated: result.expensesCreated,
-          extractedData: result.receipts,
-          results: result.results,
+          documentType: result?.documentType,
+          totalPages: result?.totalPages,
+          receiptsExtracted: receiptsList.length,
+          expensesCreated: result?.expensesCreated,
+          extractedData: result?.receipts,
+          results: result?.results,
           documentReceiptId: data.receiptId, // Include receipt ID for frontend
           storageKey: data.storageKey,
-          errors: result.errors,
-          ocrFailures: result.errors.filter((e: string) => e.includes('OCR') || e.includes('parsing')).length,
+          errors: errorsList,
+          ocrFailures,
         },
-        message: result.receipts.length > 0
-          ? `Successfully extracted ${result.receipts.length} receipt(s) and created ${createdExpenseIds.length} expense draft(s)`
-          : result.errors.length > 0
+        message: receiptsList.length > 0
+          ? `Successfully extracted ${receiptsList.length} receipt(s) and created ${createdExpenseIds.length} expense draft(s)`
+          : errorsList.length > 0
             ? 'Document uploaded but OCR failed. Please enter receipt details manually.'
             : 'Document uploaded successfully',
+      });
+    }
+  );
+
+  /**
+   * Batch upload intent: create all receipts for a batch, return presigned URLs.
+   * One API call for the entire batch. Do NOT wait for OCR.
+   */
+  static createBatchIntent = asyncHandler(
+    async (req: AuthRequest, res: Response) => {
+      const data = batchUploadIntentSchema.parse(req.body);
+      const userId = req.user!.id;
+
+      const result = await BatchUploadService.createBatchIntent(
+        data.reportId,
+        userId,
+        data.batchId,
+        data.files
+      );
+
+      res.status(200).json({
+        success: true,
+        data: result,
+      });
+    }
+  );
+
+  /**
+   * Batch upload confirm: create expense drafts, link receipts, enqueue all OCR jobs.
+   * Respond once. Do NOT wait for OCR to finish.
+   */
+  static confirmBatch = asyncHandler(
+    async (req: AuthRequest, res: Response) => {
+      const data = batchUploadConfirmSchema.parse(req.body);
+      const userId = req.user!.id;
+
+      const result = await BatchUploadService.confirmBatch(
+        data.reportId,
+        userId,
+        data.batchId,
+        data.receipts
+      );
+
+      res.status(200).json({
+        success: true,
+        data: result,
+        message: `Processing ${result.receiptIds.length} receipt(s). Results will appear as they complete.`,
+      });
+    }
+  );
+
+  /**
+   * Get batch status by batchId (auth user must own the batch).
+   */
+  static getBatchStatus = asyncHandler(
+    async (req: AuthRequest, res: Response) => {
+      const batchId = req.params.batchId as string;
+      const userId = req.user!.id;
+
+      const status = await BatchUploadService.getBatchStatus(batchId, userId);
+      if (!status) {
+        res.status(404).json({
+          success: false,
+          message: 'Batch not found or access denied',
+          code: 'BATCH_NOT_FOUND',
+        });
+        return;
+      }
+
+      res.status(200).json({
+        success: true,
+        data: status,
+      });
+    }
+  );
+
+  /**
+   * Retry OCR for failed receipts in the batch only.
+   */
+  static retryFailedReceipts = asyncHandler(
+    async (req: AuthRequest, res: Response) => {
+      const batchId = req.params.batchId as string;
+      const userId = req.user!.id;
+
+      const result = await BatchUploadService.retryFailedReceipts(batchId, userId);
+
+      res.status(200).json({
+        success: true,
+        data: {
+          batchId,
+          receiptIds: result.receiptIds,
+          enqueued: result.enqueued,
+        },
+        message: result.enqueued > 0
+          ? `Re-queued ${result.enqueued} failed receipt(s) for OCR.`
+          : 'No failed receipts to retry.',
       });
     }
   );

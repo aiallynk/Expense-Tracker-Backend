@@ -64,6 +64,49 @@ export const receiptUploadRateLimiter = rateLimit({
   },
 });
 
+// Per-user receipt uploads per minute - prevent abuse and cost spikes
+export const receiptUploadPerMinuteRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: parseInt(process.env.RECEIPT_UPLOAD_PER_MINUTE_PER_USER || '30', 10),
+  message: {
+    success: false,
+    message: 'Too many receipt uploads this minute, please slow down',
+    code: 'RATE_LIMIT_EXCEEDED',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  keyGenerator: (req: any) => {
+    if (req.user?.id) {
+      return `user:${req.user.id}`;
+    }
+    return req.ip || req.socket.remoteAddress || 'unknown';
+  },
+});
+
+// Per-company receipt uploads per minute - company-wide safety limit
+export const receiptUploadPerMinutePerCompanyRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: parseInt(process.env.RECEIPT_UPLOAD_PER_MINUTE_PER_COMPANY || '100', 10),
+  message: {
+    success: false,
+    message: 'Your organization has too many uploads this minute, please try again shortly',
+    code: 'RATE_LIMIT_EXCEEDED',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: { trustProxy: false },
+  keyGenerator: (req: any) => {
+    if (req.user?.companyId) {
+      return `company:${req.user.companyId}`;
+    }
+    if (req.user?.id) {
+      return `user:${req.user.id}`;
+    }
+    return req.ip || req.socket.remoteAddress || 'unknown';
+  },
+});
+
 // Bulk upload rate limiter - higher limits for bulk operations
 export const bulkUploadRateLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour

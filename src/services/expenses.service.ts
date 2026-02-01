@@ -6,7 +6,7 @@ import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
 import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
 import { CreateExpenseDto, UpdateExpenseDto, ExpenseFiltersDto } from '../utils/dtoTypes';
-import { ExpenseStatus, ExpenseReportStatus , AuditAction } from '../utils/enums';
+import { ExpenseStatus, ExpenseReportStatus, ExpenseSource, AuditAction } from '../utils/enums';
 import { getPaginationOptions, createPaginatedResult } from '../utils/pagination';
 
 import { AuditService } from './audit.service';
@@ -19,6 +19,7 @@ import { currencyService } from './currency.service';
 import { logger } from '@/config/logger';
 import { config } from '@/config/index';
 import { DateUtils } from '@/utils/dateUtils';
+import { getPresignedDownloadUrl } from '@/utils/s3';
 
 export class ExpensesService {
   static async createExpense(
@@ -39,6 +40,53 @@ export class ExpensesService {
     // Allow adding expenses if report is DRAFT or CHANGES_REQUESTED
     if (report.status !== ExpenseReportStatus.DRAFT && report.status !== ExpenseReportStatus.CHANGES_REQUESTED) {
       throw new Error('Can only add expenses to draft reports or reports with changes requested');
+    }
+
+    // Receipt is source of truth: SCANNED expenses must be linked to a receipt
+    if (data.source === ExpenseSource.SCANNED && !data.receiptId) {
+      throw new Error('Receipt ID is required for scanned expenses. Receipt file must be stored first.');
+    }
+
+    // Receipt fingerprint is identity: check duplicate AFTER upload, BEFORE expense creation (not on save)
+    let receiptDuplicateFlag: 'STRONG_DUPLICATE' | undefined;
+    let receiptDuplicateReason: string | undefined;
+    if (data.source === ExpenseSource.SCANNED && data.receiptId) {
+      const { Receipt } = await import('../models/Receipt');
+      const { ReceiptHashService } = await import('./receiptHash.service');
+      const { ReceiptDuplicateDetectionService } = await import('./receiptDuplicateDetection.service');
+
+      const receiptDoc = await Receipt.findById(data.receiptId).exec();
+      if (receiptDoc) {
+        const userForCompany = await User.findById(userId).select('companyId').exec();
+        const companyId = userForCompany?.companyId as mongoose.Types.ObjectId | undefined;
+        if (companyId) {
+          if (!receiptDoc.companyId) {
+            receiptDoc.companyId = companyId;
+            await receiptDoc.save();
+          }
+          const hasImageHashes = receiptDoc.imagePerceptualHash || receiptDoc.imageAverageHash;
+          if (!hasImageHashes) {
+            const imageHashes = await ReceiptHashService.generateHashesForReceipt(
+              receiptDoc.storageKey,
+              receiptDoc.mimeType
+            );
+            if (imageHashes) {
+              receiptDoc.imagePerceptualHash = imageHashes.perceptualHash;
+              receiptDoc.imageAverageHash = imageHashes.averageHash;
+              await receiptDoc.save();
+            }
+          }
+          const dupCheck = await ReceiptDuplicateDetectionService.checkReceiptDuplicate(
+            data.receiptId,
+            companyId
+          );
+          if (dupCheck.isDuplicate) {
+            receiptDuplicateFlag = 'STRONG_DUPLICATE';
+            receiptDuplicateReason = dupCheck.reason ?? 'Duplicate receipt (image match)';
+            logger.info({ receiptId: data.receiptId, matchType: dupCheck.matchType }, 'CreateExpense: duplicate receipt detected before save');
+          }
+        }
+      }
     }
 
     // Prepare receipt IDs array - link to source document if provided
@@ -116,11 +164,13 @@ export class ExpensesService {
       );
     }
 
-    // Rule 3 & 4: Process currency conversion
+    // Rule 3 & 4: Process currency conversion (use invoice/expense date for date-wise rates)
+    const rateDate = invoiceDate || expenseDateBackend;
     const conversionMetadata = await this.processCurrencyConversion(
       originalAmount,
       originalCurrency,
-      selectedCurrency
+      selectedCurrency,
+      rateDate
     );
 
     // Rule 5: Store expense with converted amount and metadata
@@ -141,6 +191,10 @@ export class ExpensesService {
       notes: data.notes,
       receiptIds,
       receiptPrimaryId: data.receiptId ? new mongoose.Types.ObjectId(data.receiptId) : undefined,
+      // Receipt fingerprint duplicate: set so UI blocks Save
+      ...(receiptDuplicateFlag && receiptDuplicateReason
+        ? { duplicateFlag: receiptDuplicateFlag, duplicateReason: receiptDuplicateReason }
+        : {}),
       // Invoice fields
       invoiceId: data.invoiceId,
       invoiceDate,
@@ -351,11 +405,13 @@ export class ExpensesService {
       // Rule 2: Get company's selected currency
       const selectedCurrency = await this.getCompanySelectedCurrency(userId);
 
-      // Rule 3 & 4: Process currency conversion from scratch
+      // Rule 3 & 4: Process currency conversion from scratch (use invoice/expense date for date-wise rates)
+      const rateDate = expense.invoiceDate || expense.expenseDate;
       const conversionMetadata = await this.processCurrencyConversion(
         originalAmount,
         originalCurrency,
-        selectedCurrency
+        selectedCurrency,
+        rateDate
       );
 
       // Rule 5: Update conversion metadata
@@ -590,6 +646,21 @@ export class ExpensesService {
       expenseDate: expense.expenseDate ? DateUtils.backendDateToFrontend(expense.expenseDate) : expenseObj.expenseDate,
       invoiceDate: expense.invoiceDate ? DateUtils.backendDateToFrontend(expense.invoiceDate) : expenseObj.invoiceDate,
     } as any;
+
+    // Attach signedUrl to receiptPrimaryId so frontend can show receipt image (receipt file is source of truth)
+    const receiptPrimary = finalExpense.receiptPrimaryId as any;
+    if (receiptPrimary && receiptPrimary.storageKey) {
+      try {
+        const signedUrl = await getPresignedDownloadUrl(
+          'receipts',
+          receiptPrimary.storageKey,
+          7 * 24 * 60 * 60 // 7 days
+        );
+        finalExpense.receiptPrimaryId = { ...receiptPrimary, signedUrl };
+      } catch (urlErr) {
+        logger.warn({ expenseId: id, error: urlErr }, 'Failed to generate signed URL for receipt primary; leaving receiptPrimaryId without signedUrl');
+      }
+    }
     
     // FORENSIC: Log final returned object
     logger.debug({
@@ -1063,7 +1134,8 @@ export class ExpensesService {
   private static async processCurrencyConversion(
     originalAmount: number,
     originalCurrency: string,
-    selectedCurrency: string
+    selectedCurrency: string,
+    rateDate?: Date
   ): Promise<{
     conversionApplied: boolean;
     originalAmount: number;
@@ -1085,22 +1157,24 @@ export class ExpensesService {
         convertedAmount: originalAmount,
         selectedCurrency: selected,
         exchangeRateUsed: 1,
-        exchangeRateDate: new Date(),
+        exchangeRateDate: rateDate || new Date(),
       };
     }
 
-    // Rule 4: Conversion is mandatory
+    // Rule 4: Conversion is mandatory (use rateDate for date-wise accurate rates)
     try {
       logger.info({
         originalAmount,
         originalCurrency: original,
         selectedCurrency: selected,
+        rateDate: rateDate?.toISOString?.()?.split('T')[0],
       }, 'Processing currency conversion');
 
       const conversion = await currencyService.convertCurrency(
         originalAmount,
         original,
-        selected
+        selected,
+        rateDate
       );
 
       logger.info({

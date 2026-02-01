@@ -11,6 +11,8 @@ const SUPPORTED_CURRENCIES = ['INR', 'USD', 'EUR', 'GBP', 'JPY', 'CAD', 'AUD', '
 
 class CurrencyService {
   private readonly API_URL = 'https://api.exchangerate-api.com/v4/latest/USD';
+  /** Free historical rates (base EUR); used for past dates */
+  private readonly HISTORICAL_API_URL = 'https://api.frankfurter.app';
   private readonly REDIS_KEY_PREFIX = 'exchange_rates:';
   private readonly REDIS_CACHE_TTL = 24 * 60 * 60; // 24 hours in seconds
 
@@ -75,17 +77,64 @@ class CurrencyService {
         return rates;
       }
 
-      // Step 3: Fetch from API (only for today's date)
+      // Step 3: Fetch from API
       if (dateString === this.getTodayDateString()) {
         return await this.fetchAndStoreRates();
-      } else {
-        // For historical dates, return empty or throw error
-        logger.warn({ date: dateString }, 'Historical exchange rates not available');
-        return this.getDefaultRates();
       }
+      // For historical dates, try Frankfurter (free, date-wise)
+      const historical = await this.fetchHistoricalRates(dateString);
+      if (historical && Object.keys(historical).length > 0) {
+        return historical;
+      }
+      logger.warn({ date: dateString }, 'Historical exchange rates not available, using default');
+      return this.getDefaultRates();
     } catch (error: any) {
       logger.error({ error: error.message, date: dateString }, 'Error getting exchange rates');
       return this.getDefaultRates();
+    }
+  }
+
+  /**
+   * Fetch historical exchange rates for a given date (free API: Frankfurter).
+   * Returns INR-based rates: 1 INR = X Currency for each currency.
+   */
+  async fetchHistoricalRates(dateString: string): Promise<ExchangeRates | null> {
+    try {
+      const toList = SUPPORTED_CURRENCIES.join(',');
+      const url = `${this.HISTORICAL_API_URL}/${dateString}?from=EUR&to=${toList}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const response = await fetch(url, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      if (!response.ok) return null;
+      const data = await response.json() as { rates?: Record<string, number> };
+      if (!data?.rates?.INR) return null;
+      const rates = data.rates;
+      const inrBasedRates: ExchangeRates = { INR: 1 };
+      for (const currency of SUPPORTED_CURRENCIES) {
+        if (currency === 'INR') continue;
+        if (currency === 'EUR') {
+          inrBasedRates.EUR = 1 / rates.INR;
+        } else if (rates[currency] != null) {
+          inrBasedRates[currency] = rates[currency] / rates.INR;
+        }
+      }
+      if (Object.keys(inrBasedRates).length <= 1) return null;
+      await ExchangeRate.findOneAndUpdate(
+        { date: dateString },
+        { base: 'INR', rates: inrBasedRates, date: dateString, lastUpdated: new Date() },
+        { upsert: true, new: true }
+      );
+      if (isRedisAvailable() && redisConnection) {
+        try {
+          await redisConnection.setex(`${this.REDIS_KEY_PREFIX}${dateString}`, this.REDIS_CACHE_TTL, JSON.stringify(inrBasedRates));
+        } catch (_) {}
+      }
+      logger.debug({ date: dateString }, 'Historical exchange rates fetched');
+      return inrBasedRates;
+    } catch (error: any) {
+      logger.debug({ dateString, error: error.message }, 'Historical rates fetch failed');
+      return null;
     }
   }
 
@@ -316,16 +365,18 @@ class CurrencyService {
 
   /**
    * Convert amount from one currency to another
-   * Returns conversion details including rate and date
+   * Returns conversion details including rate and date.
+   * When rateDate is provided, uses exchange rates for that date (date-wise accurate).
    * @param amount - Original amount
    * @param fromCurrency - Source currency
    * @param toCurrency - Target currency
-   * @returns Object with convertedAmount, rate, and date
+   * @param rateDate - Optional date for exchange rate (e.g. invoice date); uses today if omitted
    */
   async convertCurrency(
     amount: number,
     fromCurrency: string,
-    toCurrency: string
+    toCurrency: string,
+    rateDate?: Date
   ): Promise<{
     convertedAmount: number;
     rate: number;
@@ -335,7 +386,7 @@ class CurrencyService {
       return {
         convertedAmount: 0,
         rate: 1,
-        rateDate: new Date(),
+        rateDate: rateDate || new Date(),
       };
     }
 
@@ -346,13 +397,13 @@ class CurrencyService {
       return {
         convertedAmount: amount,
         rate: 1,
-        rateDate: new Date(),
+        rateDate: rateDate || new Date(),
       };
     }
 
     try {
-      const rates = await this.getExchangeRates();
-      const rateDate = new Date();
+      const rates = await this.getExchangeRates(rateDate);
+      const rateDateRes = rateDate || new Date();
       
       // Log for debugging
       logger.debug({
@@ -420,7 +471,7 @@ class CurrencyService {
       return {
         convertedAmount: Math.round(convertedAmount * 100) / 100, // Round to 2 decimals
         rate: Math.round(rate * 10000) / 10000, // Round to 4 decimals
-        rateDate,
+        rateDate: rateDateRes,
       };
     } catch (error: any) {
       logger.error({

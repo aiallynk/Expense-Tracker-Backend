@@ -360,6 +360,8 @@ export interface ReceiptProcessedPayload {
   dateReviewRecommended?: boolean;
   /** Exchange rate if present on receipt. */
   exchangeRate?: number | null;
+  /** Batch upload: same batchId for receipts in one batch (frontend tracks completion). */
+  batchId?: string | null;
 }
 
 // Emit receipt processed event to user
@@ -373,6 +375,22 @@ export const emitReceiptProcessed = (
     receiptId, // Override receiptId from data to ensure consistency
   });
   logger.debug(`Emitted receipt:processed to user ${userId}, receipt: ${receiptId}, status: ${data.status}, duplicateFlag: ${data.duplicateFlag || 'none'}`);
+};
+
+// Batch progress event (batch-first: real progress completedReceipts/totalReceipts)
+export const BATCH_PROGRESS_EVENT = 'batch:progress';
+
+export interface BatchProgressPayload {
+  batchId: string;
+  totalReceipts: number;
+  completedReceipts: number;
+  failedReceipts: number;
+  status: 'UPLOADING' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL';
+}
+
+export const emitBatchProgress = (userId: string, data: BatchProgressPayload) => {
+  emitToUser(userId, BATCH_PROGRESS_EVENT, data);
+  logger.debug(`Emitted batch:progress to user ${userId}, batchId: ${data.batchId}, ${data.completedReceipts + data.failedReceipts}/${data.totalReceipts}, status: ${data.status}`);
 };
 
 // Notification events

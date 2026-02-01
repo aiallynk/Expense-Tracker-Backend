@@ -12,12 +12,45 @@ import { getPresignedDownloadUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
 import { ReceiptStatus, ReceiptFailureReason } from '../utils/enums';
-import { emitReceiptProcessed, emitReceiptProcessing, ReceiptProcessedPayload } from '../socket/realtimeEvents';
+import { emitReceiptProcessed, emitReceiptProcessing, ReceiptProcessedPayload, emitBatchProgress } from '../socket/realtimeEvents';
+import { Batch } from '../models/Batch';
+import { BatchStatus } from '../utils/enums';
 import {
   buildFullReceiptText,
   inferCategoryFromReceiptText,
   extractNotesFromLineItems,
 } from './ocr/ocrPostProcess.service';
+
+/** Update Batch progress and emit batch:progress when a receipt completes (success or failure). */
+async function updateBatchProgressAndEmit(userId: string, batchId: string, isSuccess: boolean): Promise<void> {
+  try {
+    const batch = await Batch.findOne({ batchId }).exec();
+    if (!batch) return;
+    if (isSuccess) {
+      batch.completedReceipts = (batch.completedReceipts || 0) + 1;
+    } else {
+      batch.failedReceipts = (batch.failedReceipts || 0) + 1;
+    }
+    const completed = batch.completedReceipts || 0;
+    const failed = batch.failedReceipts || 0;
+    const total = batch.totalReceipts || 0;
+    if (completed + failed >= total) {
+      batch.status = failed > 0 ? BatchStatus.PARTIAL : BatchStatus.COMPLETED;
+    }
+    await batch.save();
+    emitBatchProgress(userId, {
+      batchId: batch.batchId,
+      totalReceipts: total,
+      completedReceipts: completed,
+      failedReceipts: failed,
+      status: batch.status as 'UPLOADING' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL',
+    });
+  } catch (err: any) {
+    logger.warn({ error: err?.message, batchId }, 'OCR: Failed to update batch progress (non-blocking)');
+  }
+}
+import { ReceiptHashService } from './receiptHash.service';
+import { ReceiptDuplicateDetectionService } from './receiptDuplicateDetection.service';
 
 export interface OcrResult {
   vendor?: string;
@@ -43,9 +76,13 @@ export interface OcrResult {
 export class OcrService {
   /**
    * Enqueue OCR job to in-process queue (non-blocking)
-   * Returns job ID immediately
+   * Returns job ID immediately.
+   * When options.batchId and options.batchSize are set, queue may use BLAST mode for parallel processing.
    */
-  static async enqueueOcrJob(receiptId: string): Promise<string> {
+  static async enqueueOcrJob(
+    receiptId: string,
+    options?: { batchId?: string; batchSize?: number }
+  ): Promise<string> {
     const receipt = await Receipt.findById(receiptId).populate({
       path: 'expenseId',
       populate: { path: 'reportId' },
@@ -102,6 +139,8 @@ export class OcrService {
           receiptId,
           userId,
           createdAt: new Date(),
+          batchId: options?.batchId,
+          batchSize: options?.batchSize,
         },
         async (job) => {
           // Processor function - called by p-queue when job is ready
@@ -177,6 +216,59 @@ export class OcrService {
     }
   }
 
+  /**
+   * Mark OCR jobs stuck in PROCESSING (older than 2x timeout) as FAILED and emit.
+   * Ensures every job eventually resolves to COMPLETED or FAILED.
+   */
+  static async markStuckOcrJobsAsFailed(): Promise<void> {
+    const timeoutMs = (config.ocr as any).timeoutMs ?? 30000;
+    const cutoff = new Date(Date.now() - timeoutMs * 2);
+    const stuck = await OcrJob.find({
+      status: OcrJobStatus.PROCESSING,
+      $or: [
+        { startedAt: { $exists: true, $ne: null, $lt: cutoff } },
+        { updatedAt: { $lt: cutoff } },
+      ],
+    }).exec();
+    for (const j of stuck) {
+      try {
+        j.status = OcrJobStatus.FAILED;
+        j.error = 'Stuck (timeout)';
+        j.errorJson = { message: 'Stuck (timeout)' };
+        await j.save();
+        const receipt = await Receipt.findById(j.receiptId).populate({
+          path: 'expenseId',
+          populate: { path: 'reportId' },
+        }).exec();
+        if (receipt) {
+          (receipt as any).status = ReceiptStatus.FAILED;
+          (receipt as any).failureReason = ReceiptFailureReason.TIMEOUT;
+          await receipt.save();
+          const receiptIdStr = (receipt._id as mongoose.Types.ObjectId).toString();
+          let userId: string | null = null;
+          if ((receipt as any).expenseId) {
+            const report = (receipt as any).expenseId.reportId;
+            if (report?.userId) userId = report.userId.toString();
+          }
+          if (userId) {
+            emitReceiptProcessed(userId, receiptIdStr, {
+              receiptId: receiptIdStr,
+              status: 'FAILED',
+              reason: ReceiptFailureReason.TIMEOUT,
+              batchId: (receipt as any).batchId ?? undefined,
+            });
+            if ((receipt as any).batchId) {
+              await updateBatchProgressAndEmit(userId, (receipt as any).batchId, false);
+            }
+          }
+        }
+        logger.warn({ jobId: j._id, receiptId: j.receiptId }, 'OCR: Marked stuck job as FAILED');
+      } catch (err: any) {
+        logger.warn({ error: err?.message, jobId: j._id }, 'OCR: Failed to mark stuck job (non-blocking)');
+      }
+    }
+  }
+
   static async processOcrJob(jobId: string): Promise<IOcrJob> {
     const job = await OcrJob.findById(jobId).populate('receiptId');
 
@@ -184,8 +276,11 @@ export class OcrService {
       throw new Error('OCR job not found');
     }
 
+    await OcrService.markStuckOcrJobsAsFailed();
+
     const ocrStartTime = Date.now();
     job.status = OcrJobStatus.PROCESSING;
+    job.startedAt = new Date();
     await job.save();
 
     // Get receipt populated data from job (declared early for use throughout function)
@@ -260,14 +355,47 @@ export class OcrService {
       // Track OpenAI API call time
       const openaiStartTime = Date.now();
 
-      // Call OpenAI Vision API with presigned URL (no base64, no memory usage)
-      // Use timeout with abort controller
-      const { result: ocrResult, usage: tokenUsage } = await this.callOpenAIVisionWithTimeout(
-        presignedUrl,
-        receiptPopulated.mimeType,
-        config.ocr.timeoutMs
-      );
-      const result = ocrResult;
+      // Call OpenAI Vision API with retry and exponential backoff for transient failures
+      const maxAttempts = (config.ocr as any).retryMaxAttempts ?? 3;
+      const backoffBaseMs = (config.ocr as any).retryBackoffBaseMs ?? 1000;
+      let ocrResult: OcrResult;
+      let tokenUsage: { total_tokens: number } | undefined;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+          const response = await this.callOpenAIVisionWithTimeout(
+            presignedUrl,
+            receiptPopulated.mimeType,
+            config.ocr.timeoutMs
+          );
+          ocrResult = response.result;
+          tokenUsage = response.usage;
+          break;
+        } catch (err: any) {
+          const isRetryable =
+            err.status === 429 ||
+            (err.status >= 500 && err.status < 600) ||
+            err.message?.includes('timeout') ||
+            err.message?.includes('timed out');
+          const isNonRetryable =
+            err.status === 401 ||
+            err.message?.includes('authentication') ||
+            err.message?.includes('Unauthorized') ||
+            err.message?.includes('invalid_model');
+
+          if (isNonRetryable || !isRetryable || attempt >= maxAttempts) {
+            throw err;
+          }
+          const delayMs = backoffBaseMs * Math.pow(2, attempt - 1);
+          logger.warn(
+            { receiptId: receiptIdStr, attempt, maxAttempts, delayMs, error: err.message },
+            'OCR transient error, retrying with backoff'
+          );
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
+      }
+
+      const result = ocrResult!;
 
       const openaiTimeMs = Date.now() - openaiStartTime;
 
@@ -313,6 +441,23 @@ export class OcrService {
         receiptDocUpdated.queueWaitTimeMs = queueWaitTimeMs;
         receiptDocUpdated.openaiTimeMs = openaiTimeMs;
         receiptDocUpdated.totalPipelineMs = totalProcessingTimeMs;
+        // Set ocrTextHash for receipt-level duplicate detection
+        const ocrTextHash = ReceiptHashService.generateOcrTextHash(result);
+        if (ocrTextHash) {
+          receiptDocUpdated.ocrTextHash = ocrTextHash;
+        }
+        // Ensure companyId on receipt for duplicate lookup (may already be set in confirmUpload)
+        if (receiptDocUpdated.expenseId) {
+          const expenseForCompany = receiptDocUpdated.expenseId as any;
+          const reportForCompany = expenseForCompany.reportId as any;
+          if (reportForCompany?.userId) {
+            const { User } = await import('../models/User');
+            const userForCompany = await User.findById(reportForCompany.userId).select('companyId').exec();
+            if (userForCompany?.companyId) {
+              receiptDocUpdated.companyId = userForCompany.companyId as mongoose.Types.ObjectId;
+            }
+          }
+        }
         await receiptDocUpdated.save();
 
         if (!receiptIdStr) {
@@ -325,6 +470,42 @@ export class OcrService {
           const report = expense.reportId as any;
           if (report && report.userId) {
             userId = report.userId.toString();
+          }
+        }
+
+        // Re-run receipt-level duplicate check after OCR (now ocrTextHash is set)
+        if (receiptDocUpdated.companyId && receiptIdStr) {
+          try {
+            const receiptDupResult = await ReceiptDuplicateDetectionService.checkReceiptDuplicate(
+              receiptIdStr,
+              receiptDocUpdated.companyId as mongoose.Types.ObjectId
+            );
+            if (receiptDupResult.isDuplicate && receiptDocUpdated.expenseId) {
+              const { Expense } = await import('../models/Expense');
+              await Expense.findByIdAndUpdate(receiptDocUpdated.expenseId, {
+                duplicateFlag: 'STRONG_DUPLICATE',
+                duplicateReason: receiptDupResult.reason || 'OCR_TEXT',
+              }).exec();
+              if (userId) {
+                try {
+                  const { emitExpenseUpdateToEmployee } = await import('../socket/realtimeEvents');
+                  const updatedExpense = await Expense.findById(receiptDocUpdated.expenseId)
+                    .select('_id duplicateFlag duplicateReason')
+                    .exec();
+                  if (updatedExpense) {
+                    emitExpenseUpdateToEmployee(userId, {
+                      _id: updatedExpense._id,
+                      duplicateFlag: updatedExpense.duplicateFlag,
+                      duplicateReason: updatedExpense.duplicateReason,
+                    });
+                  }
+                } catch (emitErr) {
+                  logger.warn({ error: emitErr }, 'OCR: Failed to emit expense update for receipt duplicate');
+                }
+              }
+            }
+          } catch (receiptDupErr) {
+            logger.warn({ error: receiptDupErr, receiptId: receiptIdStr }, 'OCR: Receipt duplicate check failed (non-blocking)');
           }
         }
       }
@@ -354,23 +535,26 @@ export class OcrService {
           const { Expense } = await import('../models/Expense');
 
           // Update expense with OCR data temporarily for duplicate detection
-          // This ensures duplicate detection works even if expense doesn't have vendor/amount yet
+          // This ensures duplicate detection works even if expense doesn't have vendor/amount yet.
+          // Treat placeholder "Processing..." (set by batch upload) as missing so OCR overwrites it.
           const updateData: any = {};
-          if (result.vendor && !expense.vendor) {
+          const currentVendor = expense.vendor ? String(expense.vendor).trim() : '';
+          const isPlaceholderVendor = currentVendor === '' || currentVendor === 'Processing...';
+          if (result.vendor && isPlaceholderVendor) {
             updateData.vendor = result.vendor;
           }
           if (result.totalAmount && !expense.amount) {
             updateData.amount = result.totalAmount;
             updateData.originalAmount = result.totalAmount;
           }
-          if (result.date && !expense.expenseDate && !expense.invoiceDate) {
-            // Parse date and set as expenseDate
+          // Always prefer receipt-extracted date over placeholder (e.g. report.fromDate); fix incorrect "today" as expense date
+          if (result.date) {
             try {
-              const dateStr = result.date;
-              if (/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+              const normalizedDateStr = OcrService.normalizeOcrDateToYYYYMMDD(result.date);
+              if (normalizedDateStr) {
                 const { DateUtils } = await import('../utils/dateUtils');
-                updateData.expenseDate = DateUtils.frontendDateToBackend(dateStr);
-                updateData.invoiceDate = DateUtils.frontendDateToBackend(dateStr);
+                updateData.expenseDate = DateUtils.frontendDateToBackend(normalizedDateStr);
+                updateData.invoiceDate = DateUtils.frontendDateToBackend(normalizedDateStr);
               }
             } catch (dateError) {
               logger.warn({ error: dateError, date: result.date }, 'OCR: Failed to parse date for duplicate detection');
@@ -391,7 +575,7 @@ export class OcrService {
 
           // Run duplicate detection with company-level scope
           // Check if we have minimum required data (vendor and amount/date)
-          const hasVendor = updateData.vendor || expense.vendor;
+          const hasVendor = updateData.vendor || (expense.vendor && String(expense.vendor).trim() !== 'Processing...' ? expense.vendor : null);
           const hasAmount = updateData.amount || expense.amount;
           const hasDate = updateData.expenseDate || updateData.invoiceDate || expense.expenseDate || expense.invoiceDate;
 
@@ -497,8 +681,25 @@ export class OcrService {
           doubtfulFields: result.doubtfulFields ?? undefined,
           dateReviewRecommended: result.dateReviewRecommended ?? undefined,
           exchangeRate: result.exchangeRate ?? undefined,
+          batchId: receiptDocUpdated?.batchId ?? undefined,
         };
         emitReceiptProcessed(userId, receiptIdStr, payload);
+        if (receiptDocUpdated?.batchId && userId) {
+          await updateBatchProgressAndEmit(userId, receiptDocUpdated.batchId, true);
+        }
+      }
+
+      // Persist inferred categoryId to expense so getExpenseById returns it for batch UI
+      if (receiptDocUpdated?.expenseId && categoryId) {
+        try {
+          const { Expense } = await import('../models/Expense');
+          const exp = receiptDocUpdated.expenseId as any;
+          const expenseIdStr = exp._id ? exp._id.toString() : exp.toString();
+          await Expense.findByIdAndUpdate(expenseIdStr, { categoryId }).exec();
+          logger.debug({ expenseId: expenseIdStr, categoryId: categoryId.toString() }, 'OCR: Persisted categoryId to expense');
+        } catch (persistErr) {
+          logger.warn({ error: persistErr, receiptId: receiptIdStr }, 'OCR: Failed to persist categoryId to expense (non-blocking)');
+        }
       }
 
       return job;
@@ -554,7 +755,11 @@ export class OcrService {
             receiptId: failedReceiptIdStr,
             status: 'FAILED',
             reason: failureReason,
+            batchId: receiptDocFailed?.batchId ?? undefined,
           });
+          if (receiptDocFailed?.batchId && failedUserId) {
+            await updateBatchProgressAndEmit(failedUserId, receiptDocFailed.batchId, false);
+          }
         }
       }
 
@@ -577,10 +782,10 @@ export class OcrService {
       }, timeoutMs);
     });
 
-    // Race between OCR call and timeout
+    // Race between OCR call and timeout (gpt-4o-mini only - no fallback)
     try {
       return await Promise.race([
-        this.callOpenAIVisionWithFallback(presignedUrl, _mimeType),
+        this.callOpenAIVision(presignedUrl, _mimeType, getVisionModel()),
         timeoutPromise,
       ]);
     } catch (error: any) {
@@ -593,54 +798,7 @@ export class OcrService {
   }
 
   /**
-   * Call OpenAI Vision API with fallback: try gpt-4o-mini first, then gpt-4o on failure
-   */
-  private static async callOpenAIVisionWithFallback(
-    presignedUrl: string,
-    _mimeType: string
-  ): Promise<{ result: OcrResult; usage?: { total_tokens: number } }> {
-    const primaryModel = 'gpt-4o-mini';
-    const fallbackModel = 'gpt-4o';
-
-    // Try primary model first
-    try {
-      return await this.callOpenAIVision(presignedUrl, _mimeType, primaryModel);
-    } catch (error: any) {
-      // Check if error is retryable (not authentication, not invalid model, etc.)
-      const isRetryable = !(
-        error.status === 401 ||
-        error.message?.includes('authentication') ||
-        error.message?.includes('Unauthorized') ||
-        error.message?.includes('invalid_model') ||
-        error.code === 'invalid_model'
-      );
-
-      if (isRetryable) {
-        // Log fallback attempt
-        logger.warn({
-          primaryModel,
-          fallbackModel,
-          error: error.message
-        }, 'Primary OCR model failed, attempting fallback');
-
-        // Try fallback model
-        try {
-          return await this.callOpenAIVision(presignedUrl, _mimeType, fallbackModel);
-        } catch (fallbackError: any) {
-          // Both models failed - throw original error with fallback context
-          throw new Error(
-            `OCR failed with both models. Primary (${primaryModel}): ${error.message}. Fallback (${fallbackModel}): ${fallbackError.message}`
-          );
-        }
-      } else {
-        // Non-retryable error (auth, invalid model, etc.) - don't retry
-        throw error;
-      }
-    }
-  }
-
-  /**
-   * Call OpenAI Vision API with a specific model
+   * Call OpenAI Vision API with configured model (gpt-4o-mini only; no fallback)
    */
   private static async callOpenAIVision(
     presignedUrl: string,
@@ -856,6 +1014,33 @@ If unreadable, return null. No explanations.`;
 
       throw new Error(`OpenAI API error: ${error.message || 'Unknown error'}\nStatus: ${error.status || 'N/A'}\nCode: ${error.code || 'N/A'}`);
     }
+  }
+
+  /**
+   * Normalize OCR date string to YYYY-MM-DD so expense persistence and validation work.
+   * Handles YYYY-MM-DD, DD-MM-YYYY, DD/MM/YYYY, MM-DD-YYYY.
+   */
+  private static normalizeOcrDateToYYYYMMDD(dateStr: string): string | null {
+    if (!dateStr || typeof dateStr !== 'string') return null;
+    const s = dateStr.trim();
+    if (!s) return null;
+    // Already YYYY-MM-DD
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    // DD-MM-YYYY or DD/MM/YYYY (Indian style)
+    const dmy = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+    if (dmy) {
+      const [, d, m, y] = dmy;
+      const day = d!.padStart(2, '0');
+      const month = m!.padStart(2, '0');
+      return `${y}-${month}-${day}`;
+    }
+    // YYYY-MM-DD with extra spaces
+    const iso = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+    if (iso) {
+      const [, y, m, d] = iso;
+      return `${y}-${m!.padStart(2, '0')}-${d!.padStart(2, '0')}`;
+    }
+    return null;
   }
 
   private static parseUnstructuredResponse(content: string): OcrResult {

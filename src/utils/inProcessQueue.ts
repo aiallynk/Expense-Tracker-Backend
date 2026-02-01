@@ -3,6 +3,7 @@ import PQueue from 'p-queue';
 
 import { config } from '../config/index';
 import { logger } from '../config/logger';
+import { OcrDispatcherService } from '../services/ocrDispatcher.service';
 
 export interface QueueJob {
   jobId: string;
@@ -11,6 +12,9 @@ export interface QueueJob {
   createdAt: Date;
   startTime?: Date; // When processing started (for timeout tracking)
   attempts?: number; // Number of processing attempts
+  /** Batch upload: use BLAST limits when batchSize > 1 */
+  batchId?: string;
+  batchSize?: number;
 }
 
 export interface QueueAddResult {
@@ -48,10 +52,12 @@ class OcrQueue {
   private statsLogInterval?: NodeJS.Timeout;
 
   constructor() {
+    // Queue task timeout: at least 30s so OCR (often 5–10s per receipt) doesn't get killed by p-queue
+    const queueTaskTimeoutMs = Math.max(config.ocr.timeoutMs, 30000);
     // Use high concurrency for p-queue (it will be throttled by our counters)
     this.queue = new PQueue({
       concurrency: config.ocr.maxGlobalOcr * 2, // Allow p-queue to handle more, we throttle manually
-      timeout: config.ocr.timeoutMs, // Use OCR_TIMEOUT_MS
+      timeout: queueTaskTimeoutMs,
     });
     
     // Start periodic queue stats logging (every 30s)
@@ -80,8 +86,8 @@ class OcrQueue {
       throw new Error(`Queue is full (max size: ${this.maxSize}). Please try again later.`);
     }
 
-    // Check throttling limits BEFORE starting OCR
-    const shouldThrottle = this.shouldThrottle(job.userId);
+    // Check throttling limits BEFORE starting OCR (batch jobs use BLAST limits)
+    const shouldThrottle = this.shouldThrottle(job.userId, { batchId: job.batchId, batchSize: job.batchSize });
     
     if (shouldThrottle.throttle) {
       // Throttled - add to FIFO queue
@@ -105,23 +111,81 @@ class OcrQueue {
   }
 
   /**
-   * Check if job should be throttled based on global and per-user limits
+   * Active user count: distinct users with in-flight or queued OCR jobs.
    */
-  private shouldThrottle(userId?: string): { throttle: boolean; reason?: string } {
-    // Check global limit
-    if (this.globalActiveOcr >= config.ocr.maxGlobalOcr) {
+  getActiveUserCount(): number {
+    const userSet = new Set<string>();
+    this.perUserActiveOcr.forEach((_count, uid) => userSet.add(uid));
+    this.throttledQueue.forEach(({ job }) => {
+      if (job.userId) userSet.add(job.userId);
+    });
+    return userSet.size;
+  }
+
+  /**
+   * Active OCR job count: in progress + waiting in throttled queue + waiting in p-queue.
+   */
+  getActiveOcrJobCount(): number {
+    return this.globalActiveOcr + this.throttledQueue.length + this.queue.size;
+  }
+
+  /**
+   * Get current limits from traffic-aware dispatcher (BLAST vs CONTROLLED).
+   * When job has batchSize > 1, force BLAST so batch jobs run in parallel.
+   * For batch jobs, per-user limit is at least batchSize so all receipts in the batch can start.
+   */
+  private getCurrentLimits(job?: { batchId?: string; batchSize?: number }): { maxGlobalOcr: number; maxPerUserOcr: number } {
+    const activeUserCount = this.getActiveUserCount();
+    const activeOcrJobCount = this.getActiveOcrJobCount();
+    const mode = (job?.batchSize && job.batchSize > 1)
+      ? 'BLAST'
+      : OcrDispatcherService.getMode(activeUserCount, activeOcrJobCount);
+    const limits = OcrDispatcherService.getLimits(mode);
+    // For batch uploads: allow at least batchSize concurrent per user so all batch receipts run
+    if (job?.batchSize && job.batchSize > 1) {
+      const effectivePerUser = Math.max(limits.maxPerUserOcr, job.batchSize);
+      return { maxGlobalOcr: limits.maxGlobalOcr, maxPerUserOcr: effectivePerUser };
+    }
+    return limits;
+  }
+
+  /**
+   * Check if job should be throttled based on global and per-user limits (traffic-aware).
+   * Batch jobs (batchSize > 1) use BLAST limits.
+   */
+  private shouldThrottle(userId?: string, job?: { batchId?: string; batchSize?: number }): { throttle: boolean; reason?: string } {
+    const limits = this.getCurrentLimits(job);
+
+    if (this.globalActiveOcr >= limits.maxGlobalOcr) {
       return { throttle: true, reason: 'global_limit' };
     }
 
-    // Check per-user limit
     if (userId) {
       const userActiveCount = this.perUserActiveOcr.get(userId) || 0;
-      if (userActiveCount >= config.ocr.maxPerUserOcr) {
+      if (userActiveCount >= limits.maxPerUserOcr) {
         return { throttle: true, reason: 'per_user_limit' };
       }
     }
 
     return { throttle: false };
+  }
+
+  /**
+   * Decrement counters and clean up after a job finishes (success, failure, or timeout).
+   * Must be called from both the task's finally and from queue.add().catch() so timeout/abort doesn't leak.
+   */
+  private decrementAndCleanup(job: QueueJob): void {
+    this.globalActiveOcr = Math.max(0, this.globalActiveOcr - 1);
+    if (job.userId) {
+      const userCount = this.perUserActiveOcr.get(job.userId) || 0;
+      this.perUserActiveOcr.set(job.userId, Math.max(0, userCount - 1));
+      if (this.perUserActiveOcr.get(job.userId) === 0) {
+        this.perUserActiveOcr.delete(job.userId);
+      }
+      this.jobUserMap.delete(job.jobId);
+    }
+    this.jobProcessors.delete(job.jobId);
+    this.processNextThrottledJob();
   }
 
   /**
@@ -142,36 +206,24 @@ class OcrQueue {
     // Store processor
     this.jobProcessors.set(job.jobId, processor);
 
-    // Add to p-queue (non-blocking, processes automatically)
-    this.queue.add(
-      async () => {
+    // Add to p-queue (non-blocking). Catch timeout/rejection so we don't get unhandled promise rejection.
+    this.queue
+      .add(async () => {
         try {
           job.startTime = new Date();
           await processor(job);
         } finally {
-          // ALWAYS decrement counters in finally block (prevents memory leaks)
-          this.globalActiveOcr = Math.max(0, this.globalActiveOcr - 1);
-          
-          if (job.userId) {
-            const userCount = this.perUserActiveOcr.get(job.userId) || 0;
-            this.perUserActiveOcr.set(job.userId, Math.max(0, userCount - 1));
-            
-            // Clean up empty user entries to prevent memory leaks
-            if (this.perUserActiveOcr.get(job.userId) === 0) {
-              this.perUserActiveOcr.delete(job.userId);
-            }
-            
-            this.jobUserMap.delete(job.jobId);
-          }
-          
-          // Clean up processor reference
-          this.jobProcessors.delete(job.jobId);
-          
-          // Auto-start next throttled job (FIFO)
-          this.processNextThrottledJob();
+          this.decrementAndCleanup(job);
         }
-      }
-    );
+      })
+      .catch((err: Error) => {
+        this.decrementAndCleanup(job);
+        const isTimeout = err?.name === 'TimeoutError' || err?.message?.includes('timed out');
+        logger.error(
+          { err, jobId: job.jobId, receiptId: job.receiptId, isTimeout },
+          isTimeout ? 'OCR queue task timed out (job may still complete in background)' : 'OCR queue task failed'
+        );
+      });
 
     return { queued: false };
   }
@@ -187,7 +239,7 @@ class OcrQueue {
     // Try to start jobs from FIFO queue until limits are reached
     while (this.throttledQueue.length > 0) {
       const next = this.throttledQueue[0];
-      const shouldThrottle = this.shouldThrottle(next.job.userId);
+      const shouldThrottle = this.shouldThrottle(next.job.userId, { batchId: next.job.batchId, batchSize: next.job.batchSize });
       
       if (shouldThrottle.throttle) {
         // Still throttled - stop processing
@@ -386,12 +438,20 @@ class OcrQueue {
         }
       });
       
+      const mode = OcrDispatcherService.getMode(
+        this.getActiveUserCount(),
+        this.getActiveOcrJobCount()
+      );
+      const limits = OcrDispatcherService.getLimits(mode);
       logger.info({
         size,
         pending,
         throttled,
         globalActive: this.globalActiveOcr,
         perUser: Object.keys(perUser).length > 0 ? perUser : undefined,
+        mode,
+        limitsMaxGlobal: limits.maxGlobalOcr,
+        limitsMaxPerUser: limits.maxPerUserOcr,
       }, '[OCR] queue_stats');
     }, 30000); // Every 30 seconds
   }

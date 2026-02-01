@@ -341,6 +341,31 @@ export const bulkDocumentConfirmSchema = z.object({
   skipExpenseCreation: z.boolean().optional().default(false), // Skip auto-creating expense drafts
 });
 
+// Batch receipt upload (multiple images as one unit - batch-first processing)
+const batchReceiptItemSchema = z.object({
+  filename: z.string().optional(),
+  mimeType: z.string().min(1),
+  sizeBytes: z.number().positive().optional(),
+});
+
+export const batchUploadIntentSchema = z.object({
+  reportId: z.string().min(1, 'Report ID is required'),
+  batchId: z.string().min(1, 'Batch ID is required'),
+  files: z.array(batchReceiptItemSchema).min(1).max(50),
+});
+
+export const batchUploadConfirmItemSchema = z.object({
+  receiptId: z.string().min(1),
+  storageKey: z.string().min(1),
+  mimeType: z.string().min(1),
+});
+
+export const batchUploadConfirmSchema = z.object({
+  reportId: z.string().min(1, 'Report ID is required'),
+  batchId: z.string().min(1, 'Batch ID is required'),
+  receipts: z.array(batchUploadConfirmItemSchema).min(1).max(50),
+});
+
 // Query DTOs - Base schema with both limit and pageSize support
 const paginationBaseSchema = z.object({
   page: z.string().optional().transform((val) => (val ? parseInt(val, 10) : 1)),

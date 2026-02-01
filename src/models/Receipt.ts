@@ -24,6 +24,8 @@ export interface IReceipt extends Document {
   imageAverageHash?: string; // aHash for exact/near-exact duplicates
   ocrTextHash?: string; // Hash of normalized OCR text content
   companyId?: mongoose.Types.ObjectId; // Company reference for duplicate queries
+  /** Batch upload: same batchId for receipts uploaded together (batch-first processing) */
+  batchId?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -113,6 +115,10 @@ const receiptSchema = new Schema<IReceipt>(
       type: Schema.Types.ObjectId,
       ref: 'Company',
     },
+    batchId: {
+      type: String,
+      trim: true,
+    },
   },
   {
     timestamps: true,
@@ -127,6 +133,7 @@ receiptSchema.index({ status: 1 });
 receiptSchema.index({ imagePerceptualHash: 1, companyId: 1 }, { sparse: true });
 receiptSchema.index({ imageAverageHash: 1, companyId: 1 }, { sparse: true });
 receiptSchema.index({ ocrTextHash: 1, companyId: 1 }, { sparse: true });
+receiptSchema.index({ batchId: 1 }, { sparse: true });
 
 export const Receipt = mongoose.model<IReceipt>('Receipt', receiptSchema);
 

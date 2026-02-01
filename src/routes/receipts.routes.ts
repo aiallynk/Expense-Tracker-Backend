@@ -6,7 +6,11 @@ import fs from 'fs';
 
 import { ReceiptsController } from '../controllers/receipts.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
-import { receiptUploadRateLimiter } from '../middleware/rateLimit.middleware';
+import {
+  receiptUploadRateLimiter,
+  receiptUploadPerMinuteRateLimiter,
+  receiptUploadPerMinutePerCompanyRateLimiter,
+} from '../middleware/rateLimit.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { uploadIntentSchema } from '../utils/dtoTypes';
 
@@ -17,6 +21,8 @@ router.use(authMiddleware);
 
 router.post(
   '/expenses/:expenseId/receipts/upload-intent',
+  receiptUploadPerMinuteRateLimiter,
+  receiptUploadPerMinutePerCompanyRateLimiter,
   receiptUploadRateLimiter,
   validate(uploadIntentSchema),
   ReceiptsController.createUploadIntent
@@ -24,6 +30,8 @@ router.post(
 
 router.post(
   '/receipts/:receiptId/confirm',
+  receiptUploadPerMinuteRateLimiter,
+  receiptUploadPerMinutePerCompanyRateLimiter,
   receiptUploadRateLimiter,
   ReceiptsController.confirmUpload
 );
@@ -62,6 +70,8 @@ const upload = multer({
 
 router.post(
   '/receipts/:receiptId/upload',
+  receiptUploadPerMinuteRateLimiter,
+  receiptUploadPerMinutePerCompanyRateLimiter,
   receiptUploadRateLimiter,
   upload.single('file'),
   ReceiptsController.uploadFile
