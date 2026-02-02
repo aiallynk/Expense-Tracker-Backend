@@ -8,7 +8,7 @@ import { CostCentre } from '../models/CostCentre';
 import { Project } from '../models/Project';
 import { Role } from '../models/Role';
 import { User } from '../models/User';
-import { ApprovalService } from '../services/ApprovalService';
+import { ApprovalService, getEffectiveUserIdForApproval } from '../services/ApprovalService';
 
 export class ApprovalMatrixController {
 
@@ -197,6 +197,7 @@ export class ApprovalMatrixController {
         if (startDate) options.startDate = startDate as string;
         if (endDate) options.endDate = endDate as string;
 
+        // ApprovalService resolves CompanyAdmin -> linked User internally
         const result = await ApprovalService.getPendingApprovalsForUser(userId, options);
         return res.json({ success: true, data: result.data, total: result.total });
     });
@@ -208,6 +209,11 @@ export class ApprovalMatrixController {
         if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
             return res.status(401).json({ success: false, message: 'Invalid user context for approval history' });
         }
+        // Resolve to effective User ID (handles CompanyAdmin -> linked User; history stores User IDs)
+        const effectiveUserId = await getEffectiveUserIdForApproval(userId);
+        if (!effectiveUserId) {
+            return res.status(401).json({ success: false, message: 'User not found for approval history' });
+        }
         const { actionType, employee, project, costCentre, startDate, endDate, page = 1, limit = 20 } = req.query;
 
         // Only allow APPROVED, REJECTED, CHANGES_REQUESTED for history; reject invalid actionType
@@ -217,7 +223,7 @@ export class ApprovalMatrixController {
         }
 
         const filters: any = {
-            actedBy: new mongoose.Types.ObjectId(userId),
+            actedBy: new mongoose.Types.ObjectId(effectiveUserId),
         };
 
         if (actionType) {
@@ -233,7 +239,7 @@ export class ApprovalMatrixController {
             if (mongoose.Types.ObjectId.isValid(projectStr) && projectStr.length === 24) {
                 filters.projectId = new mongoose.Types.ObjectId(projectStr);
             } else {
-                const companyId = (req.user?.companyId as string) || (await User.findById(userId).select('companyId').then((u) => u?.companyId?.toString()));
+                const companyId = (req.user?.companyId as string) || (await User.findById(effectiveUserId).select('companyId').then((u) => u?.companyId?.toString()));
                 const proj = companyId
                     ? await Project.findOne({ name: projectStr, companyId: new mongoose.Types.ObjectId(companyId) }).select('_id').lean()
                     : await Project.findOne({ name: projectStr }).select('_id').lean();
@@ -246,7 +252,7 @@ export class ApprovalMatrixController {
             if (mongoose.Types.ObjectId.isValid(ccStr) && ccStr.length === 24) {
                 filters.costCentreId = new mongoose.Types.ObjectId(ccStr);
             } else {
-                const companyId = (req.user?.companyId as string) || (await User.findById(userId).select('companyId').then((u) => u?.companyId?.toString()));
+                const companyId = (req.user?.companyId as string) || (await User.findById(effectiveUserId).select('companyId').then((u) => u?.companyId?.toString()));
                 const cc = companyId
                     ? await CostCentre.findOne({ name: ccStr, companyId: new mongoose.Types.ObjectId(companyId) }).select('_id').lean()
                     : await CostCentre.findOne({ name: ccStr }).select('_id').lean();

@@ -8,6 +8,46 @@ import { User } from '../models/User';
 import { AuditAction, ExpenseReportStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
+
+/**
+ * Resolve the effective User for approval operations.
+ * When userId is from CompanyAdmin (different collection), find the linked User with same email in same company.
+ * Approval matrix approvers are always User IDs, so we need a User record to match.
+ */
+async function resolveUserForApproval(userId: string): Promise<{ user: any; effectiveUserId: string } | null> {
+  let user = await User.findById(userId).populate('roles').exec();
+  if (user) {
+    return { user, effectiveUserId: (user._id as mongoose.Types.ObjectId).toString() };
+  }
+  const { CompanyAdmin } = await import('../models/CompanyAdmin');
+  const companyAdmin = await CompanyAdmin.findById(userId).exec();
+  if (companyAdmin) {
+    user = await User.findOne({
+      email: companyAdmin.email,
+      companyId: companyAdmin.companyId,
+    })
+      .populate('roles')
+      .exec();
+    if (user) {
+      logger.info(
+        { companyAdminId: userId, linkedUserId: user._id, email: companyAdmin.email },
+        'getPendingApprovalsForUser: Resolved CompanyAdmin to linked User for approval'
+      );
+      return { user, effectiveUserId: (user._id as mongoose.Types.ObjectId).toString() };
+    }
+    logger.warn(
+      { companyAdminId: userId, email: companyAdmin.email },
+      'getPendingApprovalsForUser: CompanyAdmin has no linked User - cannot show approvals'
+    );
+  }
+  return null;
+}
+
+/** Resolve effective User ID for approval ops (handles CompanyAdmin -> linked User). */
+export async function getEffectiveUserIdForApproval(userId: string): Promise<string | null> {
+  const resolved = await resolveUserForApproval(userId);
+  return resolved?.effectiveUserId ?? null;
+}
 import { AuditService } from './audit.service';
 import { config } from '@/config/index';
 import { DateUtils } from '../utils/dateUtils';
@@ -228,6 +268,7 @@ export class ApprovalService {
         approvalInstance: instance,
         levelConfig: recordResult.levelConfig,
         requestData,
+        approverUserIds: recordResult.approverUserIds, // Pre-resolved IDs (handles role IDs in approverUserIds)
       });
 
       logger.info({
@@ -258,10 +299,35 @@ export class ApprovalService {
     return instance;
   }
 
-  /** Resolve approver user IDs for a matrix level (for self-approval skip logic). */
+  /** Resolve approver user IDs for a matrix level (for self-approval skip logic).
+   * Handles approverUserIds that may contain Role IDs (from frontend migration) by falling back to approverRoleIds.
+   */
   private static async getApproverUserIdsForLevel(level: any, companyId: string): Promise<string[]> {
     if (level.approverUserIds && level.approverUserIds.length > 0) {
-      return level.approverUserIds.map((id: any) => (id._id ?? id).toString()).filter(Boolean);
+      const rawIds = level.approverUserIds.map((id: any) => (id._id ?? id).toString()).filter(Boolean);
+      const users = await User.find({
+        _id: { $in: rawIds },
+        companyId: new mongoose.Types.ObjectId(companyId),
+      })
+        .select('_id')
+        .lean()
+        .exec();
+      const userIds = users.map((u: any) => u._id.toString());
+      if (userIds.length > 0) return userIds;
+      // Fallback: approverUserIds may contain Role IDs (from frontend migration). Try approverRoleIds or rawIds as role IDs
+      const roleIdsToTry = level.approverRoleIds?.length
+        ? level.approverRoleIds.map((id: any) => (id._id ?? id)).filter(Boolean)
+        : rawIds;
+      if (roleIdsToTry.length > 0) {
+        const usersByRole = await User.find({
+          companyId: new mongoose.Types.ObjectId(companyId),
+          roles: { $in: roleIdsToTry },
+        })
+          .select('_id')
+          .lean()
+          .exec();
+        return usersByRole.map((u: any) => u._id.toString());
+      }
     }
     if (level.approverRoleIds && level.approverRoleIds.length > 0) {
       const roleIds = level.approverRoleIds.map((id: any) => (id._id ?? id)).filter(Boolean);
@@ -283,30 +349,25 @@ export class ApprovalService {
  */
   static async getPendingApprovalsForUser(userId: string, options: { page?: number; limit?: number; startDate?: string; endDate?: string } = {}): Promise<{ data: any[]; total: number }> {
     try {
-      const user = await User.findById(userId).populate('roles').exec();
-      if (!user) {
-        logger.warn({ userId }, 'User not found in getPendingApprovalsForUser');
+      const resolved = await resolveUserForApproval(userId);
+      if (!resolved) {
+        logger.warn({ userId }, 'User not found in getPendingApprovalsForUser (checked User and CompanyAdmin)');
         return { data: [], total: 0 };
       }
+      const { user, effectiveUserId } = resolved;
 
-      if (!user.roles || user.roles.length === 0) {
-        logger.warn({ userId, companyId: user.companyId }, 'User has no roles assigned in getPendingApprovalsForUser');
-        return { data: [], total: 0 };
-      }
-
-      const userRoleIds: string[] = user.roles.map((r: any) => {
+      // User may have no roles when matrix uses approverUserIds (direct user assignment)
+      const userRoleIds: string[] = (user.roles || []).map((r: any) => {
         const roleId = r._id?.toString() || r.toString();
         return roleId;
       }).filter(Boolean);
 
-      if (userRoleIds.length === 0) {
-        logger.warn({ userId }, 'User has no valid role IDs after mapping');
-        return { data: [], total: 0 };
-      }
-
       // Build query for pending instances with date filters
+      const companyIdForQuery = user.companyId instanceof mongoose.Types.ObjectId
+        ? user.companyId
+        : new mongoose.Types.ObjectId((user.companyId as any)?.toString?.() || user.companyId);
       const query: any = {
-        companyId: user.companyId,
+        companyId: companyIdForQuery,
         status: ApprovalStatus.PENDING
       };
 
@@ -346,19 +407,22 @@ export class ApprovalService {
       const pendingForUser: any[] = [];
       for (const instance of pendingInstances) {
         try {
-          // Defensive: Ensure matrix is present
           const matrix = instance.matrixId as any;
-          if (!matrix) {
-            logger.warn({ instanceId: instance._id }, 'Matrix not found for instance');
+          // Use effectiveLevels when set (personalized/normal company matrix); else matrix.levels
+          // When matrix is null (deleted ref), still use effectiveLevels if present
+          const matrixLevels = (instance as any).effectiveLevels?.length
+            ? (instance as any).effectiveLevels
+            : matrix?.levels ?? [];
+          if (matrixLevels.length === 0) {
+            logger.warn({ instanceId: instance._id, hasMatrix: !!matrix }, 'No level config for instance (effectiveLevels or matrix.levels)');
             continue;
           }
-          // Use personalized levels (effectiveLevels) when set on instance, else company matrix levels
-          const matrixLevels = (instance as any).effectiveLevels ?? matrix?.levels ?? [];
 
           // CRITICAL: Check if this is an additional approver level BEFORE checking matrix levels
           // Additional approver levels are NOT in the matrix, they're in the report's approvers array
           let isAdditionalApproverLevel = false;
           let isAuthorized = false;
+          let roleNameForResponse = 'Approver';
 
           if (instance.requestType === 'EXPENSE_REPORT') {
             const report = await ExpenseReport.findById(instance.requestId)
@@ -373,6 +437,7 @@ export class ApprovalService {
 
               if (currentAdditionalApprover) {
                 isAdditionalApproverLevel = true;
+                roleNameForResponse = currentAdditionalApprover.role || 'Approver';
                 // Check if the current user is the assigned additional approver
                 const approverUserId = currentAdditionalApprover.userId?.toString() || currentAdditionalApprover.userId;
                 const currentUserId = (user._id as mongoose.Types.ObjectId).toString();
@@ -400,40 +465,30 @@ export class ApprovalService {
               continue;
             }
 
-            // Handle both old format (approverRoleIds) and new format (approverUserIds)
-            let approverIds = [];
-            let isUserBasedApproval = false;
-
-            if (currentLevel.approverUserIds && currentLevel.approverUserIds.length > 0) {
-              // New format: specific users
-              approverIds = currentLevel.approverUserIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
-              isUserBasedApproval = true;
-            } else if (currentLevel.approverRoleIds && currentLevel.approverRoleIds.length > 0) {
-              // Old format: roles (for backward compatibility)
-              approverIds = currentLevel.approverRoleIds.map((id: any) => id._id?.toString() || id.toString()).filter(Boolean);
-              isUserBasedApproval = false;
+            // CRITICAL: Use same resolution as ApprovalRecordService - approverUserIds may contain
+            // Role IDs (from MatrixBuilder migration). Resolve to actual user IDs before checking.
+            const companyIdStr = user.companyId?.toString?.();
+            if (!companyIdStr) {
+              logger.warn({ instanceId: instance._id }, 'User has no companyId, skipping authorization check');
+              continue;
             }
+            const resolvedApproverUserIds = await this.getApproverUserIdsForLevel(currentLevel, companyIdStr);
 
-            if (approverIds.length === 0) {
+            if (resolvedApproverUserIds.length === 0) {
               logger.warn({ instanceId: instance._id, level: instance.currentLevel }, 'No approver IDs found for current level');
               continue;
             }
 
-            // Check if user is authorized for this level
-            if (isUserBasedApproval) {
-              // New format: check if user ID is directly in the approver list
-              const normalizedApproverIds = approverIds.map((id: string) => id.toLowerCase().trim());
-              const userId = (user._id as mongoose.Types.ObjectId).toString().toLowerCase().trim();
-              isAuthorized = normalizedApproverIds.includes(userId);
-            } else {
-              // Old format: check if user has matching role
-              const normalizedApproverRoleIds = approverIds.map((id: string) => id.toLowerCase().trim());
-              const normalizedUserRoleIds = userRoleIds.map((id: string) => id.toLowerCase().trim());
+            // Check if current user is in the resolved approver list (handles both user-based and role-based)
+            const normalizedApproverIds = new Set(resolvedApproverUserIds.map((id) => id.toLowerCase().trim()));
+            const currentUserId = (user._id as mongoose.Types.ObjectId).toString().toLowerCase().trim();
+            isAuthorized = normalizedApproverIds.has(currentUserId);
 
-              const matchingRoleId = normalizedApproverRoleIds.find((rId: string) =>
-                normalizedUserRoleIds.includes(rId)
-              );
-              isAuthorized = !!matchingRoleId;
+            if (isAuthorized && user.roles?.length) {
+              const matchedRole = (user.roles as any[])[0];
+              roleNameForResponse = matchedRole?.name || 'Approver';
+            } else if (isAuthorized) {
+              roleNameForResponse = 'Approver';
             }
           }
 
@@ -785,7 +840,7 @@ export class ApprovalService {
             currentLevel: instance.currentLevel,
             requestId: instance.requestId,
             requestType: instance.requestType,
-            roleName: 'Approver',
+            roleName: roleNameForResponse,
             roleId: null,
             data: {
               ...requestDetails,
@@ -806,7 +861,7 @@ export class ApprovalService {
               additionalApproverInfo: additionalApproverInfo,
               // Self-approval policy and submitter flag for UX (backend is source of truth)
               selfApprovalPolicy: selfApprovalPolicyForPending,
-              isSubmitterCurrentApprover: !!(reportSubmitterId && userId === reportSubmitterId),
+              isSubmitterCurrentApprover: !!(reportSubmitterId && effectiveUserId === reportSubmitterId),
               // Include flags for approver visibility (computed from expenses)
               flags: {
                 changes_requested: requestDetails.status === 'CHANGES_REQUESTED',
@@ -824,6 +879,97 @@ export class ApprovalService {
         } catch (instanceErr) {
           logger.error({ err: instanceErr, instanceId: instance._id }, 'Error fetching single pending approval for user. Skipping instance.');
           continue; // Defensive: keep going
+        }
+      }
+
+      // LEGACY FALLBACK: When no matrix-based approvals found, check reports using report.approvers
+      // (e.g. when ApprovalService.initiateApproval failed and fell back to computeApproverChain)
+      if (pendingForUser.length === 0 && user.companyId) {
+        try {
+          const legacyReports = await ExpenseReport.find({
+            companyId: user.companyId,
+            status: { $in: ['PENDING_APPROVAL_L1', 'PENDING_APPROVAL_L2', 'PENDING_APPROVAL_L3', 'PENDING_APPROVAL_L4', 'PENDING_APPROVAL_L5'] },
+            approvers: {
+              $elemMatch: {
+                userId: (user._id as mongoose.Types.ObjectId),
+                decidedAt: null,
+              },
+            },
+          })
+            .select('name totalAmount fromDate toDate status userId notes createdAt projectId costCentreId appliedVouchers approvers currency companyId approvalMeta')
+            .populate('userId', 'name email companyId')
+            .populate('projectId', 'name code')
+            .sort({ submittedAt: -1 })
+            .lean()
+            .exec();
+
+          const currentUserId = (user._id as mongoose.Types.ObjectId).toString();
+          for (const report of legacyReports) {
+            const approvers = (report.approvers || []) as any[];
+            const sortedApprovers = [...approvers].sort((a, b) => (a.level || 0) - (b.level || 0));
+            const currentApprover = sortedApprovers.find((a) => !a.decidedAt);
+            if (!currentApprover) continue;
+            const approverUserId = (currentApprover.userId?._id ?? currentApprover.userId)?.toString?.() ?? String(currentApprover.userId);
+            if (approverUserId !== currentUserId) continue;
+
+            const expenses = await Expense.find({ reportId: report._id })
+              .populate('categoryId', 'name')
+              .populate('receiptPrimaryId', '_id storageUrl mimeType filename')
+              .populate('receiptIds', '_id storageUrl mimeType filename')
+              .lean()
+              .exec();
+
+            const mappedExpenses = expenses.map((exp: any) => ({
+              ...exp,
+              receiptUrl: exp.receiptPrimaryId?.storageUrl || null,
+              expenseDate: exp.expenseDate instanceof Date ? DateUtils.backendDateToFrontend(exp.expenseDate) : exp.expenseDate,
+              invoiceDate: exp.invoiceDate instanceof Date ? DateUtils.backendDateToFrontend(exp.invoiceDate) : exp.invoiceDate,
+            }));
+
+            pendingForUser.push({
+              instanceId: null,
+              approvalStatus: 'PENDING',
+              currentLevel: currentApprover.level,
+              requestId: report._id,
+              requestType: 'EXPENSE_REPORT',
+              roleName: currentApprover.role || 'Approver',
+              roleId: null,
+              data: {
+                ...report,
+                id: report._id,
+                reportName: report.name,
+                employeeName: (report.userId as any)?.name,
+                employeeEmail: (report.userId as any)?.email,
+                projectName: (report.projectId as any)?.name,
+                projectCode: (report.projectId as any)?.code,
+                expenses: mappedExpenses,
+                dateRange: { from: report.fromDate, to: report.toDate },
+                appliedVouchers: report.appliedVouchers || [],
+                currency: report.currency || 'INR',
+                additionalApproverInfo: null,
+                selfApprovalPolicy: selfApprovalPolicyForPending,
+                isSubmitterCurrentApprover: false,
+                flags: {
+                  changes_requested: report.status === 'CHANGES_REQUESTED',
+                  rejected: report.status === 'REJECTED',
+                  voucher_applied: (report.appliedVouchers || []).length > 0,
+                  additional_approver_added: approvers.some((a: any) => a.isAdditionalApproval),
+                  duplicate_flagged: false,
+                  ocr_needs_review: false,
+                },
+              },
+              createdAt: report.submittedAt || report.createdAt,
+              isLegacyApproval: true,
+            });
+          }
+          if (legacyReports.length > 0) {
+            logger.info({
+              userId: currentUserId,
+              legacyCount: pendingForUser.filter((p: any) => p.isLegacyApproval).length,
+            }, 'getPendingApprovalsForUser: Included legacy report.approvers fallback');
+          }
+        } catch (legacyErr: any) {
+          logger.warn({ err: legacyErr?.message, userId }, 'getPendingApprovalsForUser: Legacy fallback failed');
         }
       }
 
@@ -1087,8 +1233,11 @@ export class ApprovalService {
       }
       const matrix = await ApprovalMatrix.findById(instance.matrixId).exec();
       if (!matrix) throw new Error('Matrix configuration missing');
-      // Use personalized levels (effectiveLevels) when set on instance, else company matrix levels
-      const levelsToUse = (instance as any).effectiveLevels ?? matrix?.levels ?? [];
+      // Use effectiveLevels when present and non-empty, else company matrix levels
+      const rawEffective = (instance as any).effectiveLevels;
+      const levelsToUse = (Array.isArray(rawEffective) && rawEffective.length > 0)
+        ? rawEffective
+        : (matrix?.levels ?? []);
       const virtualMatrix = { ...(matrix as any).toObject?.() ?? matrix, levels: levelsToUse };
       // Check if this is an additional approver level (not in matrix)
       let requestData = null;
@@ -1096,11 +1245,16 @@ export class ApprovalService {
         requestData = await ExpenseReport.findById(instance.requestId).exec();
       }
 
+      // Resolve user (support CompanyAdmin -> linked User)
+      const resolved = await resolveUserForApproval(userId);
+      if (!resolved) throw new Error('User not found');
+      const { user: resolvedUser, effectiveUserId } = resolved;
+
       // Block self-approval when company policy is SKIP_SELF
       if (action === 'APPROVE' && requestData && instance.requestType === 'EXPENSE_REPORT') {
         const report = requestData as any;
         const reportSubmitterId = (report.userId?.toString?.() ?? report.userId) as string;
-        if (reportSubmitterId && userId === reportSubmitterId) {
+        if (reportSubmitterId && effectiveUserId === reportSubmitterId) {
           const { CompanySettings } = await import('../models/CompanySettings');
           const companySettings = await CompanySettings.findOne({ companyId: instance.companyId }).lean().exec();
           const selfApprovalPolicy = (companySettings as any)?.selfApprovalPolicy ?? 'SKIP_SELF';
@@ -1114,52 +1268,82 @@ export class ApprovalService {
       }
 
       let isAdditionalApproverLevel = false;
+      let reportApproverAtLevel: any = null;
       if (requestData) {
         const report = requestData as any;
-        const currentApprover = (report.approvers || []).find(
-          (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+        reportApproverAtLevel = (report.approvers || []).find(
+          (a: any) => a.level === instance.currentLevel
         );
-        isAdditionalApproverLevel = !!currentApprover;
+        isAdditionalApproverLevel = !!(reportApproverAtLevel?.isAdditionalApproval === true);
       }
 
-      const currentLevelConfig = isAdditionalApproverLevel
-        ? null // Additional approver levels are not in the matrix
-        : levelsToUse.find((l: any) => l.levelNumber === instance.currentLevel);
+      const currentLevelNum = Number(instance.currentLevel);
+      let currentLevelConfig = isAdditionalApproverLevel
+        ? null
+        : levelsToUse.find((l: any) => Number(l?.levelNumber ?? l?.level) === currentLevelNum);
 
-      if (!isAdditionalApproverLevel && !currentLevelConfig) {
+      // Fallback: match by array index when levelNumber doesn't match (e.g. level 1 = index 0)
+      if (!currentLevelConfig && !isAdditionalApproverLevel && currentLevelNum >= 1 && currentLevelNum <= levelsToUse.length) {
+        currentLevelConfig = levelsToUse[currentLevelNum - 1];
+      }
+
+      // When level not in matrix: allow if report.approvers has approver at this level (handles
+      // additional approvers, matrix reduction, or legacy reports)
+      let levelInReportApprovers = !!reportApproverAtLevel;
+
+      // Last resort: when report has no approvers (matrix flow clears them) but instance is at level 3+,
+      // dynamically evaluate additional approvers - they may not have been saved to report
+      if (!levelInReportApprovers && !currentLevelConfig && requestData && instance.requestType === 'EXPENSE_REPORT' && currentLevelNum >= 3) {
+        try {
+          const { ReportsService } = await import('./reports.service');
+          const companyId = instance.companyId;
+          const dynamicApprovers = await ReportsService.evaluateAdditionalApprovalRules(
+            requestData as any,
+            companyId
+          );
+          reportApproverAtLevel = dynamicApprovers.find(
+            (a: any) => Number(a.level) === currentLevelNum
+          ) as any;
+          if (reportApproverAtLevel) {
+            levelInReportApprovers = true;
+            logger.info({ instanceId, currentLevel: currentLevelNum }, 'processAction: Resolved approver from evaluateAdditionalApprovalRules');
+          }
+        } catch (evalErr: any) {
+          logger.warn({ instanceId, err: evalErr?.message }, 'processAction: evaluateAdditionalApprovalRules failed');
+        }
+      }
+
+      if (!isAdditionalApproverLevel && !currentLevelConfig && !levelInReportApprovers) {
+        logger.warn({
+          instanceId,
+          currentLevel: instance.currentLevel,
+          levelsToUseCount: levelsToUse.length,
+          levelNumbers: levelsToUse.map((l: any) => l?.levelNumber ?? l?.level),
+          hasEffectiveLevels: !!(instance as any).effectiveLevels?.length,
+          reportApproversCount: (requestData as any)?.approvers?.length ?? 0,
+        }, 'processAction: Current level not found - possible matrix/report mismatch');
         throw new Error('Configuration error: Current level not found');
       }
-      // Validate User Permission
-      const user = await User.findById(userId).populate('roles').exec();
-      if (!user) throw new Error('User not found');
-      const userRoleIds = (user.roles || []).map(r => r._id ? r._id.toString() : r.toString());
+      // Validate User Permission (resolvedUser from resolveUserForApproval above)
+      const user = resolvedUser;
+      const userRoleIds = (user.roles || []).map((r: any) => r._id ? r._id.toString() : r.toString());
       // Check if user is authorized for this level
       let isAuthorized = false;
       let authorizedRole = null;
 
-      // First, check if this is an additional approver level
-      if (isAdditionalApproverLevel && requestData) {
-        const report = requestData as any;
-        const currentApprover = (report.approvers || []).find(
-          (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
-        );
-
-        if (currentApprover) {
-          // This is an additional approver level - check if user matches
-          const approverUserId = currentApprover.userId?.toString() || currentApprover.userId;
-          isAuthorized = approverUserId === userId;
-          if (isAuthorized) {
-            // For additional approvers, role is a string (e.g., "CFO"), not an ObjectId
-            // We'll store the role name but not convert it to ObjectId
-            authorizedRole = currentApprover.role;
-          }
+      // First, check if this is an additional approver level or level from report.approvers (not in matrix)
+      if ((isAdditionalApproverLevel || levelInReportApprovers) && reportApproverAtLevel) {
+        const approverUserId = (reportApproverAtLevel.userId?._id ?? reportApproverAtLevel.userId)?.toString?.() ?? String(reportApproverAtLevel.userId);
+        isAuthorized = approverUserId === effectiveUserId;
+        if (isAuthorized) {
+          authorizedRole = reportApproverAtLevel.role;
         }
       } else if (currentLevelConfig) {
         // Regular matrix level - check matrix configuration
         if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
           // New format: check if user ID is directly in the approver list
           const approverUserIds = currentLevelConfig.approverUserIds.map((id: string | { toString(): string }) => id.toString());
-          isAuthorized = approverUserIds.includes(userId);
+          isAuthorized = approverUserIds.includes(effectiveUserId);
         } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
           // Old format: check if user has matching role
           authorizedRole = (currentLevelConfig.approverRoleIds || []).find((rId: string | { toString(): string } | undefined) => rId != null && userRoleIds.includes(rId.toString()));
@@ -1174,7 +1358,7 @@ export class ApprovalService {
       const alreadyActed = instance.history?.some(
         (h: any) =>
           h.levelNumber === instance.currentLevel &&
-          h.approverId?.toString?.() === userId
+          h.approverId?.toString?.() === effectiveUserId
       );
       if (alreadyActed) {
         throw new Error('You have already taken action at this level');
@@ -1198,7 +1382,7 @@ export class ApprovalService {
       instance.history.push({
         levelNumber: instance.currentLevel,
         status: historyStatus,
-        approverId: new mongoose.Types.ObjectId(userId),
+        approverId: new mongoose.Types.ObjectId(effectiveUserId),
         roleId: roleIdObjectId,
         timestamp: new Date(),
         comments
@@ -1258,10 +1442,10 @@ export class ApprovalService {
         return instance;
       }
       // Handle APPROVE
-      // For additional approver levels, pass a mock config; for matrix levels, use the actual config
-      const levelConfigForCheck = isAdditionalApproverLevel
+      // For additional approver levels or report.approvers-only levels, pass a mock config; for matrix levels, use the actual config
+      const levelConfigForCheck = (isAdditionalApproverLevel || levelInReportApprovers)
         ? { approvalType: ApprovalType.SEQUENTIAL } as any
-        : currentLevelConfig as any;
+        : (currentLevelConfig as any);
       const levelComplete = await this.checkLevelCompletion(instance, levelConfigForCheck);
       if (levelComplete) {
         if (isAdditionalApproverLevel) {
@@ -1536,12 +1720,21 @@ export class ApprovalService {
           preserveNullAndEmptyArrays: true,
         },
       },
-      // Apply additional filters
+      // Lookup employee (user) BEFORE employee filter - requestData has userId, not employeeName
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'requestData.userId',
+          foreignField: '_id',
+          as: 'employee',
+        },
+      },
+      // Apply additional filters - employeeFilter uses employee.name (from lookup above)
       ...(employeeFilter ? [{
         $match: {
           $or: [
-            { 'requestData.employeeName': new RegExp(employeeFilter, 'i') },
-            { 'requestData.submittedBy.name': new RegExp(employeeFilter, 'i') },
+            { 'employee.name': new RegExp(employeeFilter, 'i') },
+            { 'employee.email': new RegExp(employeeFilter, 'i') },
           ],
         },
       }] : []),
@@ -1572,15 +1765,7 @@ export class ApprovalService {
           as: 'costCentre',
         },
       },
-      // Lookup user (employee) details
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'requestData.userId',
-          foreignField: '_id',
-          as: 'employee',
-        },
-      },
+      // employee already looked up above (before employee filter)
       // Lookup expenses for the report with category lookup
       {
         $lookup: {

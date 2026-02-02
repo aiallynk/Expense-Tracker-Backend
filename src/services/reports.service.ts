@@ -1437,6 +1437,68 @@ export class ReportsService {
             userId: report.userId,
             levelsCount: effectiveMatrixLevels.length,
           }, 'Using personalized approval matrix for report submission');
+        } else {
+          // Company matrix: always fetch and build effectiveMatrixLevels for consistent approval chain
+          const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
+          const matrix = await ApprovalMatrix.findOne({
+            companyId: reportUser.companyId,
+            isActive: true,
+          }).exec();
+          if (matrix?.levels?.length) {
+            const customMapping = await ApproverMapping.findOne({
+              userId: report.userId,
+              companyId: reportUser.companyId,
+              isActive: true,
+            }).exec();
+            if (customMapping) {
+              // Merge ApproverMapping overrides when user has custom approver mapping
+              const levelApproverIds = [
+                customMapping.level1ApproverId,
+                customMapping.level2ApproverId,
+                customMapping.level3ApproverId,
+                customMapping.level4ApproverId,
+                customMapping.level5ApproverId,
+              ];
+              effectiveMatrixLevels = matrix.levels.map((lvl: any) => {
+                const mappingApproverId = levelApproverIds[(lvl.levelNumber || 1) - 1];
+                const approverUserIds = mappingApproverId
+                  ? [mappingApproverId]
+                  : (lvl.approverUserIds || []).length > 0
+                    ? lvl.approverUserIds
+                    : lvl.approverRoleIds || [];
+                return {
+                  ...lvl,
+                  approverUserIds: Array.isArray(approverUserIds)
+                    ? approverUserIds.map((id: any) => (id?._id ?? id))
+                    : [],
+                  approverRoleIds: mappingApproverId ? [] : (lvl.approverRoleIds || []),
+                };
+              });
+              logger.info({
+                reportId: id,
+                userId: report.userId,
+                levelsCount: effectiveMatrixLevels.length,
+                source: 'ApproverMapping + company matrix',
+              }, 'Using company matrix with ApproverMapping overrides for report submission');
+            } else {
+              // Normal company matrix (no custom mapping): build effectiveMatrixLevels from company matrix
+              // Preserve both approverUserIds and approverRoleIds for backend resolution (handles
+              // MatrixBuilder migration where approverUserIds may contain role IDs)
+              effectiveMatrixLevels = matrix.levels.map((lvl: any) => ({
+                ...lvl,
+                approverUserIds: Array.isArray(lvl.approverUserIds)
+                  ? lvl.approverUserIds.map((id: any) => (id?._id ?? id))
+                  : [],
+                approverRoleIds: Array.isArray(lvl.approverRoleIds) ? lvl.approverRoleIds : [],
+              }));
+              logger.info({
+                reportId: id,
+                userId: report.userId,
+                levelsCount: effectiveMatrixLevels.length,
+                source: 'company matrix',
+              }, 'Using normal company approval matrix for report submission');
+            }
+          }
         }
 
         const initialData: any = effectiveMatrixLevels

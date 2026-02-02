@@ -19,7 +19,8 @@ export class ApprovalMatrixNotificationService {
     static async notifyApprovalRequired(
         approvalInstance: any,
         currentLevelConfig: any,
-        requestData: any
+        requestData: any,
+        preResolvedApproverUserIds?: string[]
     ): Promise<void> {
         try {
             // STEP 1: VALIDATE REQUIRED DATA (STRICT)
@@ -51,46 +52,55 @@ export class ApprovalMatrixNotificationService {
             const requester = report.userId;
             const requesterName = requester.name || requester.email || 'An employee';
 
-            // STEP 2: RESOLVE APPROVERS
-            let approverIds: string[] = [];
-            let isUserBasedApproval = false;
-
-            if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
-                approverIds = currentLevelConfig.approverUserIds
-                    .map((id: any) => (id._id || id).toString())
-                    .filter((id: string) => id && id !== '[object Object]');
-                isUserBasedApproval = true;
-            } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
-                approverIds = currentLevelConfig.approverRoleIds
-                    .map((id: any) => (id._id || id).toString())
-                    .filter((id: string) => id && id !== '[object Object]');
-                isUserBasedApproval = false;
-            }
-
-            if (approverIds.length === 0) {
-                logger.warn({ instanceId: approvalInstance._id }, 'No approver IDs found for current level');
-                return;
-            }
-
-            let usersToNotify = [];
-            if (isUserBasedApproval) {
+            // STEP 2: RESOLVE APPROVERS - prefer pre-resolved IDs (handles role IDs in approverUserIds)
+            let usersToNotify: any[] = [];
+            if (preResolvedApproverUserIds && preResolvedApproverUserIds.length > 0) {
                 usersToNotify = await User.find({
-                    _id: { $in: approverIds },
+                    _id: { $in: preResolvedApproverUserIds },
                     status: 'ACTIVE',
                     companyId: approvalInstance.companyId,
                 })
                     .select('_id email name roles notificationSettings')
                     .populate('roles', 'name')
                     .exec();
-            } else {
-                usersToNotify = await User.find({
-                    roles: { $in: approverIds },
-                    status: 'ACTIVE',
-                    companyId: approvalInstance.companyId,
-                })
-                    .select('_id email name roles notificationSettings')
-                    .populate('roles', 'name')
-                    .exec();
+            }
+            if (usersToNotify.length === 0) {
+                let approverIds: string[] = [];
+                let isUserBasedApproval = false;
+                if (currentLevelConfig.approverUserIds && currentLevelConfig.approverUserIds.length > 0) {
+                    approverIds = currentLevelConfig.approverUserIds
+                        .map((id: any) => (id._id || id).toString())
+                        .filter((id: string) => id && id !== '[object Object]');
+                    isUserBasedApproval = true;
+                } else if (currentLevelConfig.approverRoleIds && currentLevelConfig.approverRoleIds.length > 0) {
+                    approverIds = currentLevelConfig.approverRoleIds
+                        .map((id: any) => (id._id || id).toString())
+                        .filter((id: string) => id && id !== '[object Object]');
+                    isUserBasedApproval = false;
+                }
+                if (approverIds.length === 0) {
+                    logger.warn({ instanceId: approvalInstance._id }, 'No approver IDs found for current level');
+                    return;
+                }
+                if (isUserBasedApproval) {
+                    usersToNotify = await User.find({
+                        _id: { $in: approverIds },
+                        status: 'ACTIVE',
+                        companyId: approvalInstance.companyId,
+                    })
+                        .select('_id email name roles notificationSettings')
+                        .populate('roles', 'name')
+                        .exec();
+                } else {
+                    usersToNotify = await User.find({
+                        roles: { $in: approverIds },
+                        status: 'ACTIVE',
+                        companyId: approvalInstance.companyId,
+                    })
+                        .select('_id email name roles notificationSettings')
+                        .populate('roles', 'name')
+                        .exec();
+                }
             }
 
             if (usersToNotify.length === 0) {

@@ -129,7 +129,9 @@ export class ApprovalRecordService {
 
     /**
      * Resolve approver user IDs from level configuration
-     * Handles both user-based and role-based approval
+     * Handles both user-based and role-based approval.
+     * CRITICAL: When approverUserIds contains Role IDs (from frontend migration of old data),
+     * User.find by _id returns 0 users. Fall back to approverRoleIds for role-based lookup.
      */
     private static async resolveApproverUserIds(
         levelConfig: any,
@@ -138,10 +140,41 @@ export class ApprovalRecordService {
         let approverUserIds: string[] = [];
 
         if (levelConfig.approverUserIds && levelConfig.approverUserIds.length > 0) {
-            // User-based approval: specific users
-            approverUserIds = levelConfig.approverUserIds
+            // User-based approval: resolve IDs - may be User IDs or incorrectly migrated Role IDs
+            const rawIds = levelConfig.approverUserIds
                 .map((id: any) => (id._id || id).toString())
                 .filter(Boolean);
+            const users = await User.find({
+                _id: { $in: rawIds },
+                companyId: new mongoose.Types.ObjectId(companyId),
+                status: 'ACTIVE',
+            })
+                .select('_id')
+                .lean()
+                .exec();
+            approverUserIds = users.map((u: any) => u._id.toString());
+            // Fallback: if approverUserIds yielded no users, rawIds may be Role IDs (from frontend migration).
+            // Try approverRoleIds first, then treat rawIds as role IDs for User.find(roles: $in)
+            if (approverUserIds.length === 0) {
+                const roleIdsToTry = levelConfig.approverRoleIds?.length
+                    ? levelConfig.approverRoleIds.map((id: any) => (id._id || id)).filter(Boolean)
+                    : rawIds; // rawIds may be Role IDs when approverRoleIds was cleared on save
+                if (roleIdsToTry.length > 0) {
+                    const usersByRole = await User.find({
+                        companyId: new mongoose.Types.ObjectId(companyId),
+                        roles: { $in: roleIdsToTry },
+                        status: 'ACTIVE',
+                    })
+                        .select('_id')
+                        .lean()
+                        .exec();
+                    approverUserIds = usersByRole.map((u: any) => u._id.toString());
+                    logger.info(
+                        { levelNumber: levelConfig.levelNumber, roleIdsTried: roleIdsToTry.length, usersFound: approverUserIds.length },
+                        'ApprovalRecordService: approverUserIds yielded no users, fallback to role-based resolution succeeded'
+                    );
+                }
+            }
         } else if (levelConfig.approverRoleIds && levelConfig.approverRoleIds.length > 0) {
             // Role-based approval: find all users with these roles
             const roleIds = levelConfig.approverRoleIds.map((id: any) => (id._id || id)).filter(Boolean);

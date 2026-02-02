@@ -169,13 +169,15 @@ export class NotificationQueueService {
         approvalInstance: any;
         levelConfig: any;
         requestData: any;
+        approverUserIds?: string[];
     }): Promise<void> {
         const { ApprovalMatrixNotificationService } = await import('./approvalMatrixNotification.service');
 
         await ApprovalMatrixNotificationService.notifyApprovalRequired(
             payload.approvalInstance,
             payload.levelConfig,
-            payload.requestData
+            payload.requestData,
+            payload.approverUserIds
         );
     }
 
