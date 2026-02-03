@@ -304,13 +304,11 @@ export class AdminController {
         ? ExpenseReport.countDocuments({
             userId: { $in: userIds },
             status: {
-              $in: [
-                ExpenseReportStatus.SUBMITTED,
-                ExpenseReportStatus.PENDING_APPROVAL_L1,
-                ExpenseReportStatus.PENDING_APPROVAL_L2,
-                ExpenseReportStatus.PENDING_APPROVAL_L3,
-                ExpenseReportStatus.PENDING_APPROVAL_L4,
-                ExpenseReportStatus.PENDING_APPROVAL_L5,
+              $nin: [
+                ExpenseReportStatus.DRAFT,
+                ExpenseReportStatus.APPROVED,
+                ExpenseReportStatus.REJECTED,
+                ExpenseReportStatus.CHANGES_REQUESTED,
               ],
             },
           })
@@ -325,6 +323,7 @@ export class AdminController {
       data: {
         ...dashboardData,
         pendingReports,
+        pendingApprovals: pendingReports,
         totalExpenses,
       },
     });

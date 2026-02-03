@@ -146,30 +146,20 @@ export class ReportsController {
       if (voucherIdStr === '' || voucherIdStr === 'undefined' || voucherIdStr === 'null') {
         logger.info('Invalid voucher ID, submitting without voucher');
       } else {
-        // Validate voucherId is a valid MongoDB ObjectId format
+        // Validate voucherId is a valid MongoDB ObjectId format; if invalid, submit without voucher (avoid 400 on malformed payload)
         if (!mongoose.Types.ObjectId.isValid(voucherIdStr)) {
-          logger.warn({ voucherId: voucherIdStr }, 'Invalid voucher ID format');
-          return res.status(400).json({
-            success: false,
-            message: `Invalid voucher ID format: ${voucherIdStr}`,
-            code: 'INVALID_VOUCHER_ID',
-          });
+          logger.warn({ voucherId: voucherIdStr }, 'Invalid voucher ID format; submitting without voucher');
+          // Do not return 400 - submit without voucher so double-submit or malformed payload does not block user
+        } else {
+          // Parse and validate amount; if invalid, submit without voucher
+          const parsedAmount = typeof voucherAmount === 'number' ? voucherAmount : parseFloat(String(voucherAmount));
+          if (isNaN(parsedAmount) || parsedAmount <= 0) {
+            logger.warn({ voucherId: voucherIdStr, voucherAmount, parsedAmount }, 'Invalid voucher amount; submitting without voucher');
+          } else {
+            submitData = { advanceCashId: voucherIdStr, advanceAmount: parsedAmount };
+            logger.info({ voucherId: voucherIdStr, amount: parsedAmount }, 'Voucher data included in submission');
+          }
         }
-        
-        // Parse and validate amount
-        const parsedAmount = typeof voucherAmount === 'number' ? voucherAmount : parseFloat(String(voucherAmount));
-        
-        if (isNaN(parsedAmount) || parsedAmount <= 0) {
-          logger.warn({ voucherId: voucherIdStr, voucherAmount, parsedAmount }, 'Invalid voucher amount');
-          return res.status(400).json({
-            success: false,
-            message: 'Invalid voucher amount. Amount must be a positive number.',
-            code: 'INVALID_VOUCHER_AMOUNT',
-          });
-        }
-        
-        submitData = { advanceCashId: voucherIdStr, advanceAmount: parsedAmount };
-        logger.info({ voucherId: voucherIdStr, amount: parsedAmount }, 'Voucher data included in submission');
       }
     } else {
       logger.info('No voucher data provided, submitting report without voucher');
