@@ -1973,7 +1973,13 @@ export class ReportsService {
     }
 
     if (filters.userId) {
-      baseQuery.userId = filters.userId;
+      // Convert userId string to ObjectId for proper MongoDB querying
+      if (mongoose.Types.ObjectId.isValid(filters.userId)) {
+        baseQuery.userId = new mongoose.Types.ObjectId(filters.userId);
+      } else {
+        // Invalid userId, will be filtered out by buildCompanyQuery
+        baseQuery.userId = filters.userId;
+      }
     }
 
     if (filters.projectId) {

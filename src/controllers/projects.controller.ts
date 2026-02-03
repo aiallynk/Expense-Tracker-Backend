@@ -204,16 +204,32 @@ export class ProjectsController {
     });
   });
 
+  /** Update only project visibility (global/private). No code or other fields required. */
+  static updateVisibility = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const isGlobal = req.body.isGlobal === true || req.body.isGlobal === 'true';
+    const project = await ProjectsService.updateProject(projectId, { isGlobal });
+    res.status(200).json({
+      success: true,
+      data: project,
+    });
+  });
+
   static update = asyncHandler(async (req: AuthRequest, res: Response) => {
     const projectId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    const code = req.body.code != null ? String(req.body.code).trim() : '';
+    let code = req.body.code != null ? String(req.body.code).trim() : '';
+    // Allow partial updates (e.g. only isGlobal): use existing project code when not provided
     if (!code) {
-      res.status(400).json({
-        success: false,
-        message: 'Project code is required',
-        code: 'VALIDATION_ERROR',
-      });
-      return;
+      const existing = await ProjectsService.getProjectById(projectId);
+      if (!existing) {
+        res.status(404).json({
+          success: false,
+          message: 'Project not found',
+          code: 'PROJECT_NOT_FOUND',
+        });
+        return;
+      }
+      code = existing.code;
     }
     const project = await ProjectsService.updateProject(projectId, {
       name: req.body.name,

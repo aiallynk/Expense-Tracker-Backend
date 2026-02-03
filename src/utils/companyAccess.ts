@@ -147,6 +147,61 @@ export async function buildCompanyQuery(
       // No users in company, return empty result
       return { ...baseQuery, userId: { $in: [] } };
     }
+    
+    // If baseQuery already has a userId filter, respect it but ensure it's within company users
+    if (baseQuery.userId) {
+      // Handle different userId filter types
+      if (typeof baseQuery.userId === 'string') {
+        // String userId - validate and convert to ObjectId
+        if (!mongoose.Types.ObjectId.isValid(baseQuery.userId)) {
+          return { ...baseQuery, userId: { $in: [] } };
+        }
+        const requestedUserId = new mongoose.Types.ObjectId(baseQuery.userId);
+        const isInCompany = userIds.some(id => id.toString() === requestedUserId.toString());
+        if (!isInCompany) {
+          return { ...baseQuery, userId: { $in: [] } };
+        }
+        return {
+          ...baseQuery,
+          userId: requestedUserId
+        };
+      } else if (baseQuery.userId instanceof mongoose.Types.ObjectId) {
+        // Already ObjectId - validate it's in company
+        const isInCompany = userIds.some(id => id.toString() === baseQuery.userId.toString());
+        if (!isInCompany) {
+          return { ...baseQuery, userId: { $in: [] } };
+        }
+        // Keep the existing userId filter
+        return baseQuery;
+      } else if (baseQuery.userId.$in) {
+        // $in query - intersect with company users
+        const requestedIds = Array.isArray(baseQuery.userId.$in) 
+          ? baseQuery.userId.$in.map((id: any) => {
+              if (typeof id === 'string') {
+                return mongoose.Types.ObjectId.isValid(id) ? new mongoose.Types.ObjectId(id) : null;
+              }
+              return id instanceof mongoose.Types.ObjectId ? id : null;
+            }).filter((id: mongoose.Types.ObjectId | null): id is mongoose.Types.ObjectId => id !== null)
+          : [];
+        const intersectedIds = requestedIds.filter((id: mongoose.Types.ObjectId) =>
+          userIds.some(companyId => companyId.toString() === id.toString())
+        );
+        return {
+          ...baseQuery,
+          userId: intersectedIds.length > 0 ? { $in: intersectedIds } : { $in: [] }
+        };
+      } else {
+        // Other operators (e.g., $ne, $exists) - intersect by filtering company users
+        // This is complex, so we'll apply the operator to company users
+        // For now, fall back to company users filter
+        return {
+          ...baseQuery,
+          userId: { $in: userIds },
+        };
+      }
+    }
+    
+    // No userId filter in baseQuery, filter by all company users
     return {
       ...baseQuery,
       userId: { $in: userIds },

@@ -17,6 +17,7 @@ router.get('/eligible-managers', requireCompanyAdmin, ProjectsController.getElig
 router.get('/:id', ProjectsController.getById);
 
 router.post('/', requireCompanyAdmin, ProjectsController.create);
+router.patch('/:id/visibility', requireCompanyAdmin, ProjectsController.updateVisibility);
 router.patch('/:id', requireCompanyAdmin, ProjectsController.update);
 router.delete('/:id', requireCompanyAdmin, ProjectsController.delete);
 

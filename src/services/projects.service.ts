@@ -166,7 +166,12 @@ export class ProjectsService {
     }
 
     if (data.managerId !== undefined) {
-      project.managerId = data.managerId ? new mongoose.Types.ObjectId(data.managerId) : undefined;
+      // Handle null, empty string, or falsy values as "no manager"
+      if (data.managerId === null || data.managerId === '' || !data.managerId) {
+        project.managerId = undefined;
+      } else {
+        project.managerId = new mongoose.Types.ObjectId(data.managerId);
+      }
     }
 
     if (data.startDate !== undefined) {
