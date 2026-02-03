@@ -11,6 +11,7 @@ import {
   expenseFiltersSchema,
   exportQuerySchema,
   bulkCsvExportFiltersSchema,
+  reportsListExportSchema,
 } from '../utils/dtoTypes';
 import { ExpenseReportStatus, ExpenseStatus, ExportFormat } from '../utils/enums';
 
@@ -87,6 +88,30 @@ export class AdminController {
         format,
       },
     });
+  });
+
+  /**
+   * Project (site) wise reports list export - Excel or PDF.
+   * GET /api/v1/admin/reports/export?projectId=...&from=...&to=...&status=...&format=xlsx|pdf
+   * Company Admin only; projectId required; single project only.
+   */
+  static exportReportsList = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const filters = reportsListExportSchema.parse(req.query);
+    const { buffer, format, fileName } = await ExportService.generateReportsListExport(
+      {
+        projectId: filters.projectId,
+        from: filters.from,
+        to: filters.to,
+        status: filters.status,
+        format: filters.format as 'xlsx' | 'pdf',
+      },
+      req
+    );
+
+    const contentType = format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    res.setHeader('Content-Type', contentType);
+    res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
+    res.send(buffer);
   });
 
   /**

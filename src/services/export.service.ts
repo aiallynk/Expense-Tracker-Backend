@@ -6,13 +6,15 @@ import mongoose from 'mongoose';
 import PDFDocument from 'pdfkit';
 
 
+import { AuthRequest } from '../middleware/auth.middleware';
 import { s3Client, getS3Bucket } from '../config/aws';
 import { ApprovalInstance } from '../models/ApprovalInstance';
 import { Company } from '../models/Company';
 import { CompanySettings } from '../models/CompanySettings';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
-import { ExportFormat, ExpenseStatus } from '../utils/enums';
+import { buildCompanyQuery } from '../utils/companyAccess';
+import { ExportFormat, ExpenseReportStatus, ExpenseStatus } from '../utils/enums';
 import { getObjectUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
@@ -638,6 +640,395 @@ export class ExportService {
         doc.end();
       } catch (error) {
         reject(error);
+      }
+    });
+  }
+
+  /**
+   * Project (site) wise reports list export - Excel or PDF.
+   * Respects projectId (required), date range, status. Single project only.
+   * Header: Company Name, Project/Site Name, Date Range, Generated Date.
+   * Columns: Report Name, Employee, Department, Amount, Status, Created On.
+   * Footer: Total Reports, Total Amount, Approved Amount.
+   */
+  static async generateReportsListExport(
+    filters: { projectId: string; from?: string; to?: string; status?: string; format: 'xlsx' | 'pdf' },
+    req: AuthRequest
+  ): Promise<{ buffer: Buffer; format: 'xlsx' | 'pdf'; fileName: string }> {
+    const baseQuery: any = {
+      projectId: new mongoose.Types.ObjectId(filters.projectId),
+    };
+    if (filters.status) {
+      baseQuery.status = filters.status;
+    } else {
+      baseQuery.status = { $nin: [ExpenseReportStatus.DRAFT, ExpenseReportStatus.REJECTED] };
+    }
+    if (filters.from) baseQuery.fromDate = { ...baseQuery.fromDate, $gte: new Date(filters.from) };
+    if (filters.to) baseQuery.toDate = { ...baseQuery.toDate, $lte: new Date(filters.to) };
+
+    const query = await buildCompanyQuery(req, baseQuery, 'users');
+
+    const reports = await ExpenseReport.find(query)
+      .populate('projectId', 'name code')
+      .populate({
+        path: 'userId',
+        select: 'name email companyId departmentId',
+        populate: { path: 'departmentId', select: 'name' },
+      })
+      .sort({ createdAt: -1 })
+      .lean()
+      .exec();
+
+    if (!reports || reports.length === 0) {
+      const err: any = new Error('No reports found for the selected project.');
+      err.statusCode = 400;
+      throw err;
+    }
+
+    const companyId = (reports[0] as any).userId?.companyId?.toString?.() || (reports[0] as any).userId?.companyId;
+    const company = companyId ? await Company.findById(companyId).select('name').lean().exec() : null;
+    const companyName = company ? (company as any).name : 'Company';
+    const projectName = (reports[0] as any).projectId?.name || (reports[0] as any).projectName || 'Project';
+    const dateRangeStr = [filters.from, filters.to].filter(Boolean).length
+      ? `${filters.from || 'Start'} to ${filters.to || 'End'}`
+      : 'All dates';
+    const generatedDate = this.formatDate(new Date());
+
+    const rows = reports.map((r: any) => ({
+      reportName: r.name || 'Untitled',
+      employee: r.userId?.name || r.userId?.email || 'Unknown',
+      department: r.userId?.departmentId?.name || 'No Department',
+      amount: Number(r.totalAmount) || 0,
+      status: r.status || 'N/A',
+      createdOn: this.formatDate(r.createdAt),
+    }));
+
+    const totalAmount = rows.reduce((s, r) => s + r.amount, 0);
+    const approvedAmount = reports
+      .filter((r: any) => r.status === ExpenseReportStatus.APPROVED)
+      .reduce((s: number, r: any) => s + (Number(r.totalAmount) || 0), 0);
+
+    // Fetch all expenses for these reports (for expense details section)
+    const reportIds = reports.map((r: any) => r._id);
+    const reportById = new Map(reports.map((r: any) => [r._id.toString(), r]));
+    const expenses = await Expense.find({
+      reportId: { $in: reportIds },
+      status: { $ne: ExpenseStatus.REJECTED },
+    })
+      .populate('categoryId', 'name')
+      .sort({ expenseDate: 1 })
+      .lean()
+      .exec();
+
+    let serial = 1;
+    const expenseRows = expenses.map((exp: any) => {
+      const report = reportById.get((exp.reportId as any)?.toString?.() || exp.reportId);
+      const hasReceipt = !!(exp.receiptPrimaryId || (exp.receiptIds && exp.receiptIds.length > 0));
+      return {
+        serialNumber: serial++,
+        reportName: report?.name || 'Untitled',
+        employee: (report as any)?.userId?.name || (report as any)?.userId?.email || 'Unknown',
+        expenseDate: this.formatDate(exp.expenseDate),
+        vendor: exp.vendor || 'N/A',
+        category: (exp.categoryId as any)?.name || 'Other',
+        currency: exp.currency || 'INR',
+        amount: Number(exp.amount) || 0,
+        invoiceId: exp.invoiceId || '',
+        hasReceipt: hasReceipt ? 'Yes' : 'No',
+        notes: exp.notes || '',
+      };
+    });
+
+    const format = filters.format || 'xlsx';
+    const buffer =
+      format === 'pdf'
+        ? await this.generateReportsListPDF({
+            companyId: companyId?.toString(),
+            companyName,
+            projectName,
+            dateRangeStr,
+            generatedDate,
+            rows,
+            expenseRows,
+            totalReports: reports.length,
+            totalAmount,
+            approvedAmount,
+          })
+        : await this.generateReportsListXLSX({
+            companyName,
+            projectName,
+            dateRangeStr,
+            generatedDate,
+            rows,
+            expenseRows,
+            totalReports: reports.length,
+            totalAmount,
+            approvedAmount,
+          });
+
+    const ext = format === 'pdf' ? 'pdf' : 'xlsx';
+    const safeProject = (projectName || 'project').replace(/[^a-zA-Z0-9-_]/g, '_').slice(0, 40);
+    const fileName = `reports_${safeProject}_${new Date().toISOString().split('T')[0]}.${ext}`;
+
+    return { buffer, format, fileName };
+  }
+
+  private static async generateReportsListXLSX(params: {
+    companyName: string;
+    projectName: string;
+    dateRangeStr: string;
+    generatedDate: string;
+    rows: { reportName: string; employee: string; department: string; amount: number; status: string; createdOn: string }[];
+    expenseRows: { serialNumber: number; reportName: string; employee: string; expenseDate: string; vendor: string; category: string; currency: string; amount: number; invoiceId: string; hasReceipt: string; notes: string }[];
+    totalReports: number;
+    totalAmount: number;
+    approvedAmount: number;
+  }): Promise<Buffer> {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Reports');
+
+    const { companyName, projectName, dateRangeStr, generatedDate, rows, expenseRows, totalReports, totalAmount, approvedAmount } = params;
+
+    let row = 1;
+    sheet.mergeCells(`A${row}:F${row}`);
+    sheet.getCell(`A${row}`).value = companyName;
+    sheet.getCell(`A${row}`).font = { size: 16, bold: true };
+    row++;
+    sheet.mergeCells(`A${row}:F${row}`);
+    sheet.getCell(`A${row}`).value = `Project / Site: ${projectName}`;
+    sheet.getCell(`A${row}`).font = { bold: true };
+    row++;
+    sheet.mergeCells(`A${row}:F${row}`);
+    sheet.getCell(`A${row}`).value = `Date Range: ${dateRangeStr}  |  Generated: ${generatedDate}`;
+    sheet.getCell(`A${row}`).font = { size: 10 };
+    row += 2;
+
+    const headers = ['Report Name', 'Employee', 'Department', 'Amount', 'Status', 'Created On'];
+    const headerRow = sheet.getRow(row);
+    headers.forEach((h, i) => {
+      const cell = headerRow.getCell(i + 1);
+      cell.value = h;
+      cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4472C4' } };
+    });
+    row++;
+
+    rows.forEach((r) => {
+      const rRow = sheet.getRow(row);
+      rRow.getCell(1).value = r.reportName;
+      rRow.getCell(2).value = r.employee;
+      rRow.getCell(3).value = r.department;
+      rRow.getCell(4).value = r.amount;
+      rRow.getCell(4).numFmt = '#,##0.00';
+      rRow.getCell(5).value = r.status;
+      rRow.getCell(6).value = r.createdOn;
+      row++;
+    });
+
+    row += 2;
+    sheet.getCell(`A${row}`).value = 'Total Reports';
+    sheet.getCell(`A${row}`).font = { bold: true };
+    sheet.getCell(`B${row}`).value = totalReports;
+    row++;
+    sheet.getCell(`A${row}`).value = 'Total Amount';
+    sheet.getCell(`A${row}`).font = { bold: true };
+    sheet.getCell(`B${row}`).value = totalAmount;
+    sheet.getCell(`B${row}`).numFmt = '#,##0.00';
+    row++;
+    sheet.getCell(`A${row}`).value = 'Approved Amount';
+    sheet.getCell(`A${row}`).font = { bold: true };
+    sheet.getCell(`B${row}`).value = approvedAmount;
+    sheet.getCell(`B${row}`).numFmt = '#,##0.00';
+
+    [12, 20, 18, 14, 16, 14].forEach((w, i) => sheet.getColumn(i + 1).width = w);
+
+    // Second sheet: Detailed expense details
+    const expenseSheet = workbook.addWorksheet('Expenses');
+    let er = 1;
+    expenseSheet.getCell(`A${er}`).value = companyName;
+    expenseSheet.getCell(`A${er}`).font = { size: 14, bold: true };
+    er++;
+    expenseSheet.getCell(`A${er}`).value = `Project / Site: ${projectName} – Detailed expense details`;
+    expenseSheet.getCell(`A${er}`).font = { bold: true };
+    er += 2;
+    const expHeaders = ['S.No', 'Report Name', 'Employee', 'Date', 'Vendor', 'Category', 'Currency', 'Amount', 'Invoice No', 'Receipt', 'Notes'];
+    expHeaders.forEach((h, i) => {
+      const c = expenseSheet.getCell(er, i + 1);
+      c.value = h;
+      c.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+      c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4472C4' } };
+    });
+    er++;
+    expenseRows.forEach((e) => {
+      expenseSheet.getCell(er, 1).value = e.serialNumber;
+      expenseSheet.getCell(er, 2).value = e.reportName;
+      expenseSheet.getCell(er, 3).value = e.employee;
+      expenseSheet.getCell(er, 4).value = e.expenseDate;
+      expenseSheet.getCell(er, 5).value = e.vendor;
+      expenseSheet.getCell(er, 6).value = e.category;
+      expenseSheet.getCell(er, 7).value = e.currency;
+      expenseSheet.getCell(er, 8).value = e.amount;
+      expenseSheet.getCell(er, 8).numFmt = '#,##0.00';
+      expenseSheet.getCell(er, 9).value = e.invoiceId;
+      expenseSheet.getCell(er, 10).value = e.hasReceipt;
+      expenseSheet.getCell(er, 11).value = e.notes;
+      er++;
+    });
+    [6, 22, 18, 12, 24, 18, 10, 14, 16, 8, 35].forEach((w, i) => expenseSheet.getColumn(i + 1).width = w);
+
+    const buf = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buf);
+  }
+
+  private static async generateReportsListPDF(params: {
+    companyId?: string;
+    companyName: string;
+    projectName: string;
+    dateRangeStr: string;
+    generatedDate: string;
+    rows: { reportName: string; employee: string; department: string; amount: number; status: string; createdOn: string }[];
+    expenseRows: { serialNumber: number; reportName: string; employee: string; expenseDate: string; vendor: string; category: string; currency: string; amount: number; invoiceId: string; hasReceipt: string; notes: string }[];
+    totalReports: number;
+    totalAmount: number;
+    approvedAmount: number;
+  }): Promise<Buffer> {
+    let logoBuffer: Buffer | null = null;
+    if (params.companyId) {
+      try {
+        const { BrandingService } = await import('./branding.service');
+        const companyBranding = await BrandingService.getLogos(params.companyId);
+        const logoUrl = companyBranding?.lightLogoUrl;
+        if (logoUrl && typeof logoUrl === 'string') {
+          const https = await import('https');
+          const http = await import('http');
+          const url = new URL(logoUrl);
+          const client = url.protocol === 'https:' ? https : http;
+          logoBuffer = await new Promise<Buffer>((res, rej) => {
+            client.get(logoUrl, (response) => {
+              const chunks: Buffer[] = [];
+              response.on('data', (chunk: Buffer) => chunks.push(chunk));
+              response.on('end', () => res(Buffer.concat(chunks)));
+              response.on('error', rej);
+            }).on('error', rej);
+          });
+        }
+      } catch (error) {
+        logger.debug({ error, companyId: params.companyId }, 'Reports list PDF: could not load company logo');
+      }
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        const doc: any = new PDFDocument({ margin: 40, size: 'A4' });
+        const chunks: Buffer[] = [];
+        doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        doc.font('Helvetica');
+
+        const { companyName, projectName, dateRangeStr, generatedDate, rows, expenseRows, totalReports, totalAmount, approvedAmount } = params;
+
+        let yStart = 40;
+        if (logoBuffer) {
+          try {
+            doc.image(logoBuffer, 40, 40, { width: 80, height: 40 });
+            yStart = 95;
+          } catch (_) {
+            yStart = 40;
+          }
+        }
+
+        doc.fontSize(16).font('Helvetica-Bold').text(companyName, 40, yStart);
+        doc.fontSize(12).font('Helvetica').text(`Project / Site: ${projectName}`, 40, yStart + 22);
+        doc.fontSize(10).text(`Date Range: ${dateRangeStr}  |  Generated: ${generatedDate}`, 40, yStart + 40);
+
+        let y = yStart + 65;
+        const colWidths = [120, 100, 90, 80, 90, 80];
+        const reportRowHeight = 28;
+        const reportHeaderHeight = 24;
+
+        const headers = ['Report Name', 'Employee', 'Department', 'Amount', 'Status', 'Created On'];
+        doc.fontSize(9).font('Helvetica-Bold');
+        let x = 40;
+        headers.forEach((h, i) => {
+          doc.rect(x, y, colWidths[i], reportHeaderHeight).fillAndStroke('#4472C4', '#000');
+          doc.fillColor('#FFFFFF').text(h, x + 4, y + 5, { width: colWidths[i] - 8, height: reportHeaderHeight - 10 });
+          x += colWidths[i];
+        });
+        doc.fillColor('#000000');
+        y += reportHeaderHeight;
+
+        doc.font('Helvetica').fontSize(9);
+        rows.forEach((r, idx) => {
+          if (y > 680) {
+            doc.addPage();
+            y = 40;
+          }
+          const bg = idx % 2 === 0 ? '#FFFFFF' : '#F5F5F5';
+          x = 40;
+          [r.reportName, r.employee, r.department, String(r.amount), r.status, r.createdOn].forEach((val, i) => {
+            doc.rect(x, y, colWidths[i], reportRowHeight).fillAndStroke(bg, '#CCC');
+            doc.fillColor('#000000').text(String(val), x + 4, y + 4, { width: colWidths[i] - 8, height: reportRowHeight - 8 });
+            x += colWidths[i];
+          });
+          y += reportRowHeight;
+        });
+
+        y += 20;
+        doc.font('Helvetica-Bold').fontSize(10);
+        doc.text('Total Reports:', 40, y);
+        doc.text(String(totalReports), 200, y);
+        y += 18;
+        doc.text('Total Amount:', 40, y);
+        doc.text(totalAmount.toFixed(2), 200, y);
+        y += 18;
+        doc.text('Approved Amount:', 40, y);
+        doc.text(approvedAmount.toFixed(2), 200, y);
+
+        // Detailed expense details section (landscape for wide table)
+        if (expenseRows.length > 0) {
+          y += 28;
+          doc.addPage({ margin: 40, size: 'A4', layout: 'landscape' });
+          y = 40;
+
+          doc.fontSize(12).font('Helvetica-Bold').text('Detailed expense details', 40, y);
+          y += 22;
+
+          const expColWidths = [28, 72, 58, 48, 78, 58, 30, 48, 52, 28, 95];
+          const expHeaderHeight = 20;
+          const expRowHeight = 26;
+          const expHeaders = ['S.No', 'Report', 'Employee', 'Date', 'Vendor', 'Category', 'Curr', 'Amount', 'Invoice No', 'Rcpt', 'Notes'];
+          doc.fontSize(7).font('Helvetica-Bold');
+          x = 40;
+          expHeaders.forEach((h, i) => {
+            doc.rect(x, y, expColWidths[i], expHeaderHeight).fillAndStroke('#4472C4', '#000');
+            doc.fillColor('#FFFFFF').text(h, x + 2, y + 3, { width: expColWidths[i] - 4, height: expHeaderHeight - 6 });
+            x += expColWidths[i];
+          });
+          doc.fillColor('#000000');
+          y += expHeaderHeight;
+
+          doc.font('Helvetica').fontSize(7);
+          expenseRows.forEach((e, idx) => {
+            if (y > 500) {
+              doc.addPage({ margin: 40, size: 'A4', layout: 'landscape' });
+              y = 40;
+            }
+            const bg = idx % 2 === 0 ? '#FFFFFF' : '#F5F5F5';
+            x = 40;
+            const vals = [String(e.serialNumber), e.reportName, e.employee, e.expenseDate, e.vendor, e.category, e.currency, String(e.amount), e.invoiceId, e.hasReceipt, e.notes];
+            vals.forEach((val, i) => {
+              doc.rect(x, y, expColWidths[i], expRowHeight).fillAndStroke(bg, '#CCC');
+              doc.fillColor('#000000').text(String(val), x + 2, y + 3, { width: expColWidths[i] - 4, height: expRowHeight - 6 });
+              x += expColWidths[i];
+            });
+            y += expRowHeight;
+          });
+        }
+
+        doc.end();
+      } catch (e) {
+        reject(e);
       }
     });
   }

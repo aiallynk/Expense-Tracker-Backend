@@ -228,47 +228,7 @@ export class NotificationQueueService {
                 type: task.type,
             }, '📧 Attempting fallback email notification');
 
-            const { NotificationService } = await import('./notification.service');
-
-            // Extract user email and send simple email notification
-            if (task.type === 'APPROVAL_REQUIRED' && task.payload.levelConfig) {
-                const { User } = await import('../models/User');
-
-                // Get approver user IDs
-                let approverIds: string[] = [];
-                if (task.payload.levelConfig.approverUserIds) {
-                    approverIds = task.payload.levelConfig.approverUserIds.map((id: any) =>
-                        (id._id || id).toString()
-                    );
-                }
-
-                // Send email to each approver
-                for (const approverId of approverIds) {
-                    const user = await User.findById(approverId).select('email name').exec();
-                    if (user && user.email) {
-                        await NotificationService.sendEmail({
-                            to: user.email,
-                            subject: 'New Approval Required',
-                            template: 'approval_required',
-                            data: {
-                                requestType: 'Expense Report',
-                                requestName: task.payload.requestData?.name || 'Unnamed Request',
-                                requesterName: task.payload.requestData?.userId?.name || 'An employee',
-                                roleNames: 'Approver',
-                                level: task.payload.approvalInstance?.currentLevel || 'N/A',
-                                approverNames: user.name || user.email,
-                                instanceId: task.payload.approvalInstance?._id?.toString() || '',
-                            },
-                        });
-
-                        logger.info({
-                            taskId: task.id,
-                            userId: approverId,
-                            email: user.email,
-                        }, '✅ Fallback email sent');
-                    }
-                }
-            }
+            // Approval-required emails disabled — only summary and forgot-password emails are sent (per product requirement).
         } catch (error: any) {
             logger.error({
                 error: error.message,

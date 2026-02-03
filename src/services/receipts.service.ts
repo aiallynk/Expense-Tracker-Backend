@@ -423,12 +423,22 @@ export class ReceiptsService {
             .lean()
             .exec();
           if (!instance) {
-            logger.warn({
-              receiptId: id,
-              requestingUserId,
-              reportUserId: report.userId?.toString(),
-            }, 'Access denied to receipt');
-            throw new Error('Access denied');
+            try {
+              const { ApprovalService } = await import('./ApprovalService');
+              const isCurrentApprover = await ApprovalService.isUserAllowedToViewReportAsApprover(requestingUserId, report._id.toString());
+              if (!isCurrentApprover) {
+                logger.warn({
+                  receiptId: id,
+                  requestingUserId,
+                  reportUserId: report.userId?.toString(),
+                }, 'Access denied to receipt');
+                throw new Error('Access denied');
+              }
+            } catch (e: any) {
+              if (e.message === 'Access denied') throw e;
+              logger.warn({ err: e?.message, receiptId: id, requestingUserId }, 'getReceipt: isUserAllowedToViewReportAsApprover error');
+              throw new Error('Access denied');
+            }
           }
         }
       }

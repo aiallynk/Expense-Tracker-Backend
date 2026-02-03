@@ -7,6 +7,9 @@ import { User } from '../models/User';
 import { ApprovalInstance } from '../models/ApprovalInstance';
 import { getCompanyUserIds } from '../utils/companyAccess';
 import { logger } from '@/config/logger';
+import { ExpenseReportStatus, ExpenseStatus } from '../utils/enums';
+import { rebuildSnapshotsForCompany, getDashboardPayload } from './companyAnalyticsSnapshot.service';
+import { emitCompanyAdminDashboardUpdate } from '../socket/realtimeEvents';
 
 export interface FlushDataOptions {
   companyId: string;
@@ -24,8 +27,13 @@ export interface FlushDataResult {
   errors?: string[];
 }
 
+// Explicitly include all statuses so REJECTED (and any other) reports/expenses are always flushed
+const ALL_REPORT_STATUSES = Object.values(ExpenseReportStatus);
+const ALL_EXPENSE_STATUSES = Object.values(ExpenseStatus);
+
 /**
  * Permanently delete company data based on selected options.
+ * Includes all statuses: DRAFT, SUBMITTED, REJECTED, APPROVED, CHANGES_REQUESTED, etc.
  * Order: expenses (and receipts) -> reports (and related) -> users.
  */
 export async function flushCompanyData(options: FlushDataOptions): Promise<FlushDataResult> {
@@ -54,7 +62,9 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
   try {
     if (flushExpenses || flushReports) {
       if (flushExpenses) {
-        const expenses = await Expense.find({ userId: { $in: userIds } })
+        // All expenses for company users (any status: DRAFT, PENDING, APPROVED, REJECTED)
+        const expenseQuery = { userId: { $in: userIds }, status: { $in: ALL_EXPENSE_STATUSES } };
+        const expenses = await Expense.find(expenseQuery)
           .select('_id receiptIds')
           .session(session)
           .lean()
@@ -69,12 +79,14 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
           const receiptResult = await Receipt.deleteMany({ _id: { $in: allReceiptIds } }).session(session);
           result.deletedReceipts = receiptResult.deletedCount ?? 0;
         }
-        const expResult = await Expense.deleteMany({ userId: { $in: userIds } }).session(session);
+        const expResult = await Expense.deleteMany(expenseQuery).session(session);
         result.deletedExpenses = expResult.deletedCount ?? 0;
       }
 
       if (flushReports) {
-        const reports = await ExpenseReport.find({ userId: { $in: userIds } })
+        // All reports for company users (any status: DRAFT, SUBMITTED, REJECTED, APPROVED, etc.)
+        const reportQuery = { userId: { $in: userIds }, status: { $in: ALL_REPORT_STATUSES } };
+        const reports = await ExpenseReport.find(reportQuery)
           .select('_id')
           .session(session)
           .lean()
@@ -86,9 +98,10 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
           const instResult = await ApprovalInstance.deleteMany({ requestId: { $in: reportIds } }).session(session);
           result.deletedApprovalInstances = instResult.deletedCount ?? 0;
 
-          // Delete expenses under these reports (and their receipts) — only if we didn't already delete all expenses above
+          // Delete expenses under these reports (and their receipts) — only if we didn't already delete all expenses above. Include all statuses (e.g. REJECTED).
           if (!flushExpenses) {
-            const reportExpenses = await Expense.find({ reportId: { $in: reportIds } })
+            const reportExpenseQuery = { reportId: { $in: reportIds }, status: { $in: ALL_EXPENSE_STATUSES } };
+            const reportExpenses = await Expense.find(reportExpenseQuery)
               .select('_id receiptIds')
               .session(session)
               .lean()
@@ -103,7 +116,7 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
               const recDel = await Receipt.deleteMany({ _id: { $in: reportReceiptIds } }).session(session);
               result.deletedReceipts += recDel.deletedCount ?? 0;
             }
-            const expDel = await Expense.deleteMany({ reportId: { $in: reportIds } }).session(session);
+            const expDel = await Expense.deleteMany(reportExpenseQuery).session(session);
             result.deletedExpenses += expDel.deletedCount ?? 0;
           }
 
@@ -128,7 +141,7 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
           }
         }
 
-        const reportResult = await ExpenseReport.deleteMany({ userId: { $in: userIds } }).session(session);
+        const reportResult = await ExpenseReport.deleteMany(reportQuery).session(session);
         result.deletedReports = reportResult.deletedCount ?? 0;
       }
     }
@@ -144,6 +157,22 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
 
     await session.commitTransaction();
     logger.info({ companyId, result }, 'Flush company data completed');
+
+    // Reset dashboard insights when expense/report (or user) data was flushed so amounts show as 0
+    if (flushExpenses || flushReports || flushUsers) {
+      try {
+        await rebuildSnapshotsForCompany(companyId);
+        const payload = await getDashboardPayload(companyId);
+        emitCompanyAdminDashboardUpdate(companyId, payload);
+        logger.info({ companyId }, 'Analytics snapshots rebuilt and dashboard emitted after flush');
+      } catch (insightError) {
+        logger.error({ error: insightError, companyId }, 'Failed to rebuild analytics snapshots after flush');
+        errors.push(`Analytics reset: ${(insightError as Error).message}`);
+        result.errors = errors;
+        // Do not throw: flush already succeeded; insights will correct on next rebuild or page load
+      }
+    }
+
     return result;
   } catch (error) {
     await session.abortTransaction();

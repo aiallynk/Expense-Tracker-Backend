@@ -386,14 +386,14 @@ For EACH receipt found in the image, return:
   * Any unique transaction identifier visible on the receipt
 - invoice_date (ISO date string YYYY-MM-DD | null)
 - total_amount (number | null) - Extract as number without currency symbol
-- currency (string | null) - Extract currency code (INR, USD, etc.)
+- currency (string | null) - Extract as 3-letter code. Map symbols: $ → USD, € → EUR, £ → GBP, ¥ → JPY, ₹ → INR. If you see $, €, £, or other non-INR symbols, return that currency. Use INR only when you see ₹ or text says INR/Rupees/Rs. If unclear, return null.
 - tax_amount (number | null)
 - line_items (array of { description, amount })
 
 Rules:
 - Do NOT guess values
 - Do NOT hallucinate
-- Use INR if currency symbol ₹ is present
+- Do NOT default to INR for dollar/euro/pound receipts — extract the actual currency from symbols
 - Dates must be YYYY-MM-DD format
 - For invoice_number, prioritize UPI Reference Number, Transaction ID, or Payment Reference if this is a payment receipt
 - Return JSON: {"receipts": [{"vendor_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD", "total_amount": number, "currency": "...", "tax_amount": number, "line_items": [{"description": "...", "amount": number}]}]}
@@ -537,7 +537,7 @@ Rules:
                   invoiceId: r.invoice_number || r.invoiceId || r.invoice_id,
                   date: r.invoice_date || r.date || r.invoiceDate,
                   totalAmount: r.total_amount || r.totalAmount,
-                  currency: r.currency || 'INR',
+                  currency: (r.currency && String(r.currency).trim()) ? String(r.currency).trim().toUpperCase() : undefined,
                   tax: r.tax_amount || r.tax || r.taxAmount,
                   lineItems: r.line_items || r.lineItems,
                   sourceType: 'pdf' as const,
@@ -680,13 +680,15 @@ Rules:
       }
     }
 
-    // Try to extract currency
-    if (text.includes('₹') || text.toLowerCase().includes('inr')) {
-      receipt.currency = 'INR';
-    } else if (text.includes('$') || text.toLowerCase().includes('usd')) {
+    // Try to extract currency from symbols/text (check $ and € before INR to avoid false INR default)
+    if (text.includes('$') || text.toLowerCase().includes('usd') || text.toLowerCase().includes('dollar')) {
       receipt.currency = 'USD';
-    } else if (text.includes('€') || text.toLowerCase().includes('eur')) {
+    } else if (text.includes('€') || text.toLowerCase().includes('eur') || text.toLowerCase().includes('euro')) {
       receipt.currency = 'EUR';
+    } else if (text.includes('£') || text.toLowerCase().includes('gbp') || text.toLowerCase().includes('pound')) {
+      receipt.currency = 'GBP';
+    } else if (text.includes('₹') || text.toLowerCase().includes('inr') || text.toLowerCase().includes('rupee')) {
+      receipt.currency = 'INR';
     }
 
     // Try to suggest category based on keywords
@@ -976,14 +978,14 @@ For EACH receipt found in the image, return:
 - invoice_number (string | null)
 - invoice_date (ISO date string YYYY-MM-DD | null)
 - total_amount (number | null)
-- currency (string | null)
+- currency (string | null) - Map symbols: $ → USD, € → EUR, £ → GBP, ₹ → INR. Use INR only when you see ₹ or INR/Rupees/Rs. If unclear, return null.
 - tax_amount (number | null)
 - line_items (array of { description, amount })
 
 Rules:
 - Do NOT guess values
 - Do NOT hallucinate
-- Use INR if currency symbol ₹ is present
+- Do NOT default to INR for $/€/£ receipts — extract the actual currency
 - Dates must be YYYY-MM-DD
 - Return JSON: {"receipts": [{"vendor_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD", "total_amount": number, "currency": "...", "tax_amount": number, "line_items": [{"description": "...", "amount": number}]}]}
 - If multiple receipts in image, include all in receipts array
@@ -1146,7 +1148,7 @@ Rules:
                 invoiceId: r.invoice_number || r.invoiceId || r.invoice_id,
                 date: r.invoice_date || r.date || r.invoiceDate,
                 totalAmount: r.total_amount || r.totalAmount,
-                currency: r.currency || 'INR',
+                currency: (r.currency && String(r.currency).trim()) ? String(r.currency).trim().toUpperCase() : undefined,
                 tax: r.tax_amount || r.tax || r.taxAmount,
                 lineItems: r.line_items || r.lineItems,
                 sourceType: 'image' as const,

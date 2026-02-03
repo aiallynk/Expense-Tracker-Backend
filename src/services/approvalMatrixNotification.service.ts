@@ -338,7 +338,6 @@ export class ApprovalMatrixNotificationService {
 
             const settings: any = requester.notificationSettings || {};
             const allowPush = settings.push !== false;
-            const allowEmail = settings.email !== false;
             const allowReportStatus = settings.reportStatus !== false;
 
             if (allowReportStatus) {
@@ -363,30 +362,7 @@ export class ApprovalMatrixNotificationService {
                     logger.debug({ userId: requestData.userId }, 'Push notification skipped (user preference)');
                 }
 
-                // Send email
-                if (requester.email && allowEmail) {
-                    let template = 'request_rejected';
-                    if (isApproved) template = 'request_approved';
-                    if (isChangesRequested) template = 'report_changes_requested';
-
-                    await NotificationService.sendEmail({
-                        to: requester.email,
-                        subject: `${requestType} ${displayStatus}: ${requestName}`,
-                        template,
-                        data: {
-                            requestType,
-                            requestName,
-                            reportName: requestName, // Some templates use reportName
-                            status: displayStatus,
-                            comments: comments || '',
-                            instanceId: approvalInstance._id.toString(),
-                        },
-                    });
-                } else if (!requester.email) {
-                    // Log handled by skipping
-                } else {
-                    logger.debug({ userId: requestData.userId }, 'Email notification skipped (user preference)');
-                }
+                // Email disabled for approval status — only summary and forgot-password emails are sent (per product requirement).
             } else {
                 logger.info({ userId: requestData.userId }, 'Skipping notification: User disabled report status updates');
             }

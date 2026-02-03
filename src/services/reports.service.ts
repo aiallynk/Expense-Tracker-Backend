@@ -1130,6 +1130,9 @@ export class ReportsService {
         return additionalApprovers;
       }
 
+      // Use numeric total amount (ensure we have a number for condition checks)
+      const reportTotal = Number(report?.totalAmount) || 0;
+
       // Evaluate each rule
       for (const rule of activeRules) {
         let shouldTrigger = false;
@@ -1137,19 +1140,20 @@ export class ReportsService {
 
         switch (rule.triggerType) {
           case ApprovalRuleTriggerType.REPORT_AMOUNT_EXCEEDS:
-            if (report.totalAmount >= rule.thresholdValue) {
+            if (reportTotal >= (Number(rule.thresholdValue) || 0)) {
               shouldTrigger = true;
-              triggerReason = `Report total (₹${report.totalAmount.toLocaleString('en-IN')}) exceeds threshold (₹${rule.thresholdValue.toLocaleString('en-IN')})`;
+              triggerReason = `Report total (₹${reportTotal.toLocaleString('en-IN')}) exceeds threshold (₹${(rule.thresholdValue || 0).toLocaleString('en-IN')})`;
             }
             break;
 
-          case ApprovalRuleTriggerType.PROJECT_BUDGET_EXCEEDS:
-            if (report.projectId) {
-              const project = await Project.findById(report.projectId).exec();
+          case ApprovalRuleTriggerType.PROJECT_BUDGET_EXCEEDS: {
+            const projectId = (report.projectId as any)?._id ?? report.projectId;
+            if (projectId) {
+              const project = await Project.findById(projectId).exec();
               if (project && project.budget && project.thresholdPercentage) {
                 // Calculate what the spent amount would be after this report is approved
                 const currentSpent = project.spentAmount || 0;
-                const projectedSpent = currentSpent + report.totalAmount;
+                const projectedSpent = currentSpent + reportTotal;
                 const thresholdAmount = (project.budget * project.thresholdPercentage) / 100;
 
                 if (projectedSpent >= thresholdAmount) {
@@ -1159,14 +1163,16 @@ export class ReportsService {
               }
             }
             break;
+          }
 
-          case ApprovalRuleTriggerType.COST_CENTRE_BUDGET_EXCEEDS:
-            if (report.costCentreId) {
-              const costCentre = await CostCentre.findById(report.costCentreId).exec();
+          case ApprovalRuleTriggerType.COST_CENTRE_BUDGET_EXCEEDS: {
+            const costCentreId = (report.costCentreId as any)?._id ?? report.costCentreId;
+            if (costCentreId) {
+              const costCentre = await CostCentre.findById(costCentreId).exec();
               if (costCentre && costCentre.budget && costCentre.thresholdPercentage) {
                 // Calculate what the spent amount would be after this report is approved
                 const currentSpent = costCentre.spentAmount || 0;
-                const projectedSpent = currentSpent + report.totalAmount;
+                const projectedSpent = currentSpent + reportTotal;
                 const thresholdAmount = (costCentre.budget * costCentre.thresholdPercentage) / 100;
 
                 if (projectedSpent >= thresholdAmount) {
@@ -1176,6 +1182,7 @@ export class ReportsService {
               }
             }
             break;
+          }
         }
 
         // If rule should trigger, find an approver (specific user when set, else by role)
@@ -1435,8 +1442,15 @@ export class ReportsService {
     // Use the NEW Approval Matrix System
     if (reportUser && reportUser.companyId) {
       try {
+        // Ensure report totals are current before evaluating additional-approver conditions
+        await this.recalcTotals(id);
+        const refreshed = await ExpenseReport.findById(id).select('totalAmount projectId costCentreId').lean().exec();
+        if (refreshed) {
+          (report as any).totalAmount = refreshed.totalAmount ?? (report as any).totalAmount;
+          (report as any).projectId = refreshed.projectId ?? (report as any).projectId;
+          (report as any).costCentreId = refreshed.costCentreId ?? (report as any).costCentreId;
+        }
         // CRITICAL: Compute additional approvers from approval rules BEFORE clearing approvers array
-        // This ensures additional approvers are saved even when using ApprovalMatrix
         const additionalApprovers = await this.evaluateAdditionalApprovalRules(
           report,
           reportUser.companyId as mongoose.Types.ObjectId
@@ -1646,12 +1660,9 @@ export class ReportsService {
       report.approvers = [];
     }
 
-    // Store current status before save to avoid TypeScript narrowing issues
-    const currentStatus = report.status as ExpenseReportStatus;
-
     logger.info({
       reportId: id,
-      status: currentStatus,
+      status: report.status,
       approversCount: report.approvers.length
     }, 'Report status set and ready to save');
 
@@ -1666,25 +1677,26 @@ export class ReportsService {
           reportId: id,
           validationErrors: Object.keys(saveError.errors),
           validationMessages,
-          reportStatus: currentStatus,
+          reportStatus: report.status,
           approversCount: report.approvers?.length || 0,
         }, 'Report validation failed on save');
         
         // If report is already in a submitted/pending state, return it as success (idempotent)
         // This handles edge cases where validation fails but report was already submitted
-        // Use stored currentStatus to avoid TypeScript narrowing issues
-        const isAlreadySubmitted = 
-          currentStatus === ExpenseReportStatus.SUBMITTED ||
-          currentStatus === ExpenseReportStatus.PENDING_APPROVAL_L1 ||
-          currentStatus === ExpenseReportStatus.PENDING_APPROVAL_L2 ||
-          currentStatus === ExpenseReportStatus.PENDING_APPROVAL_L3 ||
-          currentStatus === ExpenseReportStatus.PENDING_APPROVAL_L4 ||
-          currentStatus === ExpenseReportStatus.PENDING_APPROVAL_L5 ||
-          currentStatus === ExpenseReportStatus.APPROVED ||
-          currentStatus === ExpenseReportStatus.MANAGER_APPROVED;
+        const submittedStatuses: ExpenseReportStatus[] = [
+          ExpenseReportStatus.SUBMITTED,
+          ExpenseReportStatus.PENDING_APPROVAL_L1,
+          ExpenseReportStatus.PENDING_APPROVAL_L2,
+          ExpenseReportStatus.PENDING_APPROVAL_L3,
+          ExpenseReportStatus.PENDING_APPROVAL_L4,
+          ExpenseReportStatus.PENDING_APPROVAL_L5,
+          ExpenseReportStatus.APPROVED,
+          ExpenseReportStatus.MANAGER_APPROVED,
+        ];
+        const isAlreadySubmitted = submittedStatuses.includes(report.status as ExpenseReportStatus);
         
         if (isAlreadySubmitted && report.submittedAt) {
-          logger.warn({ reportId: id, status: currentStatus }, 'Validation error on already-submitted report; returning as success (idempotent)');
+          logger.warn({ reportId: id, status: report.status }, 'Validation error on already-submitted report; returning as success (idempotent)');
           return report;
         }
         
@@ -2030,29 +2042,27 @@ export class ReportsService {
     const { page, pageSize } = getPaginationOptions(filters.page, filters.pageSize);
     const baseQuery: any = {};
 
-    // Company admins should only see reports that are in approval workflow or completed
-    // Exclude DRAFT reports by default unless explicitly requested
+    // Company admins: exclude DRAFT by default; optionally exclude REJECTED unless includeRejected is true
     if (filters.status) {
       baseQuery.status = filters.status;
     } else {
-      // Default: exclude DRAFT status for company admins
-      baseQuery.status = {
-        $ne: ExpenseReportStatus.DRAFT
-      };
+      const excluded: ExpenseReportStatus[] = [ExpenseReportStatus.DRAFT];
+      if (!filters.includeRejected) {
+        excluded.push(ExpenseReportStatus.REJECTED);
+      }
+      baseQuery.status = { $nin: excluded };
     }
 
     if (filters.userId) {
-      // Convert userId string to ObjectId for proper MongoDB querying
       if (mongoose.Types.ObjectId.isValid(filters.userId)) {
         baseQuery.userId = new mongoose.Types.ObjectId(filters.userId);
       } else {
-        // Invalid userId, will be filtered out by buildCompanyQuery
         baseQuery.userId = filters.userId;
       }
     }
 
-    if (filters.projectId) {
-      baseQuery.projectId = filters.projectId;
+    if (filters.projectId && mongoose.Types.ObjectId.isValid(filters.projectId)) {
+      baseQuery.projectId = new mongoose.Types.ObjectId(filters.projectId);
     }
 
     if (filters.from) {
@@ -2071,7 +2081,11 @@ export class ReportsService {
     const [reports, total] = await Promise.all([
       ExpenseReport.find(query)
         .populate('projectId', 'name code')
-        .populate('userId', 'name email')
+        .populate({
+          path: 'userId',
+          select: 'name email departmentId',
+          populate: { path: 'departmentId', select: 'name code' },
+        })
         .populate('updatedBy', 'name email')
         .sort({ createdAt: -1 })
         .skip(skip)

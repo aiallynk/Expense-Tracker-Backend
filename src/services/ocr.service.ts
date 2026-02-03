@@ -566,6 +566,10 @@ export class OcrService {
               updateData.invoiceId = invoiceId;
             }
           }
+          if (result.currency && result.currency.trim()) {
+            updateData.currency = result.currency.trim().toUpperCase();
+            updateData.originalCurrency = result.currency.trim().toUpperCase();
+          }
 
           // Update expense with OCR data if we have any updates
           if (Object.keys(updateData).length > 0) {
@@ -843,8 +847,12 @@ DATE EXTRACTION - CRITICAL:
 EXCHANGE RATE:
 - If the receipt shows an exchange rate (e.g. "1 USD = 83.50 INR"), extract it as a number in "exchange_rate". Otherwise null.
 
-CURRENCY & TOTAL:
-- Extract total amount as a number (no symbol). Extract currency code (INR, USD, etc.).
+CURRENCY & TOTAL (CRITICAL — do NOT default to INR unless receipt is clearly in Indian Rupees):
+- Extract total amount as a number (no symbol). Extract currency as 3-letter code.
+- Map currency symbols to codes: $ or USD or dollars → USD; € or EUR or euros → EUR; £ or GBP or pounds → GBP; ¥ or JPY or yen → JPY; ₹ or INR or Rupees or Rs → INR.
+- If the receipt shows $, €, £, ¥, or any non-INR symbol/code, return that currency (USD, EUR, GBP, JPY, etc.). Do NOT use INR for dollar/euro/pound receipts.
+- Use INR only when you see ₹ or the text explicitly says INR, Rupees, Rs, or Indian Rupees.
+- If currency cannot be determined from the receipt, return null.
 - For multi-currency receipts, extract both amounts if shown and exchange_rate if present.
 
 LINE ITEMS:
@@ -957,12 +965,18 @@ If unreadable, return null. No explanations.`;
         if ((!invoiceNumber || String(invoiceNumber).trim() === '') && !hasInvoiceInDoubtful) {
           doubtfulFields = [...doubtfulFields, 'invoiceId'];
         }
+        // If currency was not extracted, add currency to doubtfulFields so user can select manually
+        const hasCurrencyInDoubtful = doubtfulFields.some((f: string) => f === 'currency');
+        const extractedCurrency = parsed.currency && String(parsed.currency).trim();
+        if (!extractedCurrency && !hasCurrencyInDoubtful) {
+          doubtfulFields = [...doubtfulFields, 'currency'];
+        }
 
         const result: OcrResult = {
           vendor: parsed.vendor || null,
           date: parsed.date || null,
           totalAmount: parsed.total != null ? Number(parsed.total) : undefined,
-          currency: parsed.currency || 'INR',
+          currency: parsed.currency && String(parsed.currency).trim() ? String(parsed.currency).trim().toUpperCase() : undefined,
           invoice_number: invoiceNumber,
           invoiceId: invoiceNumber,
           lineItems: lineItems.length > 0 ? lineItems : undefined,
@@ -1063,23 +1077,29 @@ If unreadable, return null. No explanations.`;
       }
     }
 
-    // Try to extract amount - multiple patterns
-    const amountPatterns = [
-      /total[:\s]+([\d.]+)/i,
-      /amount[:\s]+([\d.]+)/i,
-      /"totalAmount"\s*:\s*([\d.]+)/i,
-      /₹\s*([\d,]+\.?\d*)/i,
-      /\$\s*([\d,]+\.?\d*)/i,
-      /(\d+\.\d{2})/,
+    // Try to extract amount - multiple patterns (order matters: symbol-based first to infer currency)
+    const amountPatterns: { pattern: RegExp; currency?: string }[] = [
+      { pattern: /₹\s*([\d,]+\.?\d*)/i, currency: 'INR' },
+      { pattern: /\$\s*([\d,]+\.?\d*)/, currency: 'USD' },
+      { pattern: /€\s*([\d,]+\.?\d*)/, currency: 'EUR' },
+      { pattern: /£\s*([\d,]+\.?\d*)/, currency: 'GBP' },
+      { pattern: /¥\s*([\d,]+\.?\d*)/, currency: 'JPY' },
+      { pattern: /total[:\s]+([\d.]+)/i },
+      { pattern: /amount[:\s]+([\d.]+)/i },
+      { pattern: /"totalAmount"\s*:\s*([\d.]+)/i },
+      { pattern: /(\d+\.\d{2})/ },
     ];
 
-    for (const pattern of amountPatterns) {
+    for (const { pattern, currency: inferredCurrency } of amountPatterns) {
       const match = content.match(pattern);
       if (match && match[1]) {
         const amountStr = match[1].replace(/,/g, '');
         const amount = parseFloat(amountStr);
         if (!isNaN(amount) && amount > 0) {
           result.totalAmount = amount;
+          if (inferredCurrency && !result.currency) {
+            result.currency = inferredCurrency;
+          }
           break;
         }
       }

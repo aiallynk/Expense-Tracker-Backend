@@ -40,6 +40,7 @@ router.use(requireAdmin);
 
 // Reports
 router.get('/reports', AdminController.getAllReports);
+router.get('/reports/export', AdminController.exportReportsList);
 router.post('/reports/:id/approve', AdminController.approveReport);
 router.post('/reports/:id/reject', AdminController.rejectReport);
 router.get('/reports/:id/export', AdminController.exportReport);

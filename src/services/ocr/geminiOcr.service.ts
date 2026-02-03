@@ -53,7 +53,7 @@ Fields:
 Rules:
 - Do NOT guess values
 - Do NOT hallucinate
-- Use INR if currency symbol ₹ is present
+- Map currency symbols: $ → USD, € → EUR, £ → GBP, ₹ → INR. Use INR only when you see ₹ or INR/Rupees/Rs. Do NOT default to INR for $/€/£ receipts.
 - Dates must be YYYY-MM-DD
 - Return JSON: {"vendor_name": "...", "invoice_number": "...", "invoice_date": "YYYY-MM-DD", "total_amount": number, "currency": "...", "tax_amount": number, "line_items": [{"description": "...", "amount": number}]}`;
 

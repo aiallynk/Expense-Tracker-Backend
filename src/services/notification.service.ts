@@ -545,7 +545,6 @@ export class NotificationService {
       // Check Notification Settings
       const settings: any = approverUser.notificationSettings || {};
       const allowPush = settings.push !== false;
-      const allowEmail = settings.email !== false;
       const allowApprovalAlerts = settings.approvalAlerts !== false;
 
       // 1. Push Notification
@@ -589,29 +588,7 @@ export class NotificationService {
           }, '❌ Failed to create notification record - continuing with email');
         }
 
-        // 3. Send email to specific approver
-        if (approverUser.email && allowEmail && allowApprovalAlerts) {
-          try {
-            await this.sendEmail({
-              to: approverUser.email,
-              subject: `New Expense Report: ${report.name}`,
-              template: 'report_submitted',
-              data: {
-                reportName: report.name,
-                ownerName: reportOwner.name || reportOwner.email,
-                ownerEmail: reportOwner.email,
-                reportId: report._id.toString(),
-              },
-            });
-            logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
-          } catch (emailError: any) {
-            logger.error({
-              error: emailError.message || emailError,
-              approverId,
-              reportId: report._id
-            }, '❌ Failed to send email notification');
-          }
-        }
+        // 3. Email to approvers disabled — only summary and forgot-password emails are sent (per product requirement).
       } catch (error: any) {
         logger.error({
           error: error.message || error,
@@ -705,7 +682,6 @@ export class NotificationService {
 
     const settings: any = reportOwner.notificationSettings || {};
     const allowPush = settings.push !== false;
-    const allowEmail = settings.email !== false;
     const allowReportStatus = settings.reportStatus !== false;
 
     if (!allowReportStatus) {
@@ -728,20 +704,7 @@ export class NotificationService {
       });
     }
 
-    // Send email
-    if (reportOwner.email && allowEmail) {
-      await this.sendEmail({
-        to: reportOwner.email,
-        subject: `Expense Report ${isApproved ? 'Approved' : 'Rejected'}: ${report.name}`,
-        template: isApproved ? 'report_approved' : 'report_rejected',
-        data: {
-          reportName: report.name,
-          reportId: report._id.toString(),
-          totalAmount: report.totalAmount,
-          currency: report.currency,
-        },
-      });
-    }
+    // Email disabled for report status — only summary and forgot-password emails are sent (per product requirement).
   }
 
   static async notifyReportChangesRequested(report: any): Promise<void> {
@@ -753,7 +716,6 @@ export class NotificationService {
 
     const settings: any = reportOwner.notificationSettings || {};
     const allowPush = settings.push !== false;
-    const allowEmail = settings.email !== false;
     const allowReportStatus = settings.reportStatus !== false;
 
     if (!allowReportStatus) {
@@ -774,18 +736,7 @@ export class NotificationService {
       });
     }
 
-    // Send email
-    if (reportOwner.email && allowEmail) {
-      await this.sendEmail({
-        to: reportOwner.email,
-        subject: `Changes Requested: ${report.name}`,
-        template: 'report_changes_requested',
-        data: {
-          reportName: report.name,
-          reportId: report._id.toString(),
-        },
-      });
-    }
+    // Email disabled — only summary and forgot-password emails are sent (per product requirement).
   }
 
   static async notifyNextApprover(report: any, approvers: any[]): Promise<void> {
@@ -866,23 +817,7 @@ export class NotificationService {
         });
         logger.info({ approverId, reportId: report._id }, '✅ Notification record created in database');
 
-        // Send email to specific approver
-        const approverUser = await User.findById(approverId).select('email').exec();
-        if (approverUser?.email) {
-          await this.sendEmail({
-            to: approverUser.email,
-            subject: `Report Pending Approval: ${report.name}`,
-            template: 'report_pending_approval',
-            data: {
-              reportName: report.name,
-              ownerName: reportOwner.name || reportOwner.email,
-              ownerEmail: reportOwner.email,
-              reportId: report._id.toString(),
-              level: approverLevel,
-            },
-          });
-          logger.info({ approverId, email: approverUser.email }, '✅ Email notification sent');
-        }
+        // Email to approvers disabled — only summary and forgot-password emails are sent (per product requirement).
       } catch (error) {
         logger.error({ error, approverId, reportId: report._id }, 'Error creating notification record or sending email');
       }

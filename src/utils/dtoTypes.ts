@@ -385,12 +385,12 @@ export const paginationSchema = paginationBaseSchema.transform((data) => {
 
 export const reportFiltersSchema = paginationBaseSchema.extend({
   status: z.nativeEnum(ExpenseReportStatus).optional(),
-  from: z.string().datetime().optional(),
-  to: z.string().datetime().optional(),
+  from: z.string().optional(), // YYYY-MM-DD or ISO date string
+  to: z.string().optional(),
   projectId: z.string().optional(),
   userId: z.string().optional(),
+  includeRejected: z.coerce.boolean().optional(),
 }).transform((data) => {
-  // Use limit if provided, otherwise use pageSize, default to 20 if neither provided
   const pageSize = data.limit ?? data.pageSize ?? 20;
   return {
     page: data.page,
@@ -400,6 +400,7 @@ export const reportFiltersSchema = paginationBaseSchema.extend({
     to: data.to,
     projectId: data.projectId,
     userId: data.userId,
+    includeRejected: data.includeRejected,
   };
 });
 
@@ -442,6 +443,15 @@ export const bulkCsvExportFiltersSchema = z.object({
   companyId: z.string().optional(),
   fromDate: z.string().datetime().optional(),
   toDate: z.string().datetime().optional(),
+});
+
+/** Project (site) wise reports list export - single project only, Excel or PDF */
+export const reportsListExportSchema = z.object({
+  projectId: z.string().min(1, 'projectId is required for project-wise export'),
+  from: z.string().optional(),
+  to: z.string().optional(),
+  status: z.nativeEnum(ExpenseReportStatus).optional(),
+  format: z.enum(['xlsx', 'pdf']).default('xlsx'),
 });
 
 // Company DTOs

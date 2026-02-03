@@ -596,7 +596,7 @@ export class ExpensesService {
       return null;
     }
 
-    // Check access: owner, ADMIN, BUSINESS_HEAD, or user who has acted as approver on this report
+    // Check access: owner, ADMIN, BUSINESS_HEAD, user who has acted as approver, or current approver (pending)
     const isOwner = report.userId?.toString() === requestingUserId;
     const isAdminOrBH = requestingUserRole === 'ADMIN' || requestingUserRole === 'BUSINESS_HEAD' || requestingUserRole === 'COMPANY_ADMIN';
     if (!isOwner && !isAdminOrBH) {
@@ -609,10 +609,24 @@ export class ExpensesService {
         .lean()
         .exec();
       if (!instance) {
-        const err: any = new Error('Access denied');
-        err.statusCode = 403;
-        err.code = 'ACCESS_DENIED';
-        throw err;
+        // Allow if user is the current approver (pending their action) so they can view receipts/expense
+        try {
+          const { ApprovalService } = await import('./ApprovalService');
+          const isCurrentApprover = await ApprovalService.isUserAllowedToViewReportAsApprover(requestingUserId, report._id.toString());
+          if (!isCurrentApprover) {
+            const err: any = new Error('Access denied');
+            err.statusCode = 403;
+            err.code = 'ACCESS_DENIED';
+            throw err;
+          }
+        } catch (e: any) {
+          if (e.statusCode === 403 && e.code === 'ACCESS_DENIED') throw e;
+          logger.warn({ err: e?.message, reportId: report._id?.toString(), requestingUserId }, 'getExpenseById: isUserAllowedToViewReportAsApprover error');
+          const err: any = new Error('Access denied');
+          err.statusCode = 403;
+          err.code = 'ACCESS_DENIED';
+          throw err;
+        }
       }
     }
 
