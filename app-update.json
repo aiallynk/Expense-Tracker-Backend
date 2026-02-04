@@ -1,7 +1,7 @@
 {
-  "latestVersion": "1.0.6",
+  "latestVersion": "1.0.7",
   "minimumSupportedVersion": "1.0.3",
-  "apkUrl": "https://nexpense.aially.in/apk/nexpense_v1.0.6.apk",
-  "releaseNotes": "• Faster OCR\n• Bulk upload improved\n• Bug fixes",
+  "apkUrl": "https://nexpense.aially.in/apk/nexpense_v1.0.7.apk",
+  "releaseNotes": "• In-app update system\n• Help Center link updated\n• Bug fixes",
   "sha256": ""
 }
