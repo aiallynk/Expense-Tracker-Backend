@@ -39,7 +39,7 @@ export class AppController {
    */
   static async serveApk(req: Request, res: Response): Promise<void> {
     try {
-      const requestedVersion = (req.params.version || '').trim();
+      const requestedVersion = String(req.params.version ?? '').trim();
       const configData = appUpdateService.getConfig();
 
       if (requestedVersion !== configData.latestVersion) {
