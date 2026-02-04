@@ -47,6 +47,9 @@ export const config = {
   frontend: {
     url: process.env.FRONTEND_URL || 'https://nexpense.aially.in',
   },
+  api: {
+    baseUrl: process.env.APP_API_BASE_URL || 'https://api.nexpense.aially.in',
+  },
   log: {
     level: process.env.LOG_LEVEL || 'info',
   },

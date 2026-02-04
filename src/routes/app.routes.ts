@@ -11,4 +11,11 @@ const router = Router();
  */
 router.get('/version', AppController.getVersion);
 
+/**
+ * GET /api/app/apk/:version
+ * Serve APK file as raw binary with correct headers.
+ * Public endpoint - no authentication required.
+ */
+router.get('/apk/:version', AppController.serveApk);
+
 export default router;

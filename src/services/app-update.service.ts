@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { config as appConfig } from '@/config/index';
 import { logger } from '@/config/logger';
 
 /**
@@ -76,15 +77,20 @@ class AppUpdateService {
       const content = fs.readFileSync(this.configFilePath, 'utf-8');
       const config = JSON.parse(content) as AppUpdateConfig;
 
-      if (!config.latestVersion || !config.apkUrl) {
-        logger.warn('Invalid app-update.json: latestVersion and apkUrl required, using fallback');
+      if (!config.latestVersion) {
+        logger.warn('Invalid app-update.json: latestVersion required, using fallback');
         return this._getFallbackConfig();
       }
+
+      const apkUrl =
+        config.apkUrl && config.apkUrl.length > 0
+          ? config.apkUrl
+          : `${appConfig.api.baseUrl.replace(/\/$/, '')}/api/app/apk/${config.latestVersion}`;
 
       this.cachedConfig = {
         latestVersion: config.latestVersion,
         minimumSupportedVersion: config.minimumSupportedVersion ?? config.latestVersion,
-        apkUrl: config.apkUrl,
+        apkUrl,
         releaseNotes: config.releaseNotes ?? '',
         sha256: config.sha256,
       };
