@@ -10,6 +10,7 @@ import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
 import { requestIdMiddleware } from './middleware/requestId.middleware';
 import { urlSanitizerMiddleware } from './middleware/urlSanitizer.middleware';
+import appRoutes from './routes/app.routes';
 import accountantRoutes from './routes/accountant.routes';
 import adminRoutes from './routes/admin.routes';
 import advanceCashRoutes from './routes/advanceCash.routes';
@@ -259,6 +260,9 @@ export const createApp = (): Express => {
 
   // Meta routes (version info, etc.) - public endpoints
   app.use('/api/meta', metaRoutes);
+
+  // App routes (in-app APK update, etc.) - public endpoints
+  app.use('/api/app', appRoutes);
 
   // Test routes (for debugging - remove in production or add auth)
   if (config.app.env === 'development') {
