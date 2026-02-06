@@ -2,6 +2,7 @@ import mongoose from 'mongoose';
 
 import { ApprovalInstance, IApprovalInstance, ApprovalStatus } from '../models/ApprovalInstance';
 import { ApprovalMatrix, IApprovalMatrix, IApprovalLevel, ApprovalType, ParallelRule } from '../models/ApprovalMatrix';
+import { CompanySettings } from '../models/CompanySettings';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
@@ -146,28 +147,50 @@ export class ApprovalService {
     const levels = (levelsToUse || []).filter((l: any) => l.enabled !== false);
     const sortedLevels = [...levels].sort((a: any, b: any) => (a.levelNumber ?? a.level ?? 0) - (b.levelNumber ?? b.level ?? 0));
     const history: any[] = [];
-    let firstNonSubmitterLevel: any = null;
+    let firstNonSubmitterLevelNum: number | null = null;
     const submitterNorm = submitterId.toString().toLowerCase().trim();
+
+    const companySettings = await CompanySettings.findOne({ companyId }).select('selfApprovalPolicy').lean().exec();
+    const allowSelfApproval = companySettings?.selfApprovalPolicy === 'ALLOW_SELF';
+
     logger.info({
       requestId,
       submitterId,
       submitterNorm,
       levelsCount: sortedLevels.length,
+      allowSelfApproval,
     }, 'initiateApproval: SKIP_SELF check start');
-    for (const level of sortedLevels) {
-      const approverIds = await this.getApproverUserIdsForLevel(level, companyId);
-      const normalizedApproverIds = new Set(approverIds.map((id) => id.toString().toLowerCase().trim()));
-      const isSubmitterInLevel = normalizedApproverIds.has(submitterNorm);
+    // SKIP_SELF: Only skip when submitter IS the approver (not when a broad role includes everyone)
+    // - fromExplicitUsers: level has specific approverUserIds (e.g. ApproverMapping, direct user assignment) -> safe to skip
+    // - fromRoleIds: NEVER skip - role-based levels can include broad roles (Employee, etc.) that incorrectly
+    //   match all submitters; only explicit user IDs guarantee the submitter is truly the designated approver
+    // - allowSelfApproval: when company policy is ALLOW_SELF, do not skip (submitter goes through normal flow)
+    for (let i = 0; i < sortedLevels.length; i++) {
+      const level = sortedLevels[i];
+      const levelNum = Number(level?.levelNumber ?? level?.level ?? (i + 1));
+      const { userIds: approverIds, approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(level, companyId);
+      const explicitIds = explicitApproverUserIds ?? [];
+      const isSubmitterExplicitApprover = explicitIds.some((id) => id.toString().toLowerCase().trim() === submitterNorm);
+      const shouldSkip = approvalType === 'USER_BASED' && isSubmitterExplicitApprover && !allowSelfApproval;
       logger.info({
         requestId,
-        levelNum: level.levelNumber ?? level.level,
-        approverIdsCount: approverIds.length,
-        approverIdsSample: approverIds.slice(0, 3),
-        isSubmitterInLevel,
-      }, 'initiateApproval: SKIP_SELF level check');
-      if (isSubmitterInLevel) {
+        levelNum,
+        approvalType,
+        explicitApproverUserIds: explicitIds.slice(0, 5),
+        submitterId,
+        skipDecision: shouldSkip,
+      }, 'initiateApproval: SKIP_SELF decision');
+      if (approvalType === 'ROLE_BASED') {
+        logger.info({
+          requestId,
+          levelNum,
+          approverIdsCount: approverIds.length,
+          reason: 'SKIP_SELF: Not skipping - role-based level (only USER_BASED with explicit approvers trigger skip)',
+        }, 'initiateApproval: SKIP_SELF role-based safeguard');
+      }
+      if (shouldSkip) {
         history.push({
-          levelNumber: level.levelNumber ?? level.level ?? 1,
+          levelNumber: levelNum || 1,
           status: ApprovalStatus.SKIPPED,
           timestamp: new Date(),
           comments: 'Self approval skipped per company policy',
@@ -176,14 +199,14 @@ export class ApprovalService {
           reportId: requestId,
           userId: submitterId,
           policy: 'SKIP_SELF',
-          level: level.levelNumber,
+          level: levelNum,
         });
       } else {
-        firstNonSubmitterLevel = level;
+        firstNonSubmitterLevelNum = levelNum || (i + 1);
         break;
       }
     }
-    if (!firstNonSubmitterLevel) {
+    if (firstNonSubmitterLevelNum == null) {
       instance.status = ApprovalStatus.APPROVED;
       instance.history = history;
       try {
@@ -228,7 +251,7 @@ export class ApprovalService {
 
       return instance;
     }
-    instance.currentLevel = firstNonSubmitterLevel.levelNumber ?? firstNonSubmitterLevel.level ?? 2;
+    instance.currentLevel = firstNonSubmitterLevelNum;
     instance.status = ApprovalStatus.PENDING;
     instance.history = history;
     // CRITICAL: Always persist effectiveLevels so getPendingApprovalsForUser resolves correct level
@@ -354,10 +377,18 @@ export class ApprovalService {
   }
 
   /** Resolve approver user IDs for a matrix level (for self-approval skip logic).
-   * Handles approverUserIds that may contain Role IDs (from frontend migration) by falling back to approverRoleIds.
+   * USER_BASED only when level has NO approverRoleIds AND approverUserIds resolve to users.
+   * ROLE_BASED when approverRoleIds has values - skip logic is disabled, userIds used for notifications only.
+   * Returns { userIds, approvalType, explicitApproverUserIds } - skip uses ONLY explicitApproverUserIds.
    */
-  private static async getApproverUserIdsForLevel(level: any, companyId: string): Promise<string[]> {
-    if (level.approverUserIds && level.approverUserIds.length > 0) {
+  private static async getApproverUserIdsForLevel(
+    level: any,
+    companyId: string
+  ): Promise<{ userIds: string[]; approvalType: 'USER_BASED' | 'ROLE_BASED'; explicitApproverUserIds: string[] }> {
+    const hasRoleConfig = level.approverRoleIds && level.approverRoleIds.length > 0;
+
+    // USER_BASED only when NO role config and approverUserIds resolve to users (explicit assignment)
+    if (!hasRoleConfig && level.approverUserIds && level.approverUserIds.length > 0) {
       const rawIds = level.approverUserIds.map((id: any) => (id._id ?? id).toString()).filter(Boolean);
       const users = await User.find({
         _id: { $in: rawIds },
@@ -367,11 +398,28 @@ export class ApprovalService {
         .lean()
         .exec();
       const userIds = users.map((u: any) => u._id.toString());
-      if (userIds.length > 0) return userIds;
-      // Fallback: approverUserIds may contain Role IDs (from frontend migration). Try approverRoleIds or rawIds as role IDs
+      if (userIds.length > 0) {
+        return { userIds, approvalType: 'USER_BASED', explicitApproverUserIds: userIds };
+      }
+    }
+
+    // All other paths: ROLE_BASED - resolve users for notifications, explicitApproverUserIds = [] for skip
+    let resolvedUserIds: string[] = [];
+    if (hasRoleConfig) {
+      const roleIds = level.approverRoleIds.map((id: any) => (id._id ?? id)).filter(Boolean);
+      const users = await User.find({
+        companyId: new mongoose.Types.ObjectId(companyId),
+        roles: { $in: roleIds },
+      })
+        .select('_id')
+        .lean()
+        .exec();
+      resolvedUserIds = users.map((u: any) => u._id.toString());
+    } else if (level.approverUserIds && level.approverUserIds.length > 0) {
+      // Fallback: approverUserIds may contain Role IDs - resolve by role, still ROLE_BASED
       const roleIdsToTry = level.approverRoleIds?.length
         ? level.approverRoleIds.map((id: any) => (id._id ?? id)).filter(Boolean)
-        : rawIds;
+        : level.approverUserIds.map((id: any) => (id._id ?? id).toString()).filter(Boolean);
       if (roleIdsToTry.length > 0) {
         const usersByRole = await User.find({
           companyId: new mongoose.Types.ObjectId(companyId),
@@ -380,21 +428,16 @@ export class ApprovalService {
           .select('_id')
           .lean()
           .exec();
-        return usersByRole.map((u: any) => u._id.toString());
+        resolvedUserIds = usersByRole.map((u: any) => u._id.toString());
       }
     }
-    if (level.approverRoleIds && level.approverRoleIds.length > 0) {
-      const roleIds = level.approverRoleIds.map((id: any) => (id._id ?? id)).filter(Boolean);
-      const userIds = await User.find({
-        companyId: new mongoose.Types.ObjectId(companyId),
-        roles: { $in: roleIds },
-      })
-        .select('_id')
-        .lean()
-        .exec();
-      return userIds.map((u: any) => u._id.toString());
-    }
-    return [];
+    return { userIds: resolvedUserIds, approvalType: 'ROLE_BASED', explicitApproverUserIds: [] };
+  }
+
+  /** Public helper to get approval type for a level (for API response). */
+  static async getApprovalTypeForLevel(level: any, companyId: string): Promise<'USER_BASED' | 'ROLE_BASED'> {
+    const { approvalType } = await this.getApproverUserIdsForLevel(level, companyId);
+    return approvalType;
   }
 
   /**
@@ -484,7 +527,7 @@ export class ApprovalService {
     }
     const companyIdStr = user.companyId?.toString?.();
     if (!companyIdStr) return false;
-    const resolvedApproverIds = await this.getApproverUserIdsForLevel(currentLevel, companyIdStr);
+    const { userIds: resolvedApproverIds } = await this.getApproverUserIdsForLevel(currentLevel, companyIdStr);
     const normalized = new Set(resolvedApproverIds.map((id) => id.toLowerCase().trim()));
     const allowed = normalized.has(currentUserId.toLowerCase().trim());
     if (!allowed) {
@@ -635,7 +678,7 @@ export class ApprovalService {
               logger.warn({ instanceId: instance._id, requestId: instance.requestId }, 'getPendingApprovalsForUser: Skip - user has no companyId');
               continue;
             }
-            const resolvedApproverUserIds = await this.getApproverUserIdsForLevel(currentLevel, companyIdStr);
+            const { userIds: resolvedApproverUserIds } = await this.getApproverUserIdsForLevel(currentLevel, companyIdStr);
             resolvedApproverCount = resolvedApproverUserIds.length;
 
             if (resolvedApproverUserIds.length === 0) {
@@ -1355,7 +1398,8 @@ export class ApprovalService {
       } else {
         const levelConfig = levelsToUse.find((l: any) => (l.levelNumber ?? l.level) === instance.currentLevel);
         if (levelConfig) {
-          currentLevelApproverIds = await this.getApproverUserIdsForLevel(levelConfig, instance.companyId?.toString?.() ?? '');
+          const result = await this.getApproverUserIdsForLevel(levelConfig, instance.companyId?.toString?.() ?? '');
+          currentLevelApproverIds = result.userIds;
         }
       }
 
@@ -1757,9 +1801,11 @@ export class ApprovalService {
           let nextState: { levelNumber: number; status: ApprovalStatus };
           let allLevelsSkippedDueToSubmitter = false;
 
-          // Always skip self-approval (SKIP_SELF)
+          // Skip self-approval (SKIP_SELF) when company policy allows and level is USER_BASED
           if (reportSubmitterId && instance.requestType === 'EXPENSE_REPORT') {
             const submitterNorm = reportSubmitterId.toString().toLowerCase().trim();
+            const companySettingsForAction = await CompanySettings.findOne({ companyId: companyIdStr }).select('selfApprovalPolicy').lean().exec();
+            const allowSelfApprovalForAction = companySettingsForAction?.selfApprovalPolicy === 'ALLOW_SELF';
 
             while (true) {
               const levelConfig = levelsToUse.find(
@@ -1770,9 +1816,11 @@ export class ApprovalService {
                 allLevelsSkippedDueToSubmitter = true;
                 break;
               }
-              const approverIds = await this.getApproverUserIdsForLevel(levelConfig, companyIdStr);
-              const normalizedApproverIds = new Set(approverIds.map((id) => id.toString().toLowerCase().trim()));
-              if (normalizedApproverIds.has(submitterNorm)) {
+              const { approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(levelConfig, companyIdStr);
+              const explicitIds = explicitApproverUserIds ?? [];
+              const isSubmitterExplicitApprover = explicitIds.some((id) => id.toString().toLowerCase().trim() === submitterNorm);
+              // Only skip when submitter is in explicit approvers AND level is USER_BASED AND company policy is SKIP_SELF
+              if (approvalType === 'USER_BASED' && isSubmitterExplicitApprover && !allowSelfApprovalForAction) {
                 instance.history.push({
                   levelNumber: nextLevelNum,
                   status: ApprovalStatus.SKIPPED,

@@ -560,6 +560,11 @@ export class ReportsService {
               (a: any) => a.level === levelNum && a.isAdditionalApproval === true
             );
 
+            const companyIdStr = (approvalInstance.companyId as any)?.toString?.() ?? '';
+            const approvalType = level && companyIdStr
+              ? await ApprovalService.getApprovalTypeForLevel(level, companyIdStr)
+              : 'ROLE_BASED';
+
             approvalChain.push({
               level: levelNum,
               step: stepName,
@@ -573,6 +578,7 @@ export class ReportsService {
               comment: comment, // Frontend expects 'comment'
               action: mappedAction, // Frontend expects 'approve', 'reject', 'request_changes', 'skipped'
               skipped: mappedAction === 'skipped', // Explicit flag for self-approval skipped levels
+              approvalType, // USER_BASED or ROLE_BASED - enables UI/future logic
               isAdditionalApproval: reportApprover ? true : false,
               triggerReason: reportApprover?.triggerReason || null,
               approvalRuleId: reportApprover?.approvalRuleId || null
@@ -617,6 +623,7 @@ export class ReportsService {
               decidedAt: addDecidedAt,
               comment: addComment,
               action: addAction,
+              approvalType: 'USER_BASED', // Additional approvers are always user-specific
               isAdditionalApproval: true,
               triggerReason: addApprover.triggerReason || null,
               approvalRuleId: addApprover.approvalRuleId || null
@@ -1511,17 +1518,16 @@ export class ReportsService {
               ];
               effectiveMatrixLevels = matrix.levels.map((lvl: any) => {
                 const mappingApproverId = levelApproverIds[(lvl.levelNumber || 1) - 1];
-                const approverUserIds = mappingApproverId
-                  ? [mappingApproverId]
-                  : (lvl.approverUserIds || []).length > 0
-                    ? lvl.approverUserIds
-                    : lvl.approverRoleIds || [];
+                // Do NOT put approverRoleIds into approverUserIds - keep them separate so
+                // getApproverUserIdsForLevel correctly returns ROLE_BASED for role-only levels
+                const approverUserIds = mappingApproverId ? [mappingApproverId] : (lvl.approverUserIds || []);
+                const approverRoleIds = mappingApproverId ? [] : (lvl.approverRoleIds || []);
                 return {
                   ...lvl,
                   approverUserIds: Array.isArray(approverUserIds)
                     ? approverUserIds.map((id: any) => (id?._id ?? id))
                     : [],
-                  approverRoleIds: mappingApproverId ? [] : (lvl.approverRoleIds || []),
+                  approverRoleIds,
                 };
               });
               logger.info({
