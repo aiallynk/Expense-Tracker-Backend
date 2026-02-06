@@ -252,6 +252,53 @@ export class BatchUploadService {
     const batch = await Batch.findOne({ batchId }).exec();
     if (!batch) return null;
     if (batch.userId.toString() !== userId) return null;
+
+    // Reconcile progress from Receipt statuses to avoid stuck UI when:
+    // - confirmBatch is called more than once (some receipts already confirmed/processed)
+    // - socket events are missed
+    // - counters were not incremented due to transient issues
+    try {
+      const receiptObjectIds = (batch.receiptIds || []).filter(Boolean) as mongoose.Types.ObjectId[];
+      if (receiptObjectIds.length > 0) {
+        const receipts = await Receipt.find({ _id: { $in: receiptObjectIds } })
+          .select('_id status uploadConfirmed')
+          .lean()
+          .exec();
+
+        const completed = receipts.filter((r: any) => r.status === ReceiptStatus.COMPLETED).length;
+        const failed = receipts.filter((r: any) => r.status === ReceiptStatus.FAILED).length;
+        const total = batch.totalReceipts ?? receiptObjectIds.length;
+
+        const anyDiff =
+          (batch.completedReceipts ?? 0) !== completed ||
+          (batch.failedReceipts ?? 0) !== failed;
+
+        if (anyDiff) {
+          batch.completedReceipts = completed;
+          batch.failedReceipts = failed;
+        }
+
+        // Derive batch status deterministically from receipts + totals.
+        // - If all receipts are confirmed and at least one is still processing, keep PROCESSING
+        // - If completed+failed reaches total, finalize to COMPLETED/PARTIAL
+        const allUploadConfirmed = receipts.length > 0 && receipts.every((r: any) => r.uploadConfirmed === true);
+        if (completed + failed >= total) {
+          batch.status = failed > 0 ? BatchStatus.PARTIAL : BatchStatus.COMPLETED;
+        } else if (allUploadConfirmed) {
+          batch.status = BatchStatus.PROCESSING;
+        } else {
+          batch.status = BatchStatus.UPLOADING;
+        }
+
+        if (anyDiff) {
+          await batch.save();
+        }
+      }
+    } catch (err: any) {
+      // Non-blocking: return stored status even if reconciliation fails
+      logger.warn({ error: err?.message, batchId }, 'Batch status reconciliation failed (non-blocking)');
+    }
+
     return {
       batchId: batch.batchId,
       totalReceipts: batch.totalReceipts,

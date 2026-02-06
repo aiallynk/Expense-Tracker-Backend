@@ -833,7 +833,8 @@ VENDOR NAME:
 - For UPI/payment receipts, vendor is often the recipient name or app name.
 
 TRANSACTION / INVOICE NUMBER (CRITICAL — extract as accurately as possible):
-- ALWAYS try to extract ANY identifier: Invoice Number, Invoice No, Bill No, Receipt No, UPI Ref No, UPI Reference Number, Transaction ID, Transaction Reference, Txn ID, Txn Ref, Payment Reference, Payment ID, Order ID, Order Number, Ref No, Reference No, UTR, UTR No, VPA Ref, Bank Ref. Put the value in "invoice_number".
+- ALWAYS try to extract ANY identifier: Invoice Number, Invoice No, Bill No, Receipt No, UPI Ref No, UPI Reference Number, Transaction ID, Transaction Reference, Txn ID, Txn Ref, Payment Reference, Payment ID, Order ID, Order Number, Ref No, Reference No, UTR, UTR No, RRN (Retrieval Reference Number), VPA Ref, Bank Ref. Put the value in "invoice_number".
+- For Paytm payment receipts, the identifier is often shown as "Paytm Txn ID", "Order ID", "UPI Ref No", "UTR", or "RRN" — extract whichever is present.
 - Look in headers, footers, and small print. Values are often alphanumeric (e.g. INV-2024-001, TXN123456, 123456789012).
 - If you SEE an invoice/bill/transaction/reference number on the receipt but cannot read it clearly (blurry, handwritten, cropped), add "invoice_number" to "doubtful_fields" so the user is prompted to enter it manually.
 - If the field is clearly present but in an unusual format, still extract the raw string and add "invoice_number" to doubtful_fields if uncertain.
@@ -930,6 +931,11 @@ If unreadable, return null. No explanations.`;
           parsed.paymentId ||
           parsed.order_id ||
           parsed.orderId ||
+          parsed.rrn ||
+          parsed.rrn_no ||
+          parsed.rrnNo ||
+          parsed.retrieval_reference_number ||
+          parsed.retrievalReferenceNumber ||
           parsed.receipt_number ||
           parsed.receiptNumber ||
           parsed.ref_no ||
@@ -1137,6 +1143,7 @@ If unreadable, return null. No explanations.`;
       /(?:transaction|txn|payment)\s*(?:id|ref|reference)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
       /(?:upi|ref|reference)\s*(?:no|number)?[:\s]*([A-Z0-9][A-Z0-9\-\s]{4,50})/im,
       /(?:utr|order)\s*(?:no|number|id)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
+      /(?:rrn|retrieval\s*reference)\s*(?:no|number)?[:\s]*([A-Z0-9][A-Z0-9\-\/]{4,50})/im,
       /(?:gstin|gst)\s*(?:no|number)?[:\s]*([A-Z0-9]{8,})/im,
     ];
     for (const pattern of invoicePatterns) {
