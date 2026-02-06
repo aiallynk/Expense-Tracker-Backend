@@ -52,9 +52,12 @@ const categorySchema = new Schema<ICategory>(
   }
 );
 
-// Composite unique index: same category name allowed across companies, duplicate names blocked within same company
+// Composite unique index: same category name/code allowed across companies, duplicate names/codes blocked within same company
 categorySchema.index({ companyId: 1, name: 1 }, { unique: true });
 categorySchema.index({ companyId: 1, status: 1 });
-categorySchema.index({ code: 1 }, { unique: true, sparse: true }); // Code remains globally unique if provided
+categorySchema.index(
+  { companyId: 1, code: 1 },
+  { unique: true, partialFilterExpression: { code: { $gt: '' } } }
+);
 
 export const Category = mongoose.model<ICategory>('Category', categorySchema);

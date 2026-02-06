@@ -27,7 +27,8 @@ export class ApprovalRecordService {
     static async createApprovalRecordsAtomic(
         approvalInstance: IApprovalInstance,
         matrix: IApprovalMatrix,
-        companyId: string
+        companyId: string,
+        levelsOverride?: any[]
     ): Promise<{
         success: boolean;
         approverUserIds: string[];
@@ -38,14 +39,23 @@ export class ApprovalRecordService {
         session.startTransaction();
 
         try {
-            // Get current level configuration: prefer instance effectiveLevels (personalized matrix) when set
-            const currentLevel = approvalInstance.currentLevel;
-            const levelsToUse = (approvalInstance as any).effectiveLevels?.length
-                ? (approvalInstance as any).effectiveLevels
-                : matrix.levels || [];
-            const currentLevelConfig = levelsToUse.find((l: any) => l.levelNumber === currentLevel);
-
+            // Get current level configuration: prefer explicit override, then instance effectiveLevels, then matrix.levels
+            const currentLevel = Number(approvalInstance.currentLevel);
+            const levelsToUse = (levelsOverride?.length ? levelsOverride : null)
+                ?? ((approvalInstance as any).effectiveLevels?.length ? (approvalInstance as any).effectiveLevels : null)
+                ?? (matrix.levels || []);
+            let currentLevelConfig = levelsToUse.find((l: any) => Number(l.levelNumber ?? l.level ?? 0) === currentLevel);
+            if (!currentLevelConfig && currentLevel >= 1 && currentLevel <= levelsToUse.length) {
+                currentLevelConfig = levelsToUse[currentLevel - 1];
+            }
             if (!currentLevelConfig) {
+                logger.error({
+                    instanceId: approvalInstance._id,
+                    currentLevel,
+                    levelsToUseLength: levelsToUse.length,
+                    levelNumbers: levelsToUse.map((l: any) => l.levelNumber ?? l.level),
+                    hasLevelsOverride: !!levelsOverride?.length,
+                }, 'createApprovalRecordsAtomic: Level not found');
                 throw new Error(`Level ${currentLevel} not found in approval matrix`);
             }
 

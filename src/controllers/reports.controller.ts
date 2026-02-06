@@ -177,6 +177,10 @@ export class ReportsController {
         },
       });
     } catch (error: any) {
+      const isValidationError = error?.name === 'ValidationError' || error instanceof mongoose.Error.ValidationError;
+      const validationDetails = isValidationError && error?.errors
+        ? Object.entries(error.errors).map(([path, e]: [string, any]) => ({ path, message: (e as any)?.message }))
+        : undefined;
       logger.error({
         error: error.message,
         stack: error.stack,
@@ -184,8 +188,11 @@ export class ReportsController {
         userId: req.user!.id,
         submitData,
         body: req.body,
+        errName: error?.name,
+        errConstructor: error?.constructor?.name,
+        ...(validationDetails && { validationErrors: validationDetails }),
       }, 'Error in submitReport service');
-      
+
       // Re-throw to let asyncHandler handle it, but ensure error message is clear
       if (error.message) {
         throw error;

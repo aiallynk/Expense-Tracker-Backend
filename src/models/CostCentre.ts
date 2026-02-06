@@ -65,10 +65,13 @@ const costCentreSchema = new Schema<ICostCentre>(
   }
 );
 
-// Indexes - name must be unique within a company
+// Indexes - name and code must be unique within a company (same name/code allowed across companies)
 costCentreSchema.index({ companyId: 1, name: 1 }, { unique: true });
 costCentreSchema.index({ companyId: 1, status: 1 });
-costCentreSchema.index({ code: 1 }, { unique: true, sparse: true });
+costCentreSchema.index(
+  { companyId: 1, code: 1 },
+  { unique: true, partialFilterExpression: { code: { $gt: '' } } }
+);
 
 export const CostCentre = mongoose.model<ICostCentre>('CostCentre', costCentreSchema);
 

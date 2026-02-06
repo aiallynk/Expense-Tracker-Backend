@@ -502,6 +502,7 @@ export class ReportsService {
 
             // Get approver details from history
             const approverHistory = levelHistory.find((h: any) => h.approverId);
+            const skippedHistory = levelHistory.find((h: any) => h.status === 'SKIPPED');
             let approverName = null;
             let approverId = null;
             let decidedAt = null;
@@ -515,6 +516,11 @@ export class ReportsService {
               decidedAt = approverHistory.timestamp;
               comment = approverHistory.comments;
               action = approverHistory.status?.toLowerCase();
+            } else if (skippedHistory) {
+              // Self-approval skipped per company policy
+              action = 'skipped';
+              decidedAt = skippedHistory.timestamp;
+              comment = skippedHistory.comments || 'Self approval skipped per company policy';
             }
 
             // ALWAYS use actual role names from approval matrix - never use generic fallback names
@@ -537,6 +543,7 @@ export class ReportsService {
             if (action === 'approved') mappedAction = 'approve';
             else if (action === 'rejected') mappedAction = 'reject';
             else if (action === 'changes_requested') mappedAction = 'request_changes';
+            else if (action === 'skipped') mappedAction = 'skipped';
 
             // Check if this approver is an additional approver from the report's approvers array
             const reportApprover = (report.approvers || []).find(
@@ -1555,9 +1562,16 @@ export class ReportsService {
           additionalApproversCount: additionalApprovers.length
         }, 'Approval instance created via ApprovalService');
 
-        // Set initial status based on approval instance status
+        // Set initial status based on approval instance status and current level
+        // When L1 is skipped, currentLevel is 2+ so we must set the correct pending status
         if (approvalInstance.status === 'PENDING') {
-          report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
+          const level = (approvalInstance as any).currentLevel ?? 1;
+          if (level === 1) report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
+          else if (level === 2) report.status = ExpenseReportStatus.PENDING_APPROVAL_L2;
+          else if (level === 3) report.status = ExpenseReportStatus.PENDING_APPROVAL_L3;
+          else if (level === 4) report.status = ExpenseReportStatus.PENDING_APPROVAL_L4;
+          else if (level === 5) report.status = ExpenseReportStatus.PENDING_APPROVAL_L5;
+          else report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
         } else if (approvalInstance.status === 'APPROVED') {
           // Matrix has no levels or all levels skipped - auto-approved
           report.status = ExpenseReportStatus.APPROVED;
@@ -1655,9 +1669,29 @@ export class ReportsService {
     }
     report.updatedBy = new mongoose.Types.ObjectId(userId);
 
-    // Ensure approvers is always an array
+    // Ensure approvers is always an array and each item has required fields (level, userId, role)
     if (!report.approvers || !Array.isArray(report.approvers)) {
       report.approvers = [];
+    } else {
+      report.approvers = report.approvers
+        .map((a: any) => {
+          const userId = a.userId && mongoose.Types.ObjectId.isValid(a.userId)
+            ? (typeof a.userId === 'object' && a.userId?._id ? a.userId._id : new mongoose.Types.ObjectId(a.userId))
+            : null;
+          if (!userId) return null;
+          return {
+            level: typeof a.level === 'number' ? a.level : 1,
+            userId,
+            role: (a.role && String(a.role).trim()) || 'Approver',
+            decidedAt: a.decidedAt,
+            action: a.action,
+            comment: a.comment,
+            isAdditionalApproval: a.isAdditionalApproval,
+            approvalRuleId: a.approvalRuleId,
+            triggerReason: a.triggerReason,
+          } as IApprover;
+        })
+        .filter(Boolean) as IApprover[];
     }
 
     logger.info({
@@ -1667,43 +1701,80 @@ export class ReportsService {
     }, 'Report status set and ready to save');
 
     let saved;
-    try {
-      saved = await report.save();
-    } catch (saveError: any) {
-      // Handle Mongoose validation errors
-      if (saveError instanceof mongoose.Error.ValidationError) {
-        const validationMessages = Object.values(saveError.errors).map((e: any) => `${e.path}: ${e.message}`).join(', ');
+    // When auto-approved, finalizeApproval already updated the report in DB. Using save() would cause
+    // VersionError (stale __v). Use findByIdAndUpdate instead to avoid version conflict.
+    const wasAutoApproved = report.status === ExpenseReportStatus.APPROVED && report.approvedAt;
+    if (wasAutoApproved) {
+      try {
+        saved = await ExpenseReport.findByIdAndUpdate(
+          id,
+          {
+            $set: {
+              submittedAt: report.submittedAt,
+              updatedBy: report.updatedBy,
+              approvers: report.approvers,
+            },
+          },
+          { new: true, runValidators: false }
+        ).exec();
+      } catch (updateErr: any) {
+        const isValidationError = updateErr instanceof mongoose.Error.ValidationError;
+        const validationDetails = isValidationError && updateErr?.errors
+          ? Object.entries(updateErr.errors).map(([path, e]: [string, any]) => ({ path, message: e?.message }))
+          : undefined;
         logger.error({
           reportId: id,
-          validationErrors: Object.keys(saveError.errors),
-          validationMessages,
-          reportStatus: report.status,
-          approversCount: report.approvers?.length || 0,
-        }, 'Report validation failed on save');
-        
-        // If report is already in a submitted/pending state, return it as success (idempotent)
-        // This handles edge cases where validation fails but report was already submitted
-        const submittedStatuses: ExpenseReportStatus[] = [
-          ExpenseReportStatus.SUBMITTED,
-          ExpenseReportStatus.PENDING_APPROVAL_L1,
-          ExpenseReportStatus.PENDING_APPROVAL_L2,
-          ExpenseReportStatus.PENDING_APPROVAL_L3,
-          ExpenseReportStatus.PENDING_APPROVAL_L4,
-          ExpenseReportStatus.PENDING_APPROVAL_L5,
-          ExpenseReportStatus.APPROVED,
-          ExpenseReportStatus.MANAGER_APPROVED,
-        ];
-        const isAlreadySubmitted = submittedStatuses.includes(report.status as ExpenseReportStatus);
-        
-        if (isAlreadySubmitted && report.submittedAt) {
-          logger.warn({ reportId: id, status: report.status }, 'Validation error on already-submitted report; returning as success (idempotent)');
-          return report;
-        }
-        
-        throw new Error(`Report validation failed: ${validationMessages}. Please contact support if this persists.`);
+          error: updateErr?.message,
+          stack: updateErr?.stack,
+          name: updateErr?.name,
+          errConstructor: updateErr?.constructor?.name,
+          ...(validationDetails && { validationErrors: validationDetails }),
+        }, 'findByIdAndUpdate failed after auto-approval');
+        throw updateErr;
       }
-      // Re-throw other errors
-      throw saveError;
+      if (!saved) {
+        throw new Error('Report not found after auto-approval update');
+      }
+    } else {
+      try {
+        saved = await report.save();
+      } catch (saveError: any) {
+        // Handle Mongoose validation errors
+        if (saveError instanceof mongoose.Error.ValidationError) {
+          const validationMessages = Object.values(saveError.errors).map((e: any) => `${e.path}: ${e.message}`).join(', ');
+          const validationDetails = Object.entries(saveError.errors).map(([path, e]: [string, any]) => ({ path, message: e?.message }));
+          logger.error({
+            reportId: id,
+            validationErrors: Object.keys(saveError.errors),
+            validationMessages,
+            validationDetails,
+            reportStatus: report.status,
+            approversCount: report.approvers?.length || 0,
+          }, 'Report validation failed on save');
+          
+          // If report is already in a submitted/pending state, return it as success (idempotent)
+          const submittedStatuses: ExpenseReportStatus[] = [
+            ExpenseReportStatus.SUBMITTED,
+            ExpenseReportStatus.PENDING_APPROVAL_L1,
+            ExpenseReportStatus.PENDING_APPROVAL_L2,
+            ExpenseReportStatus.PENDING_APPROVAL_L3,
+            ExpenseReportStatus.PENDING_APPROVAL_L4,
+            ExpenseReportStatus.PENDING_APPROVAL_L5,
+            ExpenseReportStatus.APPROVED,
+            ExpenseReportStatus.MANAGER_APPROVED,
+          ];
+          const isAlreadySubmitted = submittedStatuses.includes(report.status as ExpenseReportStatus);
+          
+          if (isAlreadySubmitted && report.submittedAt) {
+            logger.warn({ reportId: id, status: report.status }, 'Validation error on already-submitted report; returning as success (idempotent)');
+            return report;
+          }
+          
+          throw new Error(`Report validation failed: ${validationMessages}. Please contact support if this persists.`);
+        }
+        // Re-throw other errors
+        throw saveError;
+      }
     }
 
     await AuditService.log(

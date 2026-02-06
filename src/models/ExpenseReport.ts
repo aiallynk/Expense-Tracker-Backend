@@ -132,6 +132,7 @@ const expenseReportSchema = new Schema<IExpenseReport>(
         role: {
           type: String,
           required: true,
+          default: 'Approver',
         },
         decidedAt: {
           type: Date,
