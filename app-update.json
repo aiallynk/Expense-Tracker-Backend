@@ -1,7 +1,7 @@
 {
-  "latestVersion": "1.0.10",
+  "latestVersion": "1.0.11",
   "minimumSupportedVersion": "1.0.3",
   "apkUrl": "",
-  "releaseNotes": "• In-app update system\n• Help Center link updated\n• Bug fixes",
+  "releaseNotes": "• Bug Fixes\n• The Self Approval feature has been updated",
   "sha256": "fb27659c2f416e1e930ca5f65e7b0d8c995b2883fe4cb763b31338140a721ee3"
 }

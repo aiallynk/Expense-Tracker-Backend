@@ -479,19 +479,29 @@ export class ReportsService {
         const matrix = approvalInstance.matrixId as any;
 
         // Build approval chain from history and matrix levels
+        // Include levels from BOTH matrix and history so skipped levels (e.g. self-approval) are never missed
         if (matrix && matrix.levels) {
-          const sortedLevels = [...matrix.levels].sort((a: any, b: any) => a.levelNumber - b.levelNumber);
+          const matrixLevelNumbers = new Set((matrix.levels as any[]).map((l: any) => l.levelNumber ?? l.level));
+          const historyLevelNumbers = new Set((approvalInstance.history || []).map((h: any) => h.levelNumber ?? h.level));
+          const allLevelNumbers = [...new Set([...matrixLevelNumbers, ...historyLevelNumbers])].sort((a, b) => a - b);
 
-          for (const level of sortedLevels) {
-            if (!level.enabled) continue;
+          const levelsMap = new Map<number, any>();
+          for (const l of (matrix.levels as any[])) {
+            const num = l.levelNumber ?? l.level;
+            if (num != null) levelsMap.set(Number(num), l);
+          }
 
-            // Get history entries for this level
+          for (const levelNum of allLevelNumbers) {
+            const level = levelsMap.get(levelNum);
+            if (level && level.enabled === false) continue;
+
+            // Get history entries for this level (support both levelNumber and level)
             const levelHistory = (approvalInstance.history || []).filter(
-              (h: any) => h.levelNumber === level.levelNumber
+              (h: any) => (h.levelNumber ?? h.level) === levelNum
             );
 
-            // Get role names for this level
-            const roleIds = level.approverRoleIds || [];
+            // Get role names for this level (from matrix level if available)
+            const roleIds = level?.approverRoleIds || [];
             let roleNames: string[] = [];
 
             // Fetch actual role names from Role model - this is the source of truth
@@ -535,7 +545,7 @@ export class ReportsService {
             } else {
               // Only use generic level-based naming if NO roles are configured in the approval matrix
               // This should rarely happen if approval matrix is properly configured
-              stepName = `Level ${level.levelNumber} Approval`;
+              stepName = `Level ${levelNum} Approval`;
             }
 
             // Map action to frontend expected format
@@ -547,11 +557,11 @@ export class ReportsService {
 
             // Check if this approver is an additional approver from the report's approvers array
             const reportApprover = (report.approvers || []).find(
-              (a: any) => a.level === level.levelNumber && a.isAdditionalApproval === true
+              (a: any) => a.level === levelNum && a.isAdditionalApproval === true
             );
 
             approvalChain.push({
-              level: level.levelNumber,
+              level: levelNum,
               step: stepName,
               role: roleNameDisplay, // Actual role names from Role model
               roleIds: roleIds,
@@ -561,7 +571,8 @@ export class ReportsService {
               userId: approverId ? { name: approverName } : null, // Frontend may check userId.name
               decidedAt: decidedAt,
               comment: comment, // Frontend expects 'comment'
-              action: mappedAction, // Frontend expects 'approve', 'reject', 'request_changes'
+              action: mappedAction, // Frontend expects 'approve', 'reject', 'request_changes', 'skipped'
+              skipped: mappedAction === 'skipped', // Explicit flag for self-approval skipped levels
               isAdditionalApproval: reportApprover ? true : false,
               triggerReason: reportApprover?.triggerReason || null,
               approvalRuleId: reportApprover?.approvalRuleId || null
