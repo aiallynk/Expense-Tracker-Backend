@@ -463,6 +463,7 @@ export class ReportsService {
 
     // Fetch approval instance to get approval chain details
     let approvalChain = [];
+    let approvalChainMeta: { mode: 'PERSONALIZED' | 'MATRIX'; levelsCount: number | null } | null = null;
     try {
       const { ApprovalInstance } = await import('../models/ApprovalInstance');
       const { Role } = await import('../models/Role');
@@ -480,13 +481,21 @@ export class ReportsService {
 
         // Build approval chain from history and matrix levels
         // Include levels from BOTH matrix and history so skipped levels (e.g. self-approval) are never missed
-        if (matrix && matrix.levels) {
-          const matrixLevelNumbers = new Set((matrix.levels as any[]).map((l: any) => l.levelNumber ?? l.level));
+        const effectiveLevels = (approvalInstance as any).effectiveLevels;
+        const hasEffectiveLevels = Array.isArray(effectiveLevels) && effectiveLevels.length > 0;
+        const levelsSource: any[] = hasEffectiveLevels ? effectiveLevels : ((matrix && matrix.levels) ? (matrix.levels as any[]) : []);
+        approvalChainMeta = {
+          mode: hasEffectiveLevels ? 'PERSONALIZED' : 'MATRIX',
+          levelsCount: hasEffectiveLevels ? effectiveLevels.length : null,
+        };
+
+        if (levelsSource && levelsSource.length > 0) {
+          const levelNumsFromConfig = new Set(levelsSource.map((l: any) => l.levelNumber ?? l.level).filter((n: any) => n != null));
           const historyLevelNumbers = new Set((approvalInstance.history || []).map((h: any) => h.levelNumber ?? h.level));
-          const allLevelNumbers = [...new Set([...matrixLevelNumbers, ...historyLevelNumbers])].sort((a, b) => a - b);
+          const allLevelNumbers = [...new Set([...levelNumsFromConfig, ...historyLevelNumbers])].map((n) => Number(n)).filter((n) => Number.isFinite(n)).sort((a, b) => a - b);
 
           const levelsMap = new Map<number, any>();
-          for (const l of (matrix.levels as any[])) {
+          for (const l of levelsSource) {
             const num = l.levelNumber ?? l.level;
             if (num != null) levelsMap.set(Number(num), l);
           }
@@ -687,6 +696,7 @@ export class ReportsService {
       toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
       expenses: expensesWithSignedUrls,
       approvers: approversFinal,
+      ...(approvalChainMeta ? { approvalChainMeta } : {}),
       appliedVouchers: appliedVouchers.length > 0 ? appliedVouchers : reportObj.appliedVouchers,
       voucherTotalUsed,
       employeePaidAmount,
