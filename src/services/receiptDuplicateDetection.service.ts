@@ -30,11 +30,13 @@ export class ReceiptDuplicateDetectionService {
    * 
    * @param receiptId - The receipt ID to check
    * @param companyId - Company ID for scoping the check
+   * @param options - Optional: excludeBatchId to exclude receipts from the same batch
    * @returns Duplicate check result with match type (no user data exposed)
    */
   static async checkReceiptDuplicate(
     receiptId: string,
-    companyId: mongoose.Types.ObjectId
+    companyId: mongoose.Types.ObjectId,
+    options?: { excludeBatchId?: string }
   ): Promise<ReceiptDuplicateCheckResult> {
     try {
       const receipt = await Receipt.findById(receiptId)
@@ -53,7 +55,13 @@ export class ReceiptDuplicateDetectionService {
         return { isDuplicate: false };
       }
 
-      // Build query for matching hashes within company
+      // Build query for matching hashes within company.
+      // Use $or: any ONE hash match is enough to flag as duplicate.
+      // NOTE: pHash algorithm was upgraded (old = simple average, new = DCT-based).
+      // Existing receipts may have old-style pHash values that won't match new ones
+      // for the same image, so we cannot require ALL hashes to match ($and).
+      // The aHash algorithm is unchanged and provides reliable cross-version matching.
+      // Batch exclusion + orphan filters handle false positives instead of strict $and.
       const hashConditions: any[] = [];
       
       if (receipt.imagePerceptualHash) {
@@ -71,16 +79,28 @@ export class ReceiptDuplicateDetectionService {
         return { isDuplicate: false };
       }
 
+      // Build the base match filter
+      const baseMatch: any = {
+        _id: { $ne: new mongoose.Types.ObjectId(receiptId) },
+        companyId: companyId,
+        // Only match against confirmed receipts with a linked expense
+        uploadConfirmed: true,
+        expenseId: { $exists: true, $ne: null },
+        $or: hashConditions,
+      };
+
+      // CRITICAL: Exclude receipts from the same batch to prevent
+      // false positives within a single bulk upload
+      if (options?.excludeBatchId) {
+        baseMatch.batchId = { $ne: options.excludeBatchId };
+      }
+
       // Use aggregation pipeline to exclude receipts from rejected expenses
       // This ensures we don't consider rejected expenses as duplicates
       const duplicateReceipts = await Receipt.aggregate([
-        // Match receipts with same hashes in same company (excluding current receipt)
+        // Match receipts with same hashes in same company (excluding current receipt and same batch)
         {
-          $match: {
-            _id: { $ne: new mongoose.Types.ObjectId(receiptId) },
-            companyId: companyId,
-            $or: hashConditions,
-          },
+          $match: baseMatch,
         },
         // Lookup expense to check status
         {
@@ -114,15 +134,19 @@ export class ReceiptDuplicateDetectionService {
             preserveNullAndEmptyArrays: true,
           },
         },
-        // Filter out receipts from rejected expenses/reports
+        // Only consider receipts that have a VALID linked expense
+        // (not orphaned, not rejected, not deleted)
+        // Receipts without an expense could be orphaned uploads or previous
+        // duplicates that were never saved — they should NOT trigger duplicate flags
         {
           $match: {
+            // Must have an expense linked
+            expense: { $exists: true },
+            // Expense is not rejected / deleted
+            'expense.status': { $nin: ['REJECTED', 'DELETED'] },
+            // If report exists, it must not be rejected
             $or: [
-              // Receipt has no expense (standalone)
-              { expense: { $exists: false } },
-              // Expense exists but is not rejected
-              { 'expense.status': { $ne: 'REJECTED' } },
-              // Report exists and is not rejected
+              { report: { $exists: false } },
               { 'report.status': { $ne: ExpenseReportStatus.REJECTED } },
             ],
           },

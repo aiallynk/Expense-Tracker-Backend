@@ -10,6 +10,7 @@ export enum SuperAdminEvent {
   SUBSCRIPTION_PLAN_UPDATED = 'super-admin:subscription-plan-updated',
   SYSTEM_ANALYTICS_UPDATE = 'super-admin:system-analytics-update',
   SYSTEM_ANALYTICS_REQUEST = 'super-admin:system-analytics-request',
+  AI_USAGE_UPDATE = 'super-admin:ai-usage-update',
   LOG_ENTRY = 'super-admin:log-entry',
   SETTINGS_UPDATED = 'super-admin:settings-updated',
   BACKUP_CREATED = 'super-admin:backup-created',
@@ -48,6 +49,19 @@ export const emitSubscriptionPlanUpdated = (plan: any) => {
 export const emitSystemAnalyticsUpdate = (analytics: any) => {
   emitToSuperAdmin(SuperAdminEvent.SYSTEM_ANALYTICS_UPDATE, analytics);
   logger.debug('Emitted system analytics update');
+};
+
+// Emit AI usage update (real-time token tracking)
+export const emitAiUsageUpdate = (payload: {
+  companyId: string;
+  feature: string;
+  model: string;
+  totalTokens: number;
+  costUsd: number;
+  timestamp: string;
+}) => {
+  emitToSuperAdmin(SuperAdminEvent.AI_USAGE_UPDATE, payload);
+  logger.debug('Emitted AI usage update');
 };
 
 // Emit log entries

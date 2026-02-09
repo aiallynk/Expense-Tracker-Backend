@@ -3,7 +3,8 @@ import mongoose from 'mongoose';
 
 import { getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
-import { openaiClient, getVisionModel } from '../config/openai';
+import { getVisionModel } from '../config/openai';
+import { callOpenAI } from './openaiWrapper.service';
 import { OcrJob, IOcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
 import { OcrJobStatus } from '../utils/enums';
@@ -21,29 +22,34 @@ import {
   extractNotesFromLineItems,
 } from './ocr/ocrPostProcess.service';
 
-/** Update Batch progress and emit batch:progress when a receipt completes (success or failure). */
+/** Update Batch progress atomically and emit batch:progress when a receipt completes (success or failure). */
 async function updateBatchProgressAndEmit(userId: string, batchId: string, isSuccess: boolean): Promise<void> {
   try {
-    const batch = await Batch.findOne({ batchId }).exec();
+    const batch = await Batch.findOneAndUpdate(
+      { batchId },
+      {
+        $inc: {
+          completedReceipts: isSuccess ? 1 : 0,
+          failedReceipts: isSuccess ? 0 : 1,
+        },
+      },
+      { new: true }
+    ).exec();
     if (!batch) return;
-    if (isSuccess) {
-      batch.completedReceipts = (batch.completedReceipts || 0) + 1;
-    } else {
-      batch.failedReceipts = (batch.failedReceipts || 0) + 1;
-    }
     const completed = batch.completedReceipts || 0;
     const failed = batch.failedReceipts || 0;
     const total = batch.totalReceipts || 0;
+    let status = batch.status;
     if (completed + failed >= total) {
-      batch.status = failed > 0 ? BatchStatus.PARTIAL : BatchStatus.COMPLETED;
+      status = failed > 0 ? BatchStatus.PARTIAL : BatchStatus.COMPLETED;
+      await Batch.findByIdAndUpdate(batch._id, { status }).exec();
     }
-    await batch.save();
     emitBatchProgress(userId, {
       batchId: batch.batchId,
       totalReceipts: total,
       completedReceipts: completed,
       failedReceipts: failed,
-      status: batch.status as 'UPLOADING' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL',
+      status: status as 'UPLOADING' | 'PROCESSING' | 'COMPLETED' | 'PARTIAL',
     });
   } catch (err: any) {
     logger.warn({ error: err?.message, batchId }, 'OCR: Failed to update batch progress (non-blocking)');
@@ -352,6 +358,21 @@ export class OcrService {
       // Generate presigned GET URL (5 min expiry) for OpenAI to access image directly
       const presignedUrl = await getPresignedDownloadUrl('receipts', receiptPopulated.storageKey, 300);
 
+      // Resolve companyId and userId for AI usage tracking
+      let companyIdForTracking = 'unknown';
+      let userIdForTracking = userId || 'unknown';
+      if (receiptDoc?.expenseId) {
+        const report = (receiptDoc.expenseId as any).reportId as any;
+        if (report?.userId) {
+          userIdForTracking = report.userId.toString();
+          const { User } = await import('../models/User');
+          const userForTracking = await User.findById(report.userId).select('companyId').exec();
+          if (userForTracking?.companyId) {
+            companyIdForTracking = (userForTracking.companyId as mongoose.Types.ObjectId).toString();
+          }
+        }
+      }
+
       // Track OpenAI API call time
       const openaiStartTime = Date.now();
 
@@ -366,7 +387,9 @@ export class OcrService {
           const response = await this.callOpenAIVisionWithTimeout(
             presignedUrl,
             receiptPopulated.mimeType,
-            config.ocr.timeoutMs
+            config.ocr.timeoutMs,
+            companyIdForTracking,
+            userIdForTracking
           );
           ocrResult = response.result;
           tokenUsage = response.usage;
@@ -478,7 +501,8 @@ export class OcrService {
           try {
             const receiptDupResult = await ReceiptDuplicateDetectionService.checkReceiptDuplicate(
               receiptIdStr,
-              receiptDocUpdated.companyId as mongoose.Types.ObjectId
+              receiptDocUpdated.companyId as mongoose.Types.ObjectId,
+              receiptDocUpdated.batchId ? { excludeBatchId: receiptDocUpdated.batchId } : undefined
             );
             if (receiptDupResult.isDuplicate && receiptDocUpdated.expenseId) {
               const { Expense } = await import('../models/Expense');
@@ -777,7 +801,9 @@ export class OcrService {
   private static async callOpenAIVisionWithTimeout(
     presignedUrl: string,
     _mimeType: string,
-    timeoutMs: number
+    timeoutMs: number,
+    companyId: string,
+    userId: string
   ): Promise<{ result: OcrResult; usage?: { total_tokens: number } }> {
     // Create timeout promise
     const timeoutPromise = new Promise<never>((_, reject) => {
@@ -789,7 +815,7 @@ export class OcrService {
     // Race between OCR call and timeout (gpt-4o-mini only - no fallback)
     try {
       return await Promise.race([
-        this.callOpenAIVision(presignedUrl, _mimeType, getVisionModel()),
+        this.callOpenAIVision(presignedUrl, _mimeType, getVisionModel(), companyId, userId),
         timeoutPromise,
       ]);
     } catch (error: any) {
@@ -807,7 +833,9 @@ export class OcrService {
   private static async callOpenAIVision(
     presignedUrl: string,
     _mimeType: string,
-    model: string = getVisionModel()
+    model: string = getVisionModel(),
+    companyId: string,
+    userId: string
   ): Promise<{ result: OcrResult; usage?: { total_tokens: number } }> {
     const prompt = `Extract receipt data from this image. The receipt may be PRINTED or HANDWRITTEN, and may be in English, Hindi, Marathi, or other Indian languages. Return JSON only:
 {
@@ -840,10 +868,12 @@ TRANSACTION / INVOICE NUMBER (CRITICAL — extract as accurately as possible):
 - If the field is clearly present but in an unusual format, still extract the raw string and add "invoice_number" to doubtful_fields if uncertain.
 
 DATE EXTRACTION - CRITICAL:
-- Support formats: dd/mm/yyyy, dd-mm-yyyy, mm/dd/yyyy, yyyy-mm-dd, and 2-digit year (dd-mm-yy, dd/mm/yy).
-- If the date uses 2-digit year (e.g. 26-01-23, 15/03/24), convert to YYYY-MM-DD using sensible century (e.g. 23 → 2023, 24 → 2024) and set "date_review_recommended": true so the user can confirm.
-- If day > 12, that number is the day (not month). For INR/Indian receipts, prefer dd/mm/yyyy when ambiguous.
-- Always return date in YYYY-MM-DD. If format is ambiguous (e.g. 01-02-24 could be Jan 2 or Feb 1), pick the most likely and set date_review_recommended: true.
+- Support formats: dd/mm/yyyy, dd-mm-yyyy, mm/dd/yyyy, yyyy-mm-dd, yyyy/mm/dd, dd.mm.yyyy, and 2-digit year (dd-mm-yy, dd/mm/yy, mm-dd-yy).
+- Locale rules: INR/Indian receipts → prefer dd/mm/yyyy (e.g. 15/03/2024 = 15 Mar 2024). USD/US receipts → prefer mm/dd/yyyy (e.g. 03/15/2024 = 15 Mar 2024).
+- If day > 12, that number is definitely the day (e.g. 26-01-23 → 26 Jan 2023). Receipts are rarely from the future; prefer past or today.
+- If the date uses 2-digit year (e.g. 26-01-23, 15/03/24), convert to YYYY-MM-DD using sensible century (23→2023, 24→2024) and set "date_review_recommended": true.
+- Ambiguous formats (e.g. 01-02-24, 05/06/24): use currency/vendor locale. INR/India → dd/mm. USD/US → mm/dd. Always set date_review_recommended: true when ambiguous.
+- Always return date in YYYY-MM-DD. Validate: year 1900-2100, month 01-12, day 01-31. Invalid dates → return null and add "date" to doubtful_fields.
 
 EXCHANGE RATE:
 - If the receipt shows an exchange rate (e.g. "1 USD = 83.50 INR"), extract it as a number in "exchange_rate". Otherwise null.
@@ -862,17 +892,17 @@ LINE ITEMS:
 If unreadable, return null. No explanations.`;
 
     try {
-      // OpenAI vision API format
-      const response = await openaiClient.chat.completions.create({
+      // OpenAI vision API via central wrapper (tracks usage for Super Admin)
+      const response = await callOpenAI({
+        companyId,
+        userId,
+        feature: 'OCR',
         model,
         messages: [
           {
             role: 'user',
             content: [
-              {
-                type: 'text',
-                text: prompt
-              },
+              { type: 'text', text: prompt },
               {
                 type: 'image_url',
                 image_url: {
@@ -884,8 +914,8 @@ If unreadable, return null. No explanations.`;
           },
         ],
         max_tokens: 2000,
-        response_format: { type: 'json_object' }, // Force JSON response format
-        temperature: 0.0, // Zero temperature for fastest, most consistent results
+        response_format: { type: 'json_object' },
+        temperature: 0.0,
       });
 
       const content = response.choices[0]?.message?.content;

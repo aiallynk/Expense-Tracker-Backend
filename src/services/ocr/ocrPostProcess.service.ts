@@ -2,7 +2,7 @@ import mongoose from 'mongoose';
 
 import { Category, CategoryStatus } from '../../models/Category';
 import { config } from '../../config/index';
-import { openaiClient } from '../../config/openai';
+import { callOpenAI } from '../openaiWrapper.service';
 import { logger } from '@/config/logger';
 
 const AI_CATEGORY_TIMEOUT_MS = 10000;
@@ -54,11 +54,11 @@ const VENDOR_SYNONYM_KEYWORDS: Record<string, string[]> = {
   construction: ['cement', 'plywood', 'doors', 'windows', 'building material', 'furniture', 'suppliers', 'pipes', 'nails', 'bolts'],
   office: ['stationery', 'stationary', 'office supplies', 'xerox', 'computer stationery', 'pen', 'pencil', 'paper', 'folder', 'file'],
   'office supplies': ['stationery', 'stationary', 'xerox', 'computer stationery', 'pen', 'pencil', 'paper', 'folder', 'file'],
-  groceries: ['grocery', 'supermarket', 'provisions', 'grocery store'],
-  medical: ['medical', 'pharmacy', 'chemist', 'drug'],
+  groceries: ['grocery', 'supermarket', 'provisions', 'grocery store', 'big bazaar', 'dmart', 'reliance fresh', 'more supermarket', 'spencer', 'nilgiris'],
+  medical: ['medical', 'pharmacy', 'chemist', 'drug', 'apollo', 'apollo pharmacy', 'medplus', 'netmeds', '1mg', 'pharmeasy', 'healthkart', 'hospital', 'clinic'],
   travel: ['travels', 'tour', 'tours', 'tourism', 'cab', 'booking', 'airline', 'airlines', 'flight', 'flights', 'hotel', 'hotels', 'motel', 'resort', 'resorts', 'stay', 'accommodation', 'lodge', 'lodging', 'inn', 'guest house', 'guesthouse', 'hostel', 'homestay', 'room charges', 'room', 'suite', 'booking.com', 'makemytrip', 'goibibo', 'airbnb', 'oyo', 'treebo', 'fabhotels', 'cleartrip', 'yatra', 'expedia', 'agoda', 'trivago', 'indigo', 'spicejet', 'air india', 'vistara', 'go air', 'taxi', 'uber', 'ola', 'rapido', 'rail', 'railway', 'train', 'ticket', 'bus', 'travel agency', 'travel agent'],
-  fuel: ['petrol', 'petrolium', 'diesel', 'gas station', 'filling station', 'fuel', 'petrol pump'],
-  food: ['restaurant', 'cafe', 'bakery', 'kitchen', 'dining', 'meal', 'lunch', 'dinner', 'breakfast', 'food', 'sweet', 'emporio'],
+  fuel: ['petrol', 'petrolium', 'diesel', 'gas station', 'filling station', 'fuel', 'petrol pump', 'hp petrol', 'iocl', 'bharat petrol', 'shell', 'reliance petroleum'],
+  food: ['restaurant', 'cafe', 'bakery', 'kitchen', 'dining', 'meal', 'lunch', 'dinner', 'breakfast', 'food', 'sweet', 'emporio', 'swiggy', 'zomato', 'dominos', 'mcdonalds', 'kfc', 'pizza', 'hotel', 'dhaba', 'canteen', 'mess'],
   'transport charges': ['transport only', 'delivery', 'freight', 'tempo', 'logistics', 'transportation', 'courier', 'shipping', 'cargo'],
   'weighbridge expenses': ['weighbridge', 'peb', 'tmt', 'steel', 'weigh bridge'],
   weighbridge: ['weighbridge', 'peb', 'tmt', 'steel'],
@@ -360,16 +360,17 @@ Return JSON only, no other text:
     const timeoutPromise = new Promise<never>((_, reject) =>
       setTimeout(() => reject(new Error('AI category inference timeout')), AI_CATEGORY_TIMEOUT_MS)
     );
-    const aiPromise = openaiClient.chat.completions.create({
+    const aiPromise = callOpenAI({
+      companyId: companyId?.toString() || 'unknown',
+      userId: 'unknown',
+      feature: 'AI_ASSIST',
       model: 'gpt-4o-mini',
-      messages: [
-        { role: 'user', content: prompt },
-      ],
+      messages: [{ role: 'user', content: prompt }],
       max_tokens: 150,
       temperature: 0.1,
       response_format: { type: 'json_object' as const },
     });
-    const response = await Promise.race([aiPromise, timeoutPromise]) as Awaited<typeof aiPromise>;
+    const response = await Promise.race([aiPromise, timeoutPromise]);
     const content = response.choices[0]?.message?.content;
     if (!content) return null;
 

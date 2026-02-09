@@ -7,7 +7,7 @@ import sharp from 'sharp';
 
 import { s3Client, getS3Bucket } from '../config/aws';
 import { config } from '../config/index';
-import { openaiClient } from '../config/openai';
+import { callOpenAI } from './openaiWrapper.service';
 import { Category } from '../models/Category';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
@@ -86,6 +86,27 @@ export class DocumentProcessingService {
     this.ocrSemaphore.count--;
   }
 
+  /** Normalize date string to YYYY-MM-DD. Handles DD-MM-YYYY, DD/MM/YYYY, YYYY-MM-DD. */
+  private static normalizeDateToYYYYMMDD(dateStr: string): string | null {
+    if (!dateStr || typeof dateStr !== 'string') return null;
+    const s = dateStr.trim();
+    if (!s) return null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s) && DateUtils.isValidDateString(s)) return s;
+    const dmy = s.match(/^(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})$/);
+    if (dmy) {
+      const [, d, m, y] = dmy;
+      const normalized = `${y}-${m!.padStart(2, '0')}-${d!.padStart(2, '0')}`;
+      return DateUtils.isValidDateString(normalized) ? normalized : null;
+    }
+    const iso = s.match(/^(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})/);
+    if (iso) {
+      const [, y, m, d] = iso;
+      const normalized = `${y}-${m!.padStart(2, '0')}-${d!.padStart(2, '0')}`;
+      return DateUtils.isValidDateString(normalized) ? normalized : null;
+    }
+    return null;
+  }
+
   private static normalizeAiReceipt(raw: any): ExtractedReceipt {
     // Extract invoice ID from multiple possible fields including UPI Reference, Transaction ID, etc.
     const invoiceId =
@@ -111,7 +132,16 @@ export class DocumentProcessingService {
       raw?.order_id ??
       raw?.orderId;
 
-    const date = raw?.date ?? raw?.invoiceDate ?? raw?.invoice_date;
+    let date = raw?.date ?? raw?.invoiceDate ?? raw?.invoice_date;
+    if (date != null) {
+      const dateStr = String(date).trim();
+      if (DateUtils.isValidDateString(dateStr)) {
+        date = dateStr;
+      } else {
+        const normalized = this.normalizeDateToYYYYMMDD(dateStr);
+        date = normalized ?? undefined;
+      }
+    }
 
     // Build notes from lineItems as comma-separated item descriptions (not "desc: amt")
     let notes = raw?.notes;
@@ -125,7 +155,7 @@ export class DocumentProcessingService {
     return {
       ...raw,
       invoiceId: invoiceId != null ? String(invoiceId).trim() : undefined,
-      date: date != null ? String(date).trim() : raw?.date,
+      date: date ?? undefined,
       notes: notes || undefined,
     };
   }
@@ -259,7 +289,7 @@ export class DocumentProcessingService {
 
       // For multi-receipt PDFs, we use AI to analyze the entire PDF
       // and identify individual receipts
-      const receipts = await this.extractReceiptsFromPdfWithAI(buffer, pdfData, storageKey);
+      const receipts = await this.extractReceiptsFromPdfWithAI(buffer, pdfData, storageKey, companyId?.toString(), userId);
 
       result.receipts = receipts;
       await this.applyOcrPostProcessToReceipts(result.receipts, companyId);
@@ -342,7 +372,9 @@ export class DocumentProcessingService {
   private static async extractReceiptsFromPdfWithAI(
     buffer: Buffer,
     pdfData: PdfParseResult,
-    storageKey?: string
+    storageKey?: string,
+    companyId?: string,
+    userId?: string
   ): Promise<ExtractedReceipt[]> {
     // If OCR is disabled, return empty
     if (config.ocr.disableOcr) {
@@ -408,8 +440,11 @@ Rules:
             const fallbackModel = 'gpt-4o';
 
             try {
-              // Try primary model first
-              const response = await openaiClient.chat.completions.create({
+              // Try primary model first (via central wrapper for usage tracking)
+              const response = await callOpenAI({
+                companyId: companyId || 'unknown',
+                userId: userId || 'unknown',
+                feature: 'OCR',
                 model: primaryModel,
                 messages: [
                   {
@@ -456,7 +491,10 @@ Rules:
 
                 // Try fallback model
                 try {
-                  const fallbackResponse = await openaiClient.chat.completions.create({
+                  const fallbackResponse = await callOpenAI({
+                    companyId: companyId || 'unknown',
+                    userId: userId || 'unknown',
+                    feature: 'OCR',
                     model: fallbackModel,
                     messages: [
                       {
@@ -1000,8 +1038,11 @@ Rules:
         let ocrError: any = null;
 
         try {
-          // Try primary model first
-          const response = await openaiClient.chat.completions.create({
+          // Try primary model first (via central wrapper for usage tracking)
+          const response = await callOpenAI({
+            companyId: companyId?.toString() || 'unknown',
+            userId,
+            feature: 'OCR',
             model: primaryModel,
             messages: [
               {
@@ -1051,7 +1092,10 @@ Rules:
 
             // Try fallback model
             try {
-              const fallbackResponse = await openaiClient.chat.completions.create({
+              const fallbackResponse = await callOpenAI({
+                companyId: companyId?.toString() || 'unknown',
+                userId,
+                feature: 'OCR',
                 model: fallbackModel,
                 messages: [
                   {

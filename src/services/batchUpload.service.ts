@@ -161,7 +161,6 @@ export class BatchUploadService {
 
       // Receipt fingerprint is identity: generate image hashes and check duplicate BEFORE creating expense
       let isDuplicateReceipt = false;
-      let duplicateReason: string | undefined;
       if (companyId) {
         receipt.companyId = companyId;
         await receipt.save();
@@ -174,14 +173,26 @@ export class BatchUploadService {
 
           const dupCheck = await ReceiptDuplicateDetectionService.checkReceiptDuplicate(
             (receipt._id as mongoose.Types.ObjectId).toString(),
-            companyId
+            companyId,
+            { excludeBatchId: batchId }
           );
           if (dupCheck.isDuplicate) {
             isDuplicateReceipt = true;
-            duplicateReason = dupCheck.reason ?? 'Duplicate receipt (image match)';
-            logger.info({ receiptId: item.receiptId, matchType: dupCheck.matchType }, 'Batch confirm: duplicate receipt detected before expense creation');
+            logger.info({ receiptId: item.receiptId, matchType: dupCheck.matchType, reason: dupCheck.reason }, 'Batch confirm: duplicate receipt detected — NOT creating expense');
           }
         }
+      }
+
+      // CRITICAL: Never create expense for duplicate receipts — they must never appear on report
+      if (isDuplicateReceipt) {
+        receipt.uploadConfirmed = true;
+        receipt.status = ReceiptStatus.COMPLETED; // Mark as done so batch progress completes
+        if (companyId) receipt.companyId = companyId;
+        await receipt.save();
+        receiptIds.push((receipt._id as mongoose.Types.ObjectId).toString());
+        expenseIds.push(''); // No expense — frontend will show "Duplicate (skipped)"
+        ocrJobIds.push(''); // No OCR job
+        continue;
       }
 
       const expense = new Expense({
@@ -196,7 +207,6 @@ export class BatchUploadService {
         source: ExpenseSource.SCANNED,
         receiptIds: [receipt._id as mongoose.Types.ObjectId],
         receiptPrimaryId: receipt._id as mongoose.Types.ObjectId,
-        ...(isDuplicateReceipt ? { duplicateFlag: 'STRONG_DUPLICATE' as const, duplicateReason: duplicateReason ?? 'IMAGE' } : {}),
       });
       const savedExpense = await expense.save();
 
@@ -230,8 +240,8 @@ export class BatchUploadService {
     const batch = await Batch.findOne({ batchId }).exec();
     if (batch) {
       batch.status = BatchStatus.PROCESSING;
-      batch.expenseIds = expenseIds.map((id) => new mongoose.Types.ObjectId(id));
-      batch.ocrJobIds = ocrJobIds;
+      batch.expenseIds = expenseIds.filter(Boolean).map((id) => new mongoose.Types.ObjectId(id));
+      batch.ocrJobIds = ocrJobIds.filter(Boolean);
       await batch.save();
     }
 

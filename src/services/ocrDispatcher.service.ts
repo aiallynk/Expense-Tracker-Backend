@@ -18,6 +18,7 @@ const ocrConfig = config.ocr as {
   controlled?: { maxGlobalOcr: number; maxPerUserOcr: number };
   activeUsersBlastThreshold?: number;
   activeOcrJobsControlledThreshold?: number;
+  lowEndMode?: boolean;
 };
 
 export class OcrDispatcherService {
@@ -40,24 +41,32 @@ export class OcrDispatcherService {
 
   /**
    * Return global and per-user concurrency limits for the given mode.
+   * When lowEndMode is set, use stricter limits (maxPerUserOcr=1).
    */
   static getLimits(mode: OcrDispatcherMode): OcrDispatcherLimits {
-    if (mode === 'BLAST' && ocrConfig.blast) {
-      return {
+    let limits: OcrDispatcherLimits;
+    if (ocrConfig.lowEndMode) {
+      limits = {
+        maxGlobalOcr: 5,
+        maxPerUserOcr: 1,
+      };
+    } else if (mode === 'BLAST' && ocrConfig.blast) {
+      limits = {
         maxGlobalOcr: ocrConfig.blast.maxGlobalOcr,
         maxPerUserOcr: ocrConfig.blast.maxPerUserOcr,
       };
-    }
-    if (ocrConfig.controlled) {
-      return {
+    } else if (ocrConfig.controlled) {
+      limits = {
         maxGlobalOcr: ocrConfig.controlled.maxGlobalOcr,
         maxPerUserOcr: ocrConfig.controlled.maxPerUserOcr,
       };
+    } else {
+      limits = {
+        maxGlobalOcr: config.ocr.maxGlobalOcr,
+        maxPerUserOcr: config.ocr.maxPerUserOcr,
+      };
     }
-    return {
-      maxGlobalOcr: config.ocr.maxGlobalOcr,
-      maxPerUserOcr: config.ocr.maxPerUserOcr,
-    };
+    return limits;
   }
 
   /**

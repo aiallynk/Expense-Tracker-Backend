@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { openaiClient } from '../config/openai';
+import { callOpenAI } from './openaiWrapper.service';
 
 import { logger } from '@/config/logger';
 
@@ -34,7 +34,10 @@ export class AIApprovalChainService {
       companyMatrix
     })}`;
 
-    const completion = await openaiClient.chat.completions.create({
+    const completion = await callOpenAI({
+      companyId: (employee as any)?.companyId?.toString?.() || 'unknown',
+      userId: (employee as any)?.userId?.toString?.() || (employee as any)?.id?.toString?.() || 'unknown',
+      feature: 'AI_ASSIST',
       model: 'gpt-4-1106-preview',
       temperature: 0.0,
       max_tokens: 512,

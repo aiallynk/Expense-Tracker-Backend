@@ -5,6 +5,8 @@ import { config } from '../config/index';
 import { logger } from '../config/logger';
 import { OcrDispatcherService } from '../services/ocrDispatcher.service';
 
+export type QueueJobStatus = 'IDLE' | 'QUEUED' | 'PROCESSING' | 'SUCCESS' | 'FAILED';
+
 export interface QueueJob {
   jobId: string;
   receiptId: string;
@@ -15,6 +17,8 @@ export interface QueueJob {
   /** Batch upload: use BLAST limits when batchSize > 1 */
   batchId?: string;
   batchSize?: number;
+  /** Job state for logging (IDLE → QUEUED → PROCESSING → SUCCESS | FAILED) */
+  status?: QueueJobStatus;
 }
 
 export interface QueueAddResult {
@@ -50,6 +54,8 @@ class OcrQueue {
   private queuedJobs: Map<string, QueueJob> = new Map();
   // Queue stats logging interval
   private statsLogInterval?: NodeJS.Timeout;
+  // Track cleaned jobs to avoid double cleanup (e.g. timeout + throw)
+  private cleanedJobIds: Set<string> = new Set();
 
   constructor() {
     // Queue task timeout: at least 30s so OCR (often 5–10s per receipt) doesn't get killed by p-queue
@@ -92,8 +98,10 @@ class OcrQueue {
     if (shouldThrottle.throttle) {
       // Throttled - add to FIFO queue
       const position = this.throttledQueue.length + 1;
+      job.status = 'QUEUED';
       this.throttledQueue.push({ job, processor });
-      
+      logger.debug({ jobId: job.jobId, receiptId: job.receiptId, position }, '[OCR] job_queued');
+
       // Track for position calculation
       if (job.userId) {
         const userQueue = this.userQueues.get(job.userId) || [];
@@ -102,9 +110,11 @@ class OcrQueue {
         this.jobUserMap.set(job.jobId, job.userId);
         this.queuedJobs.set(job.jobId, job);
       }
-      
+
       return { queued: true, position };
     }
+
+    logger.debug({ jobId: job.jobId, receiptId: job.receiptId }, '[OCR] job_added');
 
     // Not throttled - start immediately
     return this.startOcrJob(job, processor);
@@ -141,10 +151,11 @@ class OcrQueue {
       ? 'BLAST'
       : OcrDispatcherService.getMode(activeUserCount, activeOcrJobCount);
     const limits = OcrDispatcherService.getLimits(mode);
-    // For batch uploads: allow at least batchSize concurrent per user so all batch receipts run
+    // For batch uploads: allow at least batchSize concurrent so ALL receipts in batch run (fixes "not extracting after 6")
     if (job?.batchSize && job.batchSize > 1) {
       const effectivePerUser = Math.max(limits.maxPerUserOcr, job.batchSize);
-      return { maxGlobalOcr: limits.maxGlobalOcr, maxPerUserOcr: effectivePerUser };
+      const effectiveGlobal = Math.max(limits.maxGlobalOcr, job.batchSize);
+      return { maxGlobalOcr: effectiveGlobal, maxPerUserOcr: effectivePerUser };
     }
     return limits;
   }
@@ -172,9 +183,13 @@ class OcrQueue {
 
   /**
    * Decrement counters and clean up after a job finishes (success, failure, or timeout).
-   * Must be called from both the task's finally and from queue.add().catch() so timeout/abort doesn't leak.
+   * Idempotent: safe to call multiple times for the same job.
+   * Always calls processNextThrottledJob so queue keeps draining (one job fail does not block queue).
    */
   private decrementAndCleanup(job: QueueJob): void {
+    if (this.cleanedJobIds.has(job.jobId)) return;
+    this.cleanedJobIds.add(job.jobId);
+
     this.globalActiveOcr = Math.max(0, this.globalActiveOcr - 1);
     if (job.userId) {
       const userCount = this.perUserActiveOcr.get(job.userId) || 0;
@@ -203,21 +218,44 @@ class OcrQueue {
       this.jobUserMap.set(job.jobId, job.userId);
     }
 
+    job.status = 'PROCESSING';
+    job.startTime = new Date();
+    logger.debug({ jobId: job.jobId, receiptId: job.receiptId }, '[OCR] job_started');
+
     // Store processor
     this.jobProcessors.set(job.jobId, processor);
+
+    const maxRetries = (config.ocr as { maxRetries?: number }).maxRetries ?? 1;
 
     // Add to p-queue (non-blocking). Catch timeout/rejection so we don't get unhandled promise rejection.
     this.queue
       .add(async () => {
+        let lastError: Error | undefined;
         try {
-          job.startTime = new Date();
-          await processor(job);
+          for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+              await processor(job);
+              job.status = 'SUCCESS';
+              logger.debug({ jobId: job.jobId, receiptId: job.receiptId, attempt }, '[OCR] job_completed');
+              return;
+            } catch (err) {
+              lastError = err as Error;
+              job.attempts = (job.attempts || 0) + 1;
+              if (attempt < maxRetries) {
+                logger.warn({ jobId: job.jobId, receiptId: job.receiptId, attempt, maxRetries }, '[OCR] job_retry');
+              } else {
+                job.status = 'FAILED';
+                logger.error({ jobId: job.jobId, receiptId: job.receiptId, attempt }, '[OCR] job_failed');
+                throw lastError;
+              }
+            }
+          }
         } finally {
           this.decrementAndCleanup(job);
         }
       })
       .catch((err: Error) => {
-        this.decrementAndCleanup(job);
+        this.decrementAndCleanup(job); // In case task was aborted (e.g. timeout) before finally ran
         const isTimeout = err?.name === 'TimeoutError' || err?.message?.includes('timed out');
         logger.error(
           { err, jobId: job.jobId, receiptId: job.receiptId, isTimeout },
@@ -388,6 +426,7 @@ class OcrQueue {
     this.userQueues.clear();
     this.jobUserMap.clear();
     this.queuedJobs.clear();
+    this.cleanedJobIds.clear();
     this.perUserActiveOcr.clear();
     this.globalActiveOcr = 0;
   }

@@ -97,3 +97,10 @@ export enum BroadcastTargetType {
   COMPANY = 'COMPANY',
   ROLE = 'ROLE', // Future use
 }
+
+export enum AiFeature {
+  OCR = 'OCR',
+  CHAT = 'CHAT',
+  SUMMARY = 'SUMMARY',
+  AI_ASSIST = 'AI_ASSIST',
+}

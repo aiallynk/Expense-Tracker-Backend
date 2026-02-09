@@ -23,6 +23,14 @@ router.get('/dashboard/stats', requireServiceAccountReadOnly, validateServiceAcc
 router.get('/system-analytics', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getSystemAnalytics);
 router.get('/system-analytics/detailed', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getSystemAnalyticsDetailed);
 
+// AI Usage Analytics (read-only)
+router.get('/ai-usage/snapshot', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageSnapshot);
+router.get('/ai-usage/summary', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageSummary);
+router.get('/ai-usage/companies', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageTopCompanies);
+router.get('/ai-usage/features', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageByFeature);
+router.get('/ai-usage/models', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageByModel);
+router.get('/ai-usage/trends', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageTrends);
+
 // Other routes require SUPER_ADMIN role (no service accounts)
 router.use(requireRole(UserRole.SUPER_ADMIN));
 

@@ -22,25 +22,77 @@ export interface ImageHashes {
 }
 
 /**
- * Generate perceptual hash (pHash) using DCT (Discrete Cosine Transform)
- * pHash is more robust to minor image modifications
+ * 1-D DCT-II for a row of N values.
+ * Returns the DCT coefficients.
  */
-function generatePerceptualHash(pixels: number[], _width: number, _height: number): string {
-  // For simplicity, we'll use a simplified pHash algorithm
-  // Resize to 8x8, calculate DCT, use low-frequency components
-  // This is a simplified version - full DCT would be more accurate but computationally expensive
-  
-  // Calculate average of all pixels
-  const avg = pixels.reduce((sum, p) => sum + p, 0) / pixels.length;
-  
-  // Create hash bits: compare each pixel to average
+function dct1d(row: number[]): number[] {
+  const N = row.length;
+  const result: number[] = new Array(N);
+  for (let k = 0; k < N; k++) {
+    let sum = 0;
+    for (let n = 0; n < N; n++) {
+      sum += row[n] * Math.cos((Math.PI / N) * (n + 0.5) * k);
+    }
+    result[k] = sum;
+  }
+  return result;
+}
+
+/**
+ * Generate perceptual hash (pHash) using DCT (Discrete Cosine Transform)
+ * Uses a 32x32 resize → 2-D DCT → top-left 8x8 low-frequency coefficients → median threshold.
+ * This is significantly more discriminating than aHash for similar-looking receipts.
+ */
+function generatePerceptualHash(pixels: number[], width: number, height: number): string {
+  // Apply 2D DCT: first along rows, then along columns
+  const rows: number[][] = [];
+  for (let y = 0; y < height; y++) {
+    const row: number[] = [];
+    for (let x = 0; x < width; x++) {
+      row.push(pixels[y * width + x]);
+    }
+    rows.push(dct1d(row));
+  }
+
+  // DCT along columns
+  const dctMatrix: number[][] = [];
+  for (let x = 0; x < width; x++) {
+    const col: number[] = [];
+    for (let y = 0; y < height; y++) {
+      col.push(rows[y][x]);
+    }
+    const dctCol = dct1d(col);
+    for (let y = 0; y < height; y++) {
+      if (!dctMatrix[y]) dctMatrix[y] = [];
+      dctMatrix[y][x] = dctCol[y];
+    }
+  }
+
+  // Extract top-left 8x8 low-frequency coefficients (exclude DC at [0][0])
+  const lowFreq: number[] = [];
+  const size = Math.min(8, width, height);
+  for (let y = 0; y < size; y++) {
+    for (let x = 0; x < size; x++) {
+      if (y === 0 && x === 0) continue; // skip DC coefficient
+      lowFreq.push(dctMatrix[y][x]);
+    }
+  }
+
+  // Compute median
+  const sorted = [...lowFreq].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length % 2 === 0
+    ? (sorted[mid - 1] + sorted[mid]) / 2
+    : sorted[mid];
+
+  // Create hash bits: compare each coefficient to median
   let hash = 0n;
-  for (let i = 0; i < pixels.length; i++) {
-    if (pixels[i] >= avg) {
+  for (let i = 0; i < lowFreq.length && i < 64; i++) {
+    if (lowFreq[i] >= median) {
       hash |= 1n << BigInt(i);
     }
   }
-  
+
   // Convert to hex string (64 bits = 16 hex chars)
   return hash.toString(16).padStart(16, '0');
 }
@@ -99,12 +151,28 @@ export class ReceiptHashService {
     mimeType: string
   ): Promise<ImageHashes> {
     try {
-      // Use sharp to process image
-      // Resize to 8x8 pixels (grayscale) for hash calculation
       const image = sharp(buffer);
-      
-      // Resize to 8x8 and convert to grayscale
-      const resized = await image
+
+      // --- pHash: resize to 32x32 for DCT-based perceptual hash ---
+      const resized32 = await image
+        .clone()
+        .resize(32, 32, {
+          fit: 'fill',
+          kernel: sharp.kernel.lanczos3,
+        })
+        .greyscale()
+        .raw()
+        .toBuffer();
+
+      const pixels32: number[] = [];
+      for (let i = 0; i < resized32.length; i++) {
+        pixels32.push(resized32[i]);
+      }
+      const perceptualHash = generatePerceptualHash(pixels32, 32, 32);
+
+      // --- aHash: resize to 8x8 for average hash ---
+      const resized8 = await image
+        .clone()
         .resize(8, 8, {
           fit: 'fill',
           kernel: sharp.kernel.lanczos3,
@@ -113,15 +181,11 @@ export class ReceiptHashService {
         .raw()
         .toBuffer();
 
-      // Extract pixel values (8x8 = 64 pixels)
-      const pixels: number[] = [];
-      for (let i = 0; i < resized.length; i++) {
-        pixels.push(resized[i]);
+      const pixels8: number[] = [];
+      for (let i = 0; i < resized8.length; i++) {
+        pixels8.push(resized8[i]);
       }
-
-      // Generate both hashes
-      const perceptualHash = generatePerceptualHash(pixels, 8, 8);
-      const averageHash = generateAverageHash(pixels);
+      const averageHash = generateAverageHash(pixels8);
 
       return {
         perceptualHash,

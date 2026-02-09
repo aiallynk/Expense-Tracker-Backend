@@ -312,7 +312,8 @@ export class ReceiptsService {
           try {
             const duplicateCheck = await ReceiptDuplicateDetectionService.checkReceiptDuplicate(
               receiptId,
-              receiptForHashing.companyId as mongoose.Types.ObjectId
+              receiptForHashing.companyId as mongoose.Types.ObjectId,
+              receiptForHashing.batchId ? { excludeBatchId: receiptForHashing.batchId } : undefined
             );
 
             if (duplicateCheck.isDuplicate && duplicateCheck.matchType) {

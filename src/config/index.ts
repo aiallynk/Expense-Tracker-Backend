@@ -83,6 +83,10 @@ export const config = {
     // Thresholds: switch to CONTROLLED when active users or active OCR jobs exceed these
     activeUsersBlastThreshold: parseInt(process.env.OCR_ACTIVE_USERS_BLAST_THRESHOLD || '10', 10),
     activeOcrJobsControlledThreshold: parseInt(process.env.OCR_ACTIVE_JOBS_CONTROLLED_THRESHOLD || '50', 10),
+    // Low-end mode: stricter limits (maxPerUserOcr=1) when set
+    lowEndMode: process.env.OCR_LOW_END_MODE === 'true',
+    // Queue-level retry: max attempts before marking job FAILED (retry does not double-count batch progress)
+    maxRetries: parseInt(process.env.OCR_QUEUE_MAX_RETRIES || '1', 10),
     // Single retry on failure (manual retry via UI, not automatic)
     retry: 1,
     // Max automatic retry attempts for transient failures (429, 5xx, timeout)

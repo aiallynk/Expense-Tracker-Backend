@@ -15,6 +15,15 @@ import { User } from '../models/User';
 import { AuditService } from '../services/audit.service';
 import { emitSystemAnalyticsUpdate, emitDashboardStatsUpdate, emitCompanyCreated } from '../socket/realtimeEvents';
 import { SystemAnalyticsService } from '../services/systemAnalytics.service';
+import {
+  getSummary,
+  getSnapshot,
+  getTopCompanies,
+  getByFeature,
+  getByModel,
+  getTrends,
+} from '../services/aiTokenUsage.service';
+import type { TimeRange } from '../services/aiTokenUsage.service';
 import { cacheService } from '../services/cache.service';
 import { getUserCompanyId, getCompanyUserIds } from '../utils/companyAccess';
 import { ExpenseReportStatus, ExpenseStatus, OcrJobStatus, UserRole, UserStatus , AuditAction } from '../utils/enums';
@@ -365,6 +374,66 @@ export class SuperAdminController {
     res.status(200).json({
       success: true,
       data: analyticsData,
+    });
+  });
+
+  // AI Usage Summary
+  static getAiUsageSummary = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const timeRange = (req.query.range as TimeRange) || '30d';
+    const data = await getSummary(timeRange);
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  // AI Usage Snapshot (Redis-only, instant)
+  static getAiUsageSnapshot = asyncHandler(async (_req: AuthRequest, res: Response) => {
+    const data = await getSnapshot();
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  // AI Usage Top Companies
+  static getAiUsageTopCompanies = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const limit = parseInt(req.query.limit as string) || 10;
+    const timeRange = (req.query.range as TimeRange) || '30d';
+    const data = await getTopCompanies(limit, timeRange);
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  // AI Usage By Feature
+  static getAiUsageByFeature = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const timeRange = (req.query.range as TimeRange) || '30d';
+    const data = await getByFeature(timeRange);
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  // AI Usage By Model
+  static getAiUsageByModel = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const timeRange = (req.query.range as TimeRange) || '30d';
+    const data = await getByModel(timeRange);
+    res.status(200).json({
+      success: true,
+      data,
+    });
+  });
+
+  // AI Usage Trends
+  static getAiUsageTrends = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const timeRange = (req.query.range as TimeRange) || '30d';
+    const data = await getTrends(timeRange);
+    res.status(200).json({
+      success: true,
+      data,
     });
   });
 
