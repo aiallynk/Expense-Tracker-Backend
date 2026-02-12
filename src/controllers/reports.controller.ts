@@ -116,7 +116,7 @@ export class ReportsController {
 
   static submit = asyncHandler(async (req: AuthRequest, res: Response) => {
     const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    
+
     // Validate reportId format
     if (!reportId || !mongoose.Types.ObjectId.isValid(reportId)) {
       return res.status(400).json({
@@ -124,20 +124,20 @@ export class ReportsController {
         message: 'Invalid report ID format',
       });
     }
-    
-    logger.debug({ 
-      reportId, 
+
+    logger.debug({
+      reportId,
       body: req.body,
-      userId: req.user!.id 
+      userId: req.user!.id
     }, 'Report submit request');
-    
+
     // Support both old field names (advanceCashId, advanceAmount) and new (voucherId, voucherAmount)
     // Only process voucher data if both ID and amount are provided and valid
     const voucherId = req.body.voucherId || req.body.advanceCashId;
     const voucherAmount = req.body.voucherAmount || req.body.advanceAmount;
-    
+
     let submitData: { advanceCashId: string; advanceAmount: number } | undefined = undefined;
-    
+
     // Only process voucher if both ID and amount are provided and valid
     // Check if voucher data exists (not undefined, null, or empty string)
     if (voucherId && voucherAmount !== undefined && voucherAmount !== null && voucherAmount !== '') {
@@ -164,7 +164,7 @@ export class ReportsController {
     } else {
       logger.info('No voucher data provided, submitting report without voucher');
     }
-    
+
     try {
       const report = await ReportsService.submitReport(reportId, req.user!.id, submitData);
 
@@ -275,11 +275,11 @@ export class ReportsController {
         logger.error({ error: error?.message || error, reportId: req.params.id }, 'Error after headers sent in exportExcel');
         return;
       }
-      
+
       // Return JSON error response (not blob) so frontend can parse it
       const statusCode = error.statusCode || 500;
       const message = error.message || 'Failed to export report to Excel';
-      
+
       res.status(statusCode).json({
         success: false,
         message,
@@ -318,11 +318,11 @@ export class ReportsController {
         logger.error({ error: error?.message || error, reportId: req.params.id }, 'Error after headers sent in exportPDF');
         return;
       }
-      
+
       // Return JSON error response (not blob) so frontend can parse it
       const statusCode = error.statusCode || 500;
       const message = error.message || 'Failed to export report to PDF';
-      
+
       res.status(statusCode).json({
         success: false,
         message,
@@ -403,6 +403,127 @@ export class ReportsController {
         success: false,
         message: error.message || 'Failed to get settlement information',
         code: error.code || 'SETTLEMENT_INFO_ERROR',
+      });
+    }
+  });
+
+  // ====================================================
+  // DYNAMIC REPORT GENERATION
+  // ====================================================
+
+  /**
+   * Generate dynamic report data
+   * POST /api/v1/reports/export
+   */
+  static dynamicReportGenerate = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { reportType, projectId, startDate, endDate } = req.body;
+
+    if (!reportType || !startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'reportType, startDate, and endDate are required',
+      });
+    }
+
+    const validTypes = ['daily', 'custom', 'weekly', 'monthly'];
+    if (!validTypes.includes(reportType)) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid reportType. Must be one of: ${validTypes.join(', ')}`,
+      });
+    }
+
+    try {
+      const reportData = await ExportService.generateDynamicReport(
+        { reportType, projectId: projectId || null, startDate, endDate },
+        req
+      );
+
+      return res.status(200).json({
+        success: true,
+        data: reportData,
+      });
+    } catch (error: any) {
+      logger.error({ error: error.message, stack: error.stack }, 'Error generating dynamic report');
+      return res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || 'Failed to generate report',
+      });
+    }
+  });
+
+  /**
+   * Export dynamic report as Excel
+   * POST /api/v1/reports/export/excel
+   */
+  static dynamicReportExportExcel = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { reportType, projectId, startDate, endDate } = req.body;
+
+    if (!reportType || !startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'reportType, startDate, and endDate are required',
+      });
+    }
+
+    try {
+      const buffer = await ExportService.generateDynamicReportXLSX(
+        { reportType, projectId: projectId || null, startDate, endDate },
+        req
+      );
+
+      const typeLabel = reportType.charAt(0).toUpperCase() + reportType.slice(1);
+      const filename = `${typeLabel}_Expense_Report_${new Date().toISOString().split('T')[0]}.xlsx`;
+
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+      return res.status(200).send(buffer);
+    } catch (error: any) {
+      if (res.headersSent) {
+        logger.error({ error: error.message }, 'Error after headers sent in dynamicReportExportExcel');
+        return;
+      }
+      return res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || 'Failed to export report to Excel',
+      });
+    }
+  });
+
+  /**
+   * Export dynamic report as PDF
+   * POST /api/v1/reports/export/pdf
+   */
+  static dynamicReportExportPDF = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { reportType, projectId, startDate, endDate } = req.body;
+
+    if (!reportType || !startDate || !endDate) {
+      return res.status(400).json({
+        success: false,
+        message: 'reportType, startDate, and endDate are required',
+      });
+    }
+
+    try {
+      const buffer = await ExportService.generateDynamicReportPDF(
+        { reportType, projectId: projectId || null, startDate, endDate },
+        req
+      );
+
+      const typeLabel = reportType.charAt(0).toUpperCase() + reportType.slice(1);
+      const filename = `${typeLabel}_Expense_Report_${new Date().toISOString().split('T')[0]}.pdf`;
+
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
+      return res.status(200).send(buffer);
+    } catch (error: any) {
+      if (res.headersSent) {
+        logger.error({ error: error.message }, 'Error after headers sent in dynamicReportExportPDF');
+        return;
+      }
+      return res.status(error.statusCode || 500).json({
+        success: false,
+        message: error.message || 'Failed to export report to PDF',
       });
     }
   });

@@ -743,28 +743,28 @@ export class ExportService {
     const buffer =
       format === 'pdf'
         ? await this.generateReportsListPDF({
-            companyId: companyId?.toString(),
-            companyName,
-            projectName,
-            dateRangeStr,
-            generatedDate,
-            rows,
-            expenseRows,
-            totalReports: reports.length,
-            totalAmount,
-            approvedAmount,
-          })
+          companyId: companyId?.toString(),
+          companyName,
+          projectName,
+          dateRangeStr,
+          generatedDate,
+          rows,
+          expenseRows,
+          totalReports: reports.length,
+          totalAmount,
+          approvedAmount,
+        })
         : await this.generateReportsListXLSX({
-            companyName,
-            projectName,
-            dateRangeStr,
-            generatedDate,
-            rows,
-            expenseRows,
-            totalReports: reports.length,
-            totalAmount,
-            approvedAmount,
-          });
+          companyName,
+          projectName,
+          dateRangeStr,
+          generatedDate,
+          rows,
+          expenseRows,
+          totalReports: reports.length,
+          totalAmount,
+          approvedAmount,
+        });
 
     const ext = format === 'pdf' ? 'pdf' : 'xlsx';
     const safeProject = (projectName || 'project').replace(/[^a-zA-Z0-9-_]/g, '_').slice(0, 40);
@@ -1178,5 +1178,602 @@ export class ExportService {
 
     // Use unified export
     return await this.generateUnifiedXLSX(report as any, expenses);
+  }
+
+  // ====================================================
+  // DYNAMIC REPORT GENERATION (with Report + Expense data)
+  // ====================================================
+
+  /**
+   * Generate dynamic report data using aggregation pipeline.
+   * Joins expenses → ExpenseReports → Users → Projects → Categories.
+   * Returns hierarchical data grouped by report.
+   */
+  static async generateDynamicReport(
+    params: {
+      reportType: string;
+      projectId: string | null;
+      startDate: string;
+      endDate: string;
+    },
+    req: AuthRequest
+  ): Promise<{
+    summary: {
+      totalExpenses: number;
+      totalAmount: number;
+      averagePerDay: number;
+      totalReports: number;
+      projects: string[];
+    };
+    groupedByReport: Record<string, {
+      reportName: string;
+      reportOwner: string;
+      project: string;
+      expenses: any[];
+      subtotal: number;
+    }>;
+    rawData: any[];
+  }> {
+    const { projectId, startDate, endDate } = params;
+
+    const start = new Date(startDate);
+    start.setUTCHours(0, 0, 0, 0);
+    const end = new Date(endDate);
+    end.setUTCHours(23, 59, 59, 999);
+
+    // Build match stage (no project filter here — applied after $lookup on report)
+    const matchStage: any = {
+      expenseDate: { $gte: start, $lte: end },
+      status: { $ne: ExpenseStatus.REJECTED },
+    };
+
+    // Apply company access filter
+    const query = await buildCompanyQuery(req, matchStage, 'users');
+
+    // Aggregation pipeline: Expense → $lookup Report → $lookup User → $lookup Project → $lookup Category
+    const pipeline: any[] = [
+      { $match: query },
+      { $sort: { expenseDate: 1 } },
+      // Lookup parent report
+      {
+        $lookup: {
+          from: 'expensereports',
+          localField: 'reportId',
+          foreignField: '_id',
+          as: '_report',
+        },
+      },
+      { $unwind: { path: '$_report', preserveNullAndEmptyArrays: true } },
+    ];
+
+    // Project filter: match either expense.projectId OR report.projectId (after $lookup)
+    if (projectId && projectId !== 'all') {
+      const projOid = new mongoose.Types.ObjectId(projectId);
+      pipeline.push({
+        $match: {
+          $or: [
+            { projectId: projOid },
+            { '_report.projectId': projOid },
+          ],
+        },
+      });
+    }
+
+    // Continue pipeline: lookup report owner, project details, category
+    pipeline.push(
+      // Lookup report owner (user who created the report)
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_report.userId',
+          foreignField: '_id',
+          as: '_reportOwner',
+        },
+      },
+      { $unwind: { path: '$_reportOwner', preserveNullAndEmptyArrays: true } },
+      // Lookup project on report
+      {
+        $lookup: {
+          from: 'projects',
+          localField: '_report.projectId',
+          foreignField: '_id',
+          as: '_project',
+        },
+      },
+      { $unwind: { path: '$_project', preserveNullAndEmptyArrays: true } },
+      // Lookup category
+      {
+        $lookup: {
+          from: 'categories',
+          localField: 'categoryId',
+          foreignField: '_id',
+          as: '_category',
+        },
+      },
+      { $unwind: { path: '$_category', preserveNullAndEmptyArrays: true } },
+      // Project flat structure
+      {
+        $project: {
+          _id: 1,
+          reportId: 1,
+          reportName: { $ifNull: ['$_report.name', 'Unassigned'] },
+          reportOwner: { $ifNull: ['$_reportOwner.name', '$_reportOwner.email'] },
+          project: { $ifNull: ['$_project.name', '$_report.projectName'] },
+          projectCode: { $ifNull: ['$_project.code', ''] },
+          expenseDate: 1,
+          vendor: { $ifNull: ['$vendor', 'N/A'] },
+          category: { $ifNull: ['$_category.name', 'Other'] },
+          currency: { $ifNull: ['$currency', 'INR'] },
+          amount: { $ifNull: ['$amount', 0] },
+          invoiceId: { $ifNull: ['$invoiceId', ''] },
+          notes: { $ifNull: ['$notes', ''] },
+          receiptPrimaryId: 1,
+          receiptIds: 1,
+        },
+      },
+    );
+
+    const results = await Expense.aggregate(pipeline).exec();
+
+    // Build summary
+    const totalExpenses = results.length;
+    const totalAmount = results.reduce((sum, r) => sum + (r.amount || 0), 0);
+    const dayDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+    const averagePerDay = totalAmount / dayDiff;
+
+    // Collect unique report IDs and project names
+    const reportIds = new Set<string>();
+    const projectNames = new Set<string>();
+
+    // Group by report
+    const groupedByReport: Record<string, {
+      reportName: string;
+      reportOwner: string;
+      project: string;
+      expenses: any[];
+      subtotal: number;
+    }> = {};
+
+    results.forEach((r) => {
+      const rId = r.reportId?.toString() || 'unassigned';
+      reportIds.add(rId);
+      if (r.project && r.project !== 'N/A') projectNames.add(r.project);
+
+      const d = new Date(r.expenseDate);
+      const dateStr = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+
+      const expRow = {
+        _id: r._id,
+        reportName: r.reportName || 'Unassigned',
+        reportOwner: r.reportOwner || 'Unknown',
+        project: r.project || 'N/A',
+        projectCode: r.projectCode || '',
+        vendor: r.vendor,
+        category: r.category,
+        amount: r.amount,
+        currency: r.currency,
+        invoiceId: r.invoiceId,
+        notes: r.notes,
+        expenseDate: dateStr,
+        hasReceipt: !!(r.receiptPrimaryId || (r.receiptIds && r.receiptIds.length > 0)),
+      };
+
+      if (!groupedByReport[rId]) {
+        groupedByReport[rId] = {
+          reportName: r.reportName || 'Unassigned',
+          reportOwner: r.reportOwner || 'Unknown',
+          project: r.project || 'N/A',
+          expenses: [],
+          subtotal: 0,
+        };
+      }
+      groupedByReport[rId].expenses.push(expRow);
+      groupedByReport[rId].subtotal += r.amount || 0;
+    });
+
+    // Raw data (flat)
+    const rawData = results.map((r) => {
+      const d = new Date(r.expenseDate);
+      return {
+        _id: r._id,
+        reportName: r.reportName || 'Unassigned',
+        reportOwner: r.reportOwner || 'Unknown',
+        project: r.project || 'N/A',
+        projectCode: r.projectCode || '',
+        vendor: r.vendor,
+        category: r.category,
+        amount: r.amount,
+        currency: r.currency,
+        invoiceId: r.invoiceId,
+        notes: r.notes,
+        expenseDate: `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`,
+        hasReceipt: !!(r.receiptPrimaryId || (r.receiptIds && r.receiptIds.length > 0)),
+      };
+    });
+
+    return {
+      summary: {
+        totalExpenses,
+        totalAmount: Math.round(totalAmount * 100) / 100,
+        averagePerDay: Math.round(averagePerDay * 100) / 100,
+        totalReports: reportIds.size,
+        projects: Array.from(projectNames),
+      },
+      groupedByReport,
+      rawData,
+    };
+  }
+
+  /**
+   * Generate dynamic report Excel export – grouped by report with Report Name + Owner columns
+   */
+  static async generateDynamicReportXLSX(
+    params: {
+      reportType: string;
+      projectId: string | null;
+      startDate: string;
+      endDate: string;
+    },
+    req: AuthRequest
+  ): Promise<Buffer> {
+    const reportData = await this.generateDynamicReport(params, req);
+    const includeProject = !params.projectId || params.projectId === 'all';
+
+    const { getUserCompanyId } = await import('../utils/companyAccess');
+    const companyId = await getUserCompanyId(req);
+    const company = companyId ? await Company.findById(companyId).select('name').lean().exec() : null;
+    const companyName = (company as any)?.name || 'Company';
+
+    const workbook = new ExcelJS.Workbook();
+    const worksheet = workbook.addWorksheet('Expense Report');
+
+    // --- build header list ---
+    const headers: string[] = ['S.No', 'Report Name', 'Report Owner', 'Date', 'Vendor', 'Category'];
+    if (includeProject) headers.push('Project');
+    headers.push('Currency', 'Amount', 'Invoice No', 'Notes');
+
+    const totalCols = headers.length;
+    const lastCol = String.fromCharCode(64 + Math.min(totalCols, 26)); // A-Z safe
+
+    let row = 1;
+
+    // Company name
+    worksheet.mergeCells(`A${row}:${lastCol}${row}`);
+    const titleCell = worksheet.getCell(`A${row}`);
+    titleCell.value = companyName;
+    titleCell.font = { size: 16, bold: true };
+    titleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    row++;
+
+    // Report type
+    const typeLabel = params.reportType.charAt(0).toUpperCase() + params.reportType.slice(1);
+    worksheet.mergeCells(`A${row}:${lastCol}${row}`);
+    const subtitleCell = worksheet.getCell(`A${row}`);
+    subtitleCell.value = `${typeLabel} Expense Report`;
+    subtitleCell.font = { size: 13, bold: true };
+    subtitleCell.alignment = { horizontal: 'center', vertical: 'middle' };
+    row++;
+
+    // Period
+    worksheet.mergeCells(`A${row}:${lastCol}${row}`);
+    const periodCell = worksheet.getCell(`A${row}`);
+    periodCell.value = `Period: ${this.formatDate(params.startDate)} to ${this.formatDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`;
+    periodCell.font = { size: 10 };
+    periodCell.alignment = { horizontal: 'center' };
+    row += 2;
+
+    // Summary block
+    const summaryLines: [string, string | number][] = [
+      ['Total Reports', reportData.summary.totalReports],
+      ['Total Expenses', reportData.summary.totalExpenses],
+      ['Total Amount', reportData.summary.totalAmount],
+      ['Average Per Day', reportData.summary.averagePerDay],
+    ];
+    if (reportData.summary.projects.length > 0) {
+      summaryLines.push(['Projects', reportData.summary.projects.join(', ')]);
+    }
+    summaryLines.forEach(([label, value]) => {
+      worksheet.getCell(`A${row}`).value = label;
+      worksheet.getCell(`A${row}`).font = { bold: true };
+      worksheet.getCell(`B${row}`).value = value;
+      if (typeof value === 'number' && label !== 'Total Reports' && label !== 'Total Expenses') {
+        worksheet.getCell(`B${row}`).numFmt = '#,##0.00';
+      }
+      row++;
+    });
+    row++;
+
+    // ── Grouped by report ──
+    const reportGroups = Object.values(reportData.groupedByReport);
+    let serial = 1;
+
+    const thinBorder: any = { top: { style: 'thin' }, left: { style: 'thin' }, bottom: { style: 'thin' }, right: { style: 'thin' } };
+
+    reportGroups.forEach((group) => {
+      // Report header row
+      worksheet.mergeCells(`A${row}:${lastCol}${row}`);
+      const reportHeaderCell = worksheet.getCell(`A${row}`);
+      reportHeaderCell.value = `Report: ${group.reportName}   |   Owner: ${group.reportOwner}   |   Project: ${group.project}`;
+      reportHeaderCell.font = { bold: true, size: 11, color: { argb: 'FF1A3C6D' } };
+      reportHeaderCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE8F0FE' } };
+      reportHeaderCell.border = thinBorder;
+      row++;
+
+      // Column headers
+      const hRow = worksheet.getRow(row);
+      headers.forEach((h, i) => {
+        const cell = hRow.getCell(i + 1);
+        cell.value = h;
+        cell.font = { bold: true, color: { argb: 'FFFFFFFF' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF4472C4' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle' };
+        cell.border = thinBorder;
+      });
+      row++;
+
+      // Expense rows
+      group.expenses.forEach((exp: any) => {
+        const r = worksheet.getRow(row);
+        let c = 1;
+        r.getCell(c++).value = serial++;
+        r.getCell(c++).value = exp.reportName;
+        r.getCell(c++).value = exp.reportOwner;
+        r.getCell(c++).value = exp.expenseDate;
+        r.getCell(c++).value = exp.vendor;
+        r.getCell(c++).value = exp.category;
+        if (includeProject) r.getCell(c++).value = exp.project;
+        r.getCell(c++).value = exp.currency;
+        const amtCell = r.getCell(c++);
+        amtCell.value = exp.amount;
+        amtCell.numFmt = '#,##0.00';
+        r.getCell(c++).value = exp.invoiceId;
+        r.getCell(c++).value = exp.notes;
+
+        for (let ci = 1; ci < c; ci++) {
+          r.getCell(ci).border = thinBorder;
+        }
+        row++;
+      });
+
+      // Subtotal row
+      const amtIdx = includeProject ? 9 : 8;
+      worksheet.mergeCells(`A${row}:${String.fromCharCode(64 + amtIdx - 1)}${row}`);
+      const subLabel = worksheet.getCell(`A${row}`);
+      subLabel.value = `Subtotal – ${group.reportName}`;
+      subLabel.font = { bold: true, italic: true };
+      subLabel.alignment = { horizontal: 'right' };
+      const subAmt = worksheet.getCell(row, amtIdx);
+      subAmt.value = Math.round(group.subtotal * 100) / 100;
+      subAmt.numFmt = '#,##0.00';
+      subAmt.font = { bold: true };
+      row += 2; // spacing between reports
+    });
+
+    // Grand total
+    const amtIdx = includeProject ? 9 : 8;
+    worksheet.mergeCells(`A${row}:${String.fromCharCode(64 + amtIdx - 1)}${row}`);
+    const gtLabel = worksheet.getCell(`A${row}`);
+    gtLabel.value = 'GRAND TOTAL';
+    gtLabel.font = { bold: true, size: 12 };
+    gtLabel.alignment = { horizontal: 'right', vertical: 'middle' };
+    const gtAmt = worksheet.getCell(row, amtIdx);
+    gtAmt.value = reportData.summary.totalAmount;
+    gtAmt.numFmt = '#,##0.00';
+    gtAmt.font = { bold: true, size: 12 };
+
+    // Column widths
+    const widths = [18, 28, 22, 14, 22, 16];
+    if (includeProject) widths.push(18);
+    widths.push(10, 14, 16, 30);
+    widths.forEach((w, i) => { worksheet.getColumn(i + 1).width = w; });
+
+    const buffer = await workbook.xlsx.writeBuffer();
+    return Buffer.from(buffer);
+  }
+
+  /**
+   * Generate dynamic report PDF export – grouped by report with report header blocks
+   */
+  static async generateDynamicReportPDF(
+    params: {
+      reportType: string;
+      projectId: string | null;
+      startDate: string;
+      endDate: string;
+    },
+    req: AuthRequest
+  ): Promise<Buffer> {
+    const reportData = await this.generateDynamicReport(params, req);
+    const includeProject = !params.projectId || params.projectId === 'all';
+
+    const { getUserCompanyId } = await import('../utils/companyAccess');
+    const companyId = await getUserCompanyId(req);
+    const company = companyId ? await Company.findById(companyId).select('name').lean().exec() : null;
+    const companyName = (company as any)?.name || 'Company';
+
+    // ── Fetch company logo ──
+    let logoBuffer: Buffer | null = null;
+    if (companyId) {
+      try {
+        const { BrandingService } = await import('./branding.service');
+        const companyBranding = await BrandingService.getLogos(companyId);
+        const logoUrl = companyBranding?.lightLogoUrl;
+        if (logoUrl && typeof logoUrl === 'string') {
+          const https = await import('https');
+          const http = await import('http');
+          const url = new URL(logoUrl);
+          const client = url.protocol === 'https:' ? https : http;
+          logoBuffer = await new Promise<Buffer>((res, rej) => {
+            client.get(logoUrl, (response) => {
+              const chunks: Buffer[] = [];
+              response.on('data', (chunk: Buffer) => chunks.push(chunk));
+              response.on('end', () => res(Buffer.concat(chunks)));
+              response.on('error', rej);
+            }).on('error', rej);
+          });
+        }
+      } catch (error) {
+        logger.debug({ error, companyId }, 'Dynamic report PDF: could not load company logo');
+      }
+    }
+
+    return new Promise(async (resolve, reject) => {
+      try {
+        const doc: any = new PDFDocument({ margin: 40, size: 'A4', layout: 'landscape' });
+        const chunks: Buffer[] = [];
+        doc.on('data', (chunk: Buffer) => chunks.push(chunk));
+        doc.on('end', () => resolve(Buffer.concat(chunks)));
+        doc.on('error', reject);
+        doc.font('Helvetica');
+
+        let y = 40;
+        const pageBottom = 540;
+        const totalWidth = 760;
+
+        const newPageIfNeeded = (needed: number) => {
+          if (y + needed > pageBottom) {
+            doc.addPage({ margin: 40, size: 'A4', layout: 'landscape' });
+            y = 40;
+          }
+        };
+
+        // ── Cover header with logo ──
+        const logoWidth = 80;
+        const logoHeight = 40;
+
+        if (logoBuffer) {
+          try {
+            doc.image(logoBuffer, 40, y, { width: logoWidth, height: logoHeight });
+          } catch (_) {
+            // logo failed to render, continue without it
+          }
+        }
+
+        // Company name + report type — centered, but pushed down if logo present
+        const textStartY = y;
+        const textLeftMargin = logoBuffer ? 130 : 0; // offset past logo
+
+        if (logoBuffer) {
+          // Logo on the left, company name to the right of logo
+          doc.fontSize(16).font('Helvetica-Bold').text(companyName, textLeftMargin, textStartY, { align: 'left', width: totalWidth - textLeftMargin + 40 });
+          const typeLabel = params.reportType.charAt(0).toUpperCase() + params.reportType.slice(1);
+          doc.fontSize(12).font('Helvetica').text(`${typeLabel} Expense Report`, textLeftMargin, doc.y + 2, { align: 'left', width: totalWidth - textLeftMargin + 40 });
+          y = Math.max(textStartY + logoHeight + 6, doc.y + 6);
+        } else {
+          // No logo — center everything
+          doc.fontSize(16).font('Helvetica-Bold').text(companyName, 0, textStartY, { align: 'center' });
+          y = doc.y + 4;
+          const typeLabel = params.reportType.charAt(0).toUpperCase() + params.reportType.slice(1);
+          doc.fontSize(13).text(`${typeLabel} Expense Report`, 0, y, { align: 'center' });
+          y = doc.y + 4;
+        }
+
+        // Period line
+        doc.fontSize(10).font('Helvetica').text(
+          `Period: ${this.formatDate(params.startDate)} to ${this.formatDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`,
+          0, y, { align: 'center' }
+        );
+        y = doc.y + 12;
+
+        // Summary line
+        doc.font('Helvetica-Bold').fontSize(9);
+        doc.text(
+          `Reports: ${reportData.summary.totalReports}   |   Expenses: ${reportData.summary.totalExpenses}   |   Total: ${reportData.summary.totalAmount.toFixed(2)}   |   Avg/Day: ${reportData.summary.averagePerDay.toFixed(2)}`,
+          40, y
+        );
+        y = doc.y + 12;
+
+        // ── Table helpers ──
+        const headers: string[] = ['S.No', 'Date', 'Vendor', 'Category'];
+        if (includeProject) headers.push('Project');
+        headers.push('Curr', 'Amount', 'Invoice', 'Notes');
+
+        const baseWidths = [30, 60, 110, 80];
+        if (includeProject) baseWidths.push(80);
+        baseWidths.push(30, 65, 70, includeProject ? 235 : 315);
+        const scale = totalWidth / baseWidths.reduce((s, w) => s + w, 0);
+        const colWidths = baseWidths.map(w => w * scale);
+        const rowHeight = 20;
+
+        const drawTableHeader = () => {
+          doc.fontSize(7).font('Helvetica-Bold');
+          let x = 40;
+          headers.forEach((h, i) => {
+            doc.rect(x, y, colWidths[i], rowHeight).fillAndStroke('#4472C4', '#4472C4');
+            doc.fillColor('#FFFFFF').text(h, x + 2, y + 5, { width: colWidths[i] - 4, align: 'center' });
+            x += colWidths[i];
+          });
+          y += rowHeight;
+          doc.fillColor('#000000').font('Helvetica');
+        };
+
+        const drawExpenseRow = (exp: any, serial: number, bgColor: string) => {
+          newPageIfNeeded(rowHeight);
+          doc.rect(40, y, totalWidth, rowHeight).fillAndStroke(bgColor, '#DDD');
+          doc.fillColor('#000000').fontSize(7);
+          let x = 40;
+          const vals: string[] = [String(serial), exp.expenseDate, exp.vendor, exp.category];
+          if (includeProject) vals.push(exp.project || 'N/A');
+          vals.push(exp.currency, exp.amount.toFixed(2), exp.invoiceId || '', exp.notes || '');
+
+          vals.forEach((val, i) => {
+            doc.text(String(val), x + 2, y + 5, { width: colWidths[i] - 4, align: i === (includeProject ? 6 : 5) ? 'right' : 'left', height: rowHeight - 8, ellipsis: true });
+            x += colWidths[i];
+          });
+          y += rowHeight;
+        };
+
+        // ── Render reports ──
+        const reportGroups = Object.values(reportData.groupedByReport);
+        let serial = 1;
+
+        reportGroups.forEach((group, groupIdx) => {
+          // Report header block
+          newPageIfNeeded(rowHeight * 3 + 10);
+
+          // Report separator
+          if (groupIdx > 0) {
+            y += 6;
+          }
+
+          // Report info bar
+          doc.rect(40, y, totalWidth, 28).fillAndStroke('#1A3C6D', '#1A3C6D');
+          doc.fillColor('#FFFFFF').fontSize(9).font('Helvetica-Bold');
+          doc.text(`Report: ${group.reportName}`, 48, y + 4, { width: 360 });
+          doc.text(`Owner: ${group.reportOwner}`, 420, y + 4, { width: 180 });
+          doc.text(`Project: ${group.project}`, 610, y + 4, { width: 180 });
+          doc.fillColor('#000000');
+          y += 28;
+
+          // Table header
+          drawTableHeader();
+
+          // Expense rows
+          group.expenses.forEach((exp: any, idx: number) => {
+            drawExpenseRow(exp, serial++, idx % 2 === 0 ? '#FFFFFF' : '#F5F5F5');
+          });
+
+          // Subtotal
+          newPageIfNeeded(rowHeight);
+          doc.rect(40, y, totalWidth, rowHeight).fillAndStroke('#EEF2F7', '#DDD');
+          doc.fillColor('#000000').fontSize(8).font('Helvetica-Bold');
+          doc.text(`Subtotal – ${group.reportName}`, 44, y + 5, { width: 500, align: 'right' });
+          doc.text((Math.round(group.subtotal * 100) / 100).toFixed(2), 580, y + 5, { width: 100, align: 'right' });
+          doc.font('Helvetica');
+          y += rowHeight;
+        });
+
+        // Grand total
+        y += 8;
+        newPageIfNeeded(30);
+        doc.fontSize(11).font('Helvetica-Bold');
+        doc.text('GRAND TOTAL:', 40, y);
+        doc.text(reportData.summary.totalAmount.toFixed(2), 680, y, { align: 'right' });
+
+        doc.end();
+      } catch (error) {
+        reject(error);
+      }
+    });
   }
 }

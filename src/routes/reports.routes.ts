@@ -27,6 +27,9 @@ router.post(
 );
 
 // Export routes (must come before /:id to avoid route conflicts)
+router.post('/export', ReportsController.dynamicReportGenerate);
+router.post('/export/excel', ReportsController.dynamicReportExportExcel);
+router.post('/export/pdf', ReportsController.dynamicReportExportPDF);
 router.get('/:id/export/excel', ReportsController.exportExcel);
 router.get('/:id/export/pdf', ReportsController.exportPDF);
 
