@@ -484,9 +484,20 @@ export class ReportsService {
         const effectiveLevels = (approvalInstance as any).effectiveLevels;
         const hasEffectiveLevels = Array.isArray(effectiveLevels) && effectiveLevels.length > 0;
         const levelsSource: any[] = hasEffectiveLevels ? effectiveLevels : ((matrix && matrix.levels) ? (matrix.levels as any[]) : []);
+        // Check if effectiveLevels differ from the matrix levels to determine if it's truly personalized
+        // (Effective levels are now always persisted for robustness, so simple presence check is insufficient)
+        let isTrulyPersonalized = false;
+        if (hasEffectiveLevels) {
+          if (!matrix || !matrix.levels || matrix.levels.length === 0) {
+            isTrulyPersonalized = true; // No matrix to compare against, assume personalized
+          } else {
+            isTrulyPersonalized = !ReportsService.areApprovalLevelsEqual(effectiveLevels, matrix.levels);
+          }
+        }
+
         approvalChainMeta = {
-          mode: hasEffectiveLevels ? 'PERSONALIZED' : 'MATRIX',
-          levelsCount: hasEffectiveLevels ? effectiveLevels.length : null,
+          mode: isTrulyPersonalized ? 'PERSONALIZED' : 'MATRIX',
+          levelsCount: isTrulyPersonalized ? effectiveLevels.length : null,
         };
 
         if (levelsSource && levelsSource.length > 0) {
@@ -1688,7 +1699,7 @@ export class ReportsService {
     }
 
     report.submittedAt = new Date();
-    
+
     // Ensure userId is valid before creating ObjectId
     if (!userId || !mongoose.Types.ObjectId.isValid(userId)) {
       logger.error({ userId, reportId: id }, 'Invalid userId for updatedBy field');
@@ -1778,7 +1789,7 @@ export class ReportsService {
             reportStatus: report.status,
             approversCount: report.approvers?.length || 0,
           }, 'Report validation failed on save');
-          
+
           // If report is already in a submitted/pending state, return it as success (idempotent)
           const submittedStatuses: ExpenseReportStatus[] = [
             ExpenseReportStatus.SUBMITTED,
@@ -1791,12 +1802,12 @@ export class ReportsService {
             ExpenseReportStatus.MANAGER_APPROVED,
           ];
           const isAlreadySubmitted = submittedStatuses.includes(report.status as ExpenseReportStatus);
-          
+
           if (isAlreadySubmitted && report.submittedAt) {
             logger.warn({ reportId: id, status: report.status }, 'Validation error on already-submitted report; returning as success (idempotent)');
             return report;
           }
-          
+
           throw new Error(`Report validation failed: ${validationMessages}. Please contact support if this persists.`);
         }
         // Re-throw other errors
@@ -2606,6 +2617,52 @@ export class ReportsService {
       settlementStatus: report.settlementStatus,
       settlementDecision: report.settlementDecision,
     };
+  }
+
+  /**
+   * Helper to deeply compare effective approval levels (array of objects) with matrix levels.
+   * Handles ObjectId normalization (string vs Object), missing fields, and basic structure.
+   * Returns true if they are functionally equivalent (i.e. not personalized).
+   */
+  public static areApprovalLevelsEqual(levelsA: any[], levelsB: any[]): boolean {
+    if (!levelsA || !levelsB) return levelsA === levelsB;
+    if (levelsA.length !== levelsB.length) return false;
+
+    // Sort by level number to ensure order independent comparison
+    const sortedA = [...levelsA].sort((a, b) => (a.levelNumber ?? a.level ?? 0) - (b.levelNumber ?? b.level ?? 0));
+    const sortedB = [...levelsB].sort((a, b) => (a.levelNumber ?? a.level ?? 0) - (b.levelNumber ?? b.level ?? 0));
+
+    for (let i = 0; i < sortedA.length; i++) {
+      const a = sortedA[i];
+      const b = sortedB[i];
+
+      // Compare basic fields
+      if ((a.levelNumber ?? a.level) !== (b.levelNumber ?? b.level)) return false;
+      if (a.approvalType !== b.approvalType) return false;
+
+      // Compare roles (normalize to sorted string arrays)
+      const rolesA = (a.approverRoleIds || []).map((id: any) => (id?._id ?? id).toString()).sort();
+      const rolesB = (b.approverRoleIds || []).map((id: any) => (id?._id ?? id).toString()).sort();
+      if (rolesA.length !== rolesB.length) return false;
+      for (let j = 0; j < rolesA.length; j++) {
+        if (rolesA[j] !== rolesB[j]) return false;
+      }
+
+      // Compare manual users (normalize to sorted string arrays)
+      const usersA = (a.approverUserIds || []).map((id: any) => (id?._id ?? id).toString()).sort();
+      const usersB = (b.approverUserIds || []).map((id: any) => (id?._id ?? id).toString()).sort();
+      if (usersA.length !== usersB.length) return false;
+      for (let j = 0; j < usersA.length; j++) {
+        if (usersA[j] !== usersB[j]) return false;
+      }
+
+      // Compare parallel rule (only if parallel)
+      if (a.approvalType === 'PARALLEL') {
+        if (a.parallelRule !== b.parallelRule) return false;
+      }
+    }
+
+    return true;
   }
 }
 
