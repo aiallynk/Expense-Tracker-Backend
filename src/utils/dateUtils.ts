@@ -42,9 +42,14 @@ export class DateUtils {
    * This ensures startDate and endDate are inclusive
    */
   static createDateRangeQuery(startDate: string, endDate: string) {
-    // Parse dates as IST and get start of day / end of day
-    const startIST = moment.tz(startDate, 'YYYY-MM-DD', IST_TIMEZONE).startOf('day');
-    const endIST = moment.tz(endDate, 'YYYY-MM-DD', IST_TIMEZONE).endOf('day');
+    // Extract YYYY-MM-DD part (in case ISO string is passed)
+    const startStr = startDate.substring(0, 10);
+    const endStr = endDate.substring(0, 10);
+
+    // Create timezone-aware Date objects for IST directly
+    // This avoids moment.tz parsing issues with ISO strings vs YYYY-MM-DD
+    const startIST = moment.tz(startStr, 'YYYY-MM-DD', IST_TIMEZONE).startOf('day');
+    const endIST = moment.tz(endStr, 'YYYY-MM-DD', IST_TIMEZONE).endOf('day');
 
     return {
       $gte: startIST.toDate(),

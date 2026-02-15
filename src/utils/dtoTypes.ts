@@ -408,8 +408,8 @@ export const expenseFiltersSchema = paginationBaseSchema.extend({
   status: z.nativeEnum(ExpenseStatus).optional(),
   categoryId: z.string().optional(),
   costCentreId: z.string().optional(), // Filter by cost centre
-  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), // YYYY-MM-DD format
-  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(), // YYYY-MM-DD format
+  from: z.string().optional(), // Accepts YYYY-MM-DD or ISO
+  to: z.string().optional(), // Accepts YYYY-MM-DD or ISO
   q: z.string().optional(),
   reportId: z.string().optional(),
   excludeRejectedReports: z.coerce.boolean().optional(), // When true, exclude expenses whose report status is REJECTED (so dashboard/expenses totals don't count them)
