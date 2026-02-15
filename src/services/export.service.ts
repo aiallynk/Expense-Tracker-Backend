@@ -1216,24 +1216,28 @@ export class ExportService {
   }> {
     const { projectId, startDate, endDate } = params;
 
-    const start = new Date(startDate);
-    const end = new Date(endDate);
+    // Fix: Explicitly construct dates in IST to avoid server timezone issues
+    // We take the YYYY-MM-DD part and append IST offset
+    // Frontend sends endDate as the START of the next day (exclusive boundary), so we don't need to add +1 day here.
+    const startStr = startDate.substring(0, 10);
+    const endStr = endDate.substring(0, 10);
 
-    // Build match stage (no project filter here — applied after $lookup on report)
-    // Use half-open interval [start, end) to correctly handle timezone boundaries
-    // Start is inclusive, End is exclusive (start of next day/period)
+    const start = new Date(`${startStr}T00:00:00.000+05:30`);
+    const end = new Date(`${endStr}T00:00:00.000+05:30`);
+
+    // Build match stage (half-open interval [start, end))
     const matchStage: any = {
       expenseDate: { $gte: start, $lt: end },
       status: { $ne: ExpenseStatus.REJECTED },
     };
 
-    console.log('--- EXPORT DATE DEBUG ---');
-    console.log('Input startDate:', startDate);
-    console.log('Input endDate:', endDate);
-    console.log('Parsed Start:', start.toISOString());
-    console.log('Parsed End:', end.toISOString());
+    console.log('--- EXPORT DATE DEBUG (PROD FIX) ---');
+    console.log('Input Strings:', startDate, endDate);
+    console.log('Extracted:', startStr, endStr);
+    console.log('Constructed Start (IST):', start.toISOString());
+    console.log('Constructed End (IST):', end.toISOString());
     console.log('Match Stage:', JSON.stringify(matchStage));
-    console.log('-------------------------');
+    console.log('------------------------------------');
 
     // Apply company access filter
     const query = await buildCompanyQuery(req, matchStage, 'users');
