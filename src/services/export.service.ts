@@ -1217,15 +1217,23 @@ export class ExportService {
     const { projectId, startDate, endDate } = params;
 
     const start = new Date(startDate);
-    start.setUTCHours(0, 0, 0, 0);
     const end = new Date(endDate);
-    end.setUTCHours(23, 59, 59, 999);
 
     // Build match stage (no project filter here — applied after $lookup on report)
+    // Use half-open interval [start, end) to correctly handle timezone boundaries
+    // Start is inclusive, End is exclusive (start of next day/period)
     const matchStage: any = {
-      expenseDate: { $gte: start, $lte: end },
+      expenseDate: { $gte: start, $lt: end },
       status: { $ne: ExpenseStatus.REJECTED },
     };
+
+    console.log('--- EXPORT DATE DEBUG ---');
+    console.log('Input startDate:', startDate);
+    console.log('Input endDate:', endDate);
+    console.log('Parsed Start:', start.toISOString());
+    console.log('Parsed End:', end.toISOString());
+    console.log('Match Stage:', JSON.stringify(matchStage));
+    console.log('-------------------------');
 
     // Apply company access filter
     const query = await buildCompanyQuery(req, matchStage, 'users');
@@ -1314,6 +1322,12 @@ export class ExportService {
     );
 
     const results = await Expense.aggregate(pipeline).exec();
+
+    if (results.length > 0) {
+      console.log('--- SAMPLE RESULT ---');
+      console.log('First Expense Date:', results[0].expenseDate);
+      console.log('---------------------');
+    }
 
     // Build summary
     const totalExpenses = results.length;
