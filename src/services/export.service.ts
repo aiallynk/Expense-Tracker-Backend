@@ -19,6 +19,7 @@ import { ExportFormat, ExpenseReportStatus, ExpenseStatus } from '../utils/enums
 import { getObjectUrl } from '../utils/s3';
 
 import { logger } from '@/config/logger';
+import { DateUtils } from '@/utils/dateUtils';
 
 /**
  * ====================================================
@@ -109,13 +110,6 @@ export class ExportService {
     const parsed = moment(raw);
     if (!parsed.isValid()) return null;
     return parsed.toDate();
-  }
-
-  // Dynamic exports use an exclusive end boundary ([start, end)), so display end date as end - 1 day.
-  private static formatExclusiveEndDate(endDate: Date | string): string {
-    const m = this.getISTMoment(endDate);
-    if (!m) return 'N/A';
-    return m.clone().subtract(1, 'day').format('DD/MM/YYYY');
   }
 
   /**
@@ -1275,28 +1269,38 @@ export class ExportService {
   }> {
     const { projectId, startDate, endDate } = params;
 
-    // Fix: Explicitly construct dates in IST to avoid server timezone issues
-    // We take the YYYY-MM-DD part and append IST offset
-    // Frontend sends endDate as the START of the next day (exclusive boundary), so we don't need to add +1 day here.
-    const startStr = startDate.substring(0, 10);
-    const endStr = endDate.substring(0, 10);
+    // Keep filtering simple and predictable:
+    // Treat startDate/endDate as inclusive IST calendar dates (YYYY-MM-DD).
+    // Backward compatibility: old clients send endDate as next-day midnight (exclusive).
+    const startStr = String(startDate || '').substring(0, 10);
+    let endStr = String(endDate || '').substring(0, 10);
 
-    const start = new Date(`${startStr}T00:00:00.000+05:30`);
-    const end = new Date(`${endStr}T00:00:00.000+05:30`);
+    if (!DateUtils.isValidDateString(startStr) || !DateUtils.isValidDateString(endStr)) {
+      const err: any = new Error('Invalid startDate/endDate. Expected YYYY-MM-DD calendar dates.');
+      err.statusCode = 400;
+      throw err;
+    }
 
-    // Build match stage (half-open interval [start, end))
+    const legacyExclusiveEnd =
+      typeof endDate === 'string' &&
+      /T00:00:00(?:\.000)?(?:Z|[+\-]\d{2}:?\d{2})?$/.test(endDate.trim());
+    if (legacyExclusiveEnd) {
+      const adjustedEnd = moment.tz(endStr, 'YYYY-MM-DD', this.IST_TIMEZONE).subtract(1, 'day').format('YYYY-MM-DD');
+      if (adjustedEnd >= startStr) {
+        endStr = adjustedEnd;
+      }
+    }
+
+    if (endStr < startStr) {
+      const err: any = new Error('endDate cannot be earlier than startDate');
+      err.statusCode = 400;
+      throw err;
+    }
+
     const matchStage: any = {
-      expenseDate: { $gte: start, $lt: end },
+      expenseDate: DateUtils.createDateRangeQuery(startStr, endStr),
       status: { $ne: ExpenseStatus.REJECTED },
     };
-
-    console.log('--- EXPORT DATE DEBUG (PROD FIX) ---');
-    console.log('Input Strings:', startDate, endDate);
-    console.log('Extracted:', startStr, endStr);
-    console.log('Constructed Start (IST):', start.toISOString());
-    console.log('Constructed End (IST):', end.toISOString());
-    console.log('Match Stage:', JSON.stringify(matchStage));
-    console.log('------------------------------------');
 
     // Apply company access filter
     const query = await buildCompanyQuery(req, matchStage, 'users');
@@ -1315,6 +1319,14 @@ export class ExportService {
         },
       },
       { $unwind: { path: '$_report', preserveNullAndEmptyArrays: true } },
+      {
+        $match: {
+          '_report._id': { $exists: true },
+          '_report.status': {
+            $nin: [ExpenseReportStatus.DRAFT, ExpenseReportStatus.REJECTED],
+          },
+        },
+      },
     ];
 
     // Project filter: match either expense.projectId OR report.projectId (after $lookup)
@@ -1386,16 +1398,16 @@ export class ExportService {
 
     const results = await Expense.aggregate(pipeline).exec();
 
-    if (results.length > 0) {
-      console.log('--- SAMPLE RESULT ---');
-      console.log('First Expense Date:', results[0].expenseDate);
-      console.log('---------------------');
-    }
-
     // Build summary
     const totalExpenses = results.length;
     const totalAmount = results.reduce((sum, r) => sum + (r.amount || 0), 0);
-    const dayDiff = Math.max(1, Math.ceil((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24)));
+    const dayDiff = Math.max(
+      1,
+      moment.tz(endStr, 'YYYY-MM-DD', this.IST_TIMEZONE).diff(
+        moment.tz(startStr, 'YYYY-MM-DD', this.IST_TIMEZONE),
+        'days'
+      ) + 1
+    );
     const averagePerDay = totalAmount / dayDiff;
 
     // Collect unique report IDs and project names
@@ -1532,7 +1544,7 @@ export class ExportService {
     // Period
     worksheet.mergeCells(`A${row}:${lastCol}${row}`);
     const periodCell = worksheet.getCell(`A${row}`);
-    periodCell.value = `Period: ${this.formatDate(params.startDate)} to ${this.formatExclusiveEndDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`;
+    periodCell.value = `Period: ${this.formatDate(params.startDate)} to ${this.formatDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`;
     periodCell.font = { size: 10 };
     periodCell.alignment = { horizontal: 'center' };
     row += 2;
@@ -1745,7 +1757,7 @@ export class ExportService {
 
         // Period line
         doc.fontSize(10).font('Helvetica').text(
-          `Period: ${this.formatDate(params.startDate)} to ${this.formatExclusiveEndDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`,
+          `Period: ${this.formatDate(params.startDate)} to ${this.formatDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`,
           0, y, { align: 'center' }
         );
         y = doc.y + 12;
