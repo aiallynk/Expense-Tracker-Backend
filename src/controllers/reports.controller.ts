@@ -264,7 +264,7 @@ export class ReportsController {
         req.user!.role
       );
 
-      const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.xlsx`;
+      const filename = `Expense_Reimbursement_${report?.name || reportId}_${DateUtils.getCurrentISTDate()}.xlsx`;
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -307,7 +307,7 @@ export class ReportsController {
         req.user!.role
       );
 
-      const filename = `Expense_Reimbursement_${report?.name || reportId}_${new Date().toISOString().split('T')[0]}.pdf`;
+      const filename = `Expense_Reimbursement_${report?.name || reportId}_${DateUtils.getCurrentISTDate()}.pdf`;
 
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -473,7 +473,7 @@ export class ReportsController {
       );
 
       const typeLabel = reportType.charAt(0).toUpperCase() + reportType.slice(1);
-      const filename = `${typeLabel}_Expense_Report_${new Date().toISOString().split('T')[0]}.xlsx`;
+      const filename = `${typeLabel}_Expense_Report_${DateUtils.getCurrentISTDate()}.xlsx`;
 
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -511,7 +511,7 @@ export class ReportsController {
       );
 
       const typeLabel = reportType.charAt(0).toUpperCase() + reportType.slice(1);
-      const filename = `${typeLabel}_Expense_Report_${new Date().toISOString().split('T')[0]}.pdf`;
+      const filename = `${typeLabel}_Expense_Report_${DateUtils.getCurrentISTDate()}.pdf`;
 
       res.setHeader('Content-Type', 'application/pdf');
       res.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(filename)}"`);
@@ -529,4 +529,3 @@ export class ReportsController {
   });
 
 }
-

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 
 import { PutObjectCommand } from '@aws-sdk/client-s3';
 import ExcelJS from 'exceljs';
+import moment from 'moment-timezone';
 import mongoose from 'mongoose';
 import PDFDocument from 'pdfkit';
 
@@ -48,17 +49,73 @@ const EXPORT_COLUMNS: ExportColumnConfig[] = [
 ];
 
 export class ExportService {
+  private static readonly IST_TIMEZONE = 'Asia/Kolkata';
+
+  private static getISTMoment(date: Date | string | null | undefined) {
+    if (!date) return null;
+    if (date instanceof Date) {
+      const m = moment(date);
+      if (!m.isValid()) return null;
+      return m.tz(this.IST_TIMEZONE);
+    }
+
+    const raw = String(date).trim();
+    if (!raw) return null;
+
+    // Treat YYYY-MM-DD as a pure IST calendar date.
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const m = moment.tz(raw, 'YYYY-MM-DD', this.IST_TIMEZONE);
+      return m.isValid() ? m : null;
+    }
+
+    // If timezone is explicitly present, preserve it first.
+    const hasExplicitZone = /(?:[zZ]|[+\-]\d{2}:?\d{2})$/.test(raw);
+    if (hasExplicitZone) {
+      const zoned = moment.parseZone(raw);
+      if (!zoned.isValid()) return null;
+      return zoned.tz(this.IST_TIMEZONE);
+    }
+
+    // Naive datetime strings are interpreted as IST to avoid server-local drift.
+    const ist = moment.tz(raw, this.IST_TIMEZONE);
+    return ist.isValid() ? ist : null;
+  }
+
   /**
    * Format date consistently across all exports
    */
   private static formatDate(date: Date | string | null | undefined): string {
-    if (!date) return 'N/A';
-    const d = new Date(date);
-    if (isNaN(d.getTime())) return 'N/A';
-    const day = String(d.getDate()).padStart(2, '0');
-    const month = String(d.getMonth() + 1).padStart(2, '0');
-    const year = d.getFullYear();
-    return `${day}/${month}/${year}`;
+    const m = this.getISTMoment(date);
+    if (!m) return 'N/A';
+    return m.format('DD/MM/YYYY');
+  }
+
+  private static formatDateForFilename(date: Date | string = new Date()): string {
+    const m = this.getISTMoment(date);
+    if (!m) return 'unknown-date';
+    return m.format('YYYY-MM-DD');
+  }
+
+  private static parseBoundaryDate(date: string, boundary: 'start' | 'end'): Date | null {
+    const raw = String(date || '').trim();
+    if (!raw) return null;
+
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) {
+      const base = moment.tz(raw, 'YYYY-MM-DD', this.IST_TIMEZONE);
+      if (!base.isValid()) return null;
+      return (boundary === 'start' ? base.startOf('day') : base.endOf('day')).toDate();
+    }
+
+    const parsed = moment(raw);
+    if (!parsed.isValid()) return null;
+    return parsed.toDate();
+  }
+
+  // Dynamic exports use an exclusive end boundary ([start, end)), so display end date as end - 1 day.
+  private static formatExclusiveEndDate(endDate: Date | string): string {
+    const m = this.getISTMoment(endDate);
+    if (!m) return 'N/A';
+    return m.clone().subtract(1, 'day').format('DD/MM/YYYY');
   }
 
   /**
@@ -663,8 +720,10 @@ export class ExportService {
     } else {
       baseQuery.status = { $nin: [ExpenseReportStatus.DRAFT, ExpenseReportStatus.REJECTED] };
     }
-    if (filters.from) baseQuery.fromDate = { ...baseQuery.fromDate, $gte: new Date(filters.from) };
-    if (filters.to) baseQuery.toDate = { ...baseQuery.toDate, $lte: new Date(filters.to) };
+    const fromBoundary = filters.from ? this.parseBoundaryDate(filters.from, 'start') : null;
+    const toBoundary = filters.to ? this.parseBoundaryDate(filters.to, 'end') : null;
+    if (fromBoundary) baseQuery.fromDate = { ...baseQuery.fromDate, $gte: fromBoundary };
+    if (toBoundary) baseQuery.toDate = { ...baseQuery.toDate, $lte: toBoundary };
 
     const query = await buildCompanyQuery(req, baseQuery, 'users');
 
@@ -690,7 +749,7 @@ export class ExportService {
     const companyName = company ? (company as any).name : 'Company';
     const projectName = (reports[0] as any).projectId?.name || (reports[0] as any).projectName || 'Project';
     const dateRangeStr = [filters.from, filters.to].filter(Boolean).length
-      ? `${filters.from || 'Start'} to ${filters.to || 'End'}`
+      ? `${filters.from ? this.formatDate(filters.from) : 'Start'} to ${filters.to ? this.formatDate(filters.to) : 'End'}`
       : 'All dates';
     const generatedDate = this.formatDate(new Date());
 
@@ -768,7 +827,7 @@ export class ExportService {
 
     const ext = format === 'pdf' ? 'pdf' : 'xlsx';
     const safeProject = (projectName || 'project').replace(/[^a-zA-Z0-9-_]/g, '_').slice(0, 40);
-    const fileName = `reports_${safeProject}_${new Date().toISOString().split('T')[0]}.${ext}`;
+    const fileName = `reports_${safeProject}_${this.formatDateForFilename(new Date())}.${ext}`;
 
     return { buffer, format, fileName };
   }
@@ -1357,8 +1416,7 @@ export class ExportService {
       reportIds.add(rId);
       if (r.project && r.project !== 'N/A') projectNames.add(r.project);
 
-      const d = new Date(r.expenseDate);
-      const dateStr = `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+      const dateStr = this.formatDate(r.expenseDate);
 
       const expRow = {
         _id: r._id,
@@ -1391,7 +1449,6 @@ export class ExportService {
 
     // Raw data (flat)
     const rawData = results.map((r) => {
-      const d = new Date(r.expenseDate);
       return {
         _id: r._id,
         reportName: r.reportName || 'Unassigned',
@@ -1404,7 +1461,7 @@ export class ExportService {
         currency: r.currency,
         invoiceId: r.invoiceId,
         notes: r.notes,
-        expenseDate: `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`,
+        expenseDate: this.formatDate(r.expenseDate),
         hasReceipt: !!(r.receiptPrimaryId || (r.receiptIds && r.receiptIds.length > 0)),
       };
     });
@@ -1475,7 +1532,7 @@ export class ExportService {
     // Period
     worksheet.mergeCells(`A${row}:${lastCol}${row}`);
     const periodCell = worksheet.getCell(`A${row}`);
-    periodCell.value = `Period: ${this.formatDate(params.startDate)} to ${this.formatDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`;
+    periodCell.value = `Period: ${this.formatDate(params.startDate)} to ${this.formatExclusiveEndDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`;
     periodCell.font = { size: 10 };
     periodCell.alignment = { horizontal: 'center' };
     row += 2;
@@ -1688,7 +1745,7 @@ export class ExportService {
 
         // Period line
         doc.fontSize(10).font('Helvetica').text(
-          `Period: ${this.formatDate(params.startDate)} to ${this.formatDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`,
+          `Period: ${this.formatDate(params.startDate)} to ${this.formatExclusiveEndDate(params.endDate)}  |  Generated: ${this.formatDate(new Date())}`,
           0, y, { align: 'center' }
         );
         y = doc.y + 12;
