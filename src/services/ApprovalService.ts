@@ -6,7 +6,7 @@ import { CompanySettings } from '../models/CompanySettings';
 import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { User } from '../models/User';
-import { AuditAction, ExpenseReportStatus } from '../utils/enums';
+import { AuditAction, ExpenseReportStatus, ExpenseStatus } from '../utils/enums';
 
 import { logger } from '@/config/logger';
 
@@ -1928,6 +1928,35 @@ export class ApprovalService {
         if (instance.requestType === 'EXPENSE_REPORT') {
           const reportId = (instance.requestId as mongoose.Types.ObjectId).toString();
           await ExpenseReport.findByIdAndUpdate(instance.requestId, { status: ExpenseReportStatus.REJECTED, rejectedAt: new Date() });
+
+          // Mark all report expenses as REJECTED and clear duplicate flags.
+          // This prevents rejected expenses from participating in future duplicate checks.
+          try {
+            await Expense.updateMany(
+              { reportId: new mongoose.Types.ObjectId(reportId) },
+              {
+                $set: { status: ExpenseStatus.REJECTED },
+                $unset: { duplicateFlag: '', duplicateReason: '' },
+              }
+            ).exec();
+          } catch (expenseError: any) {
+            logger.error(
+              { error: expenseError, reportId },
+              'ApprovalService: Failed to mark report expenses as REJECTED'
+            );
+          }
+
+          // Release receipt hashes so rejected receipts can be re-used safely.
+          try {
+            const { ReceiptDuplicateDetectionService } = await import('./receiptDuplicateDetection.service');
+            await ReceiptDuplicateDetectionService.releaseReceiptHashesForReport(reportId);
+          } catch (hashError: any) {
+            logger.error(
+              { error: hashError, reportId },
+              'ApprovalService: Failed to release receipt hashes for rejected report'
+            );
+          }
+
           // Release voucher amount used on this report so it becomes available again
           try {
             const { VoucherService } = await import('./voucher.service');

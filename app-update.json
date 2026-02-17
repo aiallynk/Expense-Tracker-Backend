@@ -1,7 +1,7 @@
 {
-  "latestVersion": "1.0.14",
+  "latestVersion": "1.0.15",
   "minimumSupportedVersion": "1.0.3",
   "apkUrl": "",
-  "releaseNotes": "• Bug Fixes\n• Minor calculation bugs are solved now",
-  "sha256": "37247f9f44d284186d915d8c4a38d4692af3b7e3ba56dbc0fcee08031f6ea1a9"
+  "releaseNotes": "• Bug Fixes\n• The Focus break on Notes/vendor name field is now fixed",
+  "sha256": "01c1ec7f8d1a38b2d5661ff85107ed2cfc3bc3ab8dec042b16bceb1bfe724277"
 }

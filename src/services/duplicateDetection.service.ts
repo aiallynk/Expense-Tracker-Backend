@@ -161,8 +161,12 @@ export class DuplicateDetectionService {
         const report = candidate.reportId;
         const reportStatus = report?.status;
         const expenseStatus = candidate.status;
-        if (expenseStatus === 'REJECTED') return false;
-        if (reportStatus === ExpenseReportStatus.REJECTED) return false;
+
+        // If linked report is missing/unresolved, ignore candidate to avoid false positives.
+        if (!reportStatus) return false;
+
+        if (String(expenseStatus).toUpperCase() === 'REJECTED') return false;
+        if (String(reportStatus).toUpperCase() === String(ExpenseReportStatus.REJECTED).toUpperCase()) return false;
         return true;
       });
 
@@ -339,8 +343,11 @@ export class DuplicateDetectionService {
         const reportStatus = report?.status;
         const expenseStatus = candidate.status;
 
-        if (expenseStatus === 'REJECTED') return false;
-        if (reportStatus === ExpenseReportStatus.REJECTED) return false;
+        // If linked report is missing/unresolved, ignore candidate to avoid false positives.
+        if (!reportStatus) return false;
+
+        if (String(expenseStatus).toUpperCase() === 'REJECTED') return false;
+        if (String(reportStatus).toUpperCase() === String(ExpenseReportStatus.REJECTED).toUpperCase()) return false;
         return true;
       });
 

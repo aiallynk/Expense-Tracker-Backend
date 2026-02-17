@@ -140,15 +140,15 @@ export class ReceiptDuplicateDetectionService {
         // duplicates that were never saved — they should NOT trigger duplicate flags
         {
           $match: {
-            // Must have an expense linked
-            expense: { $exists: true },
-            // Expense is not rejected / deleted
+            // Must have a linked expense document
+            expense: { $ne: null },
+            'expense._id': { $exists: true },
+            // Expense must be active
             'expense.status': { $nin: ['REJECTED', 'DELETED'] },
-            // If report exists, it must not be rejected
-            $or: [
-              { report: { $exists: false } },
-              { 'report.status': { $ne: ExpenseReportStatus.REJECTED } },
-            ],
+            // Must have a linked non-rejected report
+            report: { $ne: null },
+            'report._id': { $exists: true },
+            'report.status': { $ne: ExpenseReportStatus.REJECTED },
           },
         },
         // Project only what we need (no user data)
@@ -264,18 +264,22 @@ export class ReceiptDuplicateDetectionService {
         .exec();
 
       for (const expense of expenses) {
-        if (expense.status === 'REJECTED' && expense.receiptIds && expense.receiptIds.length > 0) {
-          await Receipt.updateMany(
-            { _id: { $in: expense.receiptIds } },
-            {
-              $unset: {
-                imagePerceptualHash: '',
-                imageAverageHash: '',
-                ocrTextHash: '',
-              },
-            }
-          ).exec();
+        if (!expense.receiptIds || expense.receiptIds.length === 0) {
+          continue;
         }
+
+        // Called when a report is rejected: clear hashes for all report receipts.
+        // This also repairs older data where some expenses were not marked REJECTED yet.
+        await Receipt.updateMany(
+          { _id: { $in: expense.receiptIds } },
+          {
+            $unset: {
+              imagePerceptualHash: '',
+              imageAverageHash: '',
+              ocrTextHash: '',
+            },
+          }
+        ).exec();
       }
 
       logger.info({ reportId, expenseCount: expenses.length }, 

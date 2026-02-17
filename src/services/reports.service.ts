@@ -2156,6 +2156,20 @@ export class ReportsService {
       report.status = ExpenseReportStatus.REJECTED;
       report.rejectedAt = new Date();
 
+      // Mark all report expenses as REJECTED and clear duplicate flags so
+      // rejected expenses can be legitimately re-used without stale warnings.
+      try {
+        await Expense.updateMany(
+          { reportId: new mongoose.Types.ObjectId(id) },
+          {
+            $set: { status: ExpenseStatus.REJECTED },
+            $unset: { duplicateFlag: '', duplicateReason: '' },
+          }
+        ).exec();
+      } catch (error) {
+        logger.error({ error, reportId: id }, 'Failed to mark report expenses as REJECTED');
+      }
+
       // Reverse all voucher usages for this report
       try {
         const { VoucherService } = await import('./voucher.service');
@@ -2358,6 +2372,18 @@ export class ReportsService {
 
     // If report is rejected, release receipt hashes to allow resubmission
     if (newStatus === ExpenseReportStatus.REJECTED) {
+      try {
+        await Expense.updateMany(
+          { reportId: new mongoose.Types.ObjectId(id) },
+          {
+            $set: { status: ExpenseStatus.REJECTED },
+            $unset: { duplicateFlag: '', duplicateReason: '' },
+          }
+        ).exec();
+      } catch (error) {
+        logger.error({ error, reportId: id }, 'Failed to mark report expenses as REJECTED');
+      }
+
       try {
         const { ReceiptDuplicateDetectionService } = await import('./receiptDuplicateDetection.service');
         await ReceiptDuplicateDetectionService.releaseReceiptHashesForReport(id);
