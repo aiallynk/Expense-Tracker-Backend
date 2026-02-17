@@ -53,13 +53,15 @@ export class CategoryMatchingService {
       });
 
       if (!result.categoryUnidentified && result.categoryId && result.categorySuggestion) {
-        const confidencePercent =
-          result.confidence !== undefined ? Math.round(result.confidence * 100) : 80;
+        const normalizedConfidence = typeof result.confidence === 'number'
+          ? Math.max(0, Math.min(1, result.confidence))
+          : 0.55;
+        const confidencePercent = Math.round(normalizedConfidence * 100);
         const bestMatch: CategoryMatch = {
           categoryId: result.categoryId,
           categoryName: result.categorySuggestion,
           confidence: confidencePercent,
-          reasoning: result.confidence !== undefined ? 'AI/keyword inference' : 'Keyword match from receipt text',
+          reasoning: result.matchedKeywords?.length ? 'Keyword match from receipt text' : 'AI category inference',
         };
         logger.info({
           companyId,

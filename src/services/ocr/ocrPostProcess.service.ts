@@ -6,6 +6,9 @@ import { callOpenAI } from '../openaiWrapper.service';
 import { logger } from '@/config/logger';
 
 const AI_CATEGORY_TIMEOUT_MS = 10000;
+const KEYWORD_MIN_SCORE = 3;
+const KEYWORD_AMBIGUITY_MARGIN = 1;
+const KEYWORD_MAX_SCORE_FOR_CONFIDENCE = 12;
 
 /** Line item with description (or desc from API) and amount */
 export interface LineItemLike {
@@ -220,6 +223,58 @@ function scoreKeywordInText(
 }
 
 type CategoryLean = { name: string; code?: string; _id: mongoose.Types.ObjectId };
+type ScoredCategory = {
+  category: CategoryLean;
+  score: number;
+  matchedKeywords: string[];
+  matchedInVendor: boolean;
+};
+
+function isOthersCategoryName(name: string): boolean {
+  const normalized = name.toString().trim().toLowerCase();
+  return /^(other|others|misc|miscellaneous|general)$/.test(normalized);
+}
+
+function scoreCategoryKeywords(
+  category: CategoryLean,
+  normalizedText: string,
+  normalizedVendor: string
+): ScoredCategory {
+  const baseKeywords = deriveCategoryKeywords(category.name, category.code);
+  const nameLower = category.name.trim().toLowerCase();
+  const vendorSynonyms = VENDOR_SYNONYM_KEYWORDS[nameLower] || [];
+  const keywords = [...new Set([...baseKeywords, ...vendorSynonyms.map((s) => s.toLowerCase().trim())])];
+
+  let score = 0;
+  const matchedKeywords: string[] = [];
+  let matchedInVendor = false;
+
+  for (const kw of keywords) {
+    const { exact, partial } = scoreKeywordInText(normalizedText, kw);
+    if (exact) {
+      score += 2;
+      matchedKeywords.push(kw);
+    } else if (partial) {
+      score += 1;
+      matchedKeywords.push(kw);
+    }
+
+    if (normalizedVendor && (exact || partial)) {
+      const inVendor = scoreKeywordInText(normalizedVendor, kw);
+      if (inVendor.exact || inVendor.partial) {
+        score += 1;
+        matchedInVendor = true;
+      }
+    }
+  }
+
+  return {
+    category,
+    score,
+    matchedKeywords,
+    matchedInVendor,
+  };
+}
 
 /**
  * Try AI-based category inference. Returns null if disabled, invalid, or on error (caller should fall back to keyword).
@@ -227,7 +282,8 @@ type CategoryLean = { name: string; code?: string; _id: mongoose.Types.ObjectId 
 async function tryAICategoryInference(
   fullText: string,
   categories: CategoryLean[],
-  companyId?: mongoose.Types.ObjectId
+  companyId?: mongoose.Types.ObjectId,
+  options?: { vendorText?: string }
 ): Promise<CategoryInferenceResult | null> {
   if (config.ai?.disableCategoryMatching || !config.openai?.apiKey) {
     return null;
@@ -387,6 +443,26 @@ Return JSON only, no other text:
     );
     if (!matchedCategory) return null;
 
+    const normalizedVendor = (options?.vendorText ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const aiKeywordEvidence = scoreCategoryKeywords(matchedCategory, fullText, normalizedVendor);
+    const aiCategoryIsOthers = isOthersCategoryName(matchedCategory.name);
+    const hasAiEvidence =
+      aiKeywordEvidence.score >= 2 ||
+      fullText.includes(matchedCategory.name.trim().toLowerCase());
+
+    if (!aiCategoryIsOthers && !hasAiEvidence) {
+      logger.info(
+        {
+          companyId,
+          aiCategory: matchedCategory.name,
+          confidence,
+          textPreview: fullText.slice(0, 100),
+        },
+        'OCR post-process: AI category lacked lexical evidence, falling back to keyword scoring'
+      );
+      return null;
+    }
+
     logger.info(
       { companyId, categoryName: matchedCategory.name, confidence },
       'OCR post-process: category inferred from AI'
@@ -394,8 +470,9 @@ Return JSON only, no other text:
     return {
       categorySuggestion: matchedCategory.name,
       categoryId: matchedCategory._id,
-      categoryUnidentified: false,
+      categoryUnidentified: aiCategoryIsOthers,
       confidence,
+      matchedKeywords: aiKeywordEvidence.matchedKeywords,
     };
   } catch (err: any) {
     logger.debug({ err: err?.message, companyId }, 'OCR post-process: AI category inference failed, using keyword fallback');
@@ -435,86 +512,67 @@ export async function inferCategoryFromReceiptText(
     return { categorySuggestion: null, categoryUnidentified: true };
   }
 
-  const aiResult = await tryAICategoryInference(normalizedText, categories, companyId);
-  if (aiResult !== null) return aiResult;
-
-  type ScoredCategory = {
-    category: { name: string; code?: string; _id: mongoose.Types.ObjectId };
-    score: number;
-    matchedKeywords: string[];
-    matchedInVendor: boolean;
-  };
-
-  let bestScore = 0;
-  const bestCategories: ScoredCategory[] = [];
-
-  for (const category of categories) {
-    const baseKeywords = deriveCategoryKeywords(category.name, category.code);
-    const nameLower = category.name.trim().toLowerCase();
-    const vendorSynonyms = VENDOR_SYNONYM_KEYWORDS[nameLower] || [];
-    const keywords = [...new Set([...baseKeywords, ...vendorSynonyms.map((s) => s.toLowerCase().trim())])];
-    if (keywords.length === 0) continue;
-
-    let score = 0;
-    const matchedKeywords: string[] = [];
-    let matchedInVendor = false;
-
-    for (const kw of keywords) {
-      const { exact, partial } = scoreKeywordInText(normalizedText, kw);
-      if (exact) {
-        score += 2;
-        matchedKeywords.push(kw);
-      } else if (partial) {
-        score += 1;
-        matchedKeywords.push(kw);
-      }
-      if (normalizedVendor && (exact || partial)) {
-        const inVendor = scoreKeywordInText(normalizedVendor, kw);
-        if (inVendor.exact || inVendor.partial) {
-          score += 1;
-          matchedInVendor = true;
-        }
-      }
-    }
-
-    if (score <= 0) continue;
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestCategories.length = 0;
-      bestCategories.push({ category, score, matchedKeywords, matchedInVendor });
-    } else if (score === bestScore) {
-      bestCategories.push({ category, score, matchedKeywords, matchedInVendor });
-    }
-  }
-
-  if (bestScore === 0 || bestCategories.length === 0) {
-    // No category matched - find "Others" category as fallback
-    const othersCategory = categories.find(
-      (c) => c.name.trim().toLowerCase() === 'others'
-    );
-
+  const resolveOthersFallback = (
+    reason: string,
+    metadata?: { bestScore?: number; secondBestScore?: number; keywordHits?: string[] }
+  ): CategoryInferenceResult => {
+    const othersCategory = categories.find((c) => isOthersCategoryName(c.name));
     if (othersCategory) {
       logger.info(
-        { companyId, textPreview: normalizedText.slice(0, 100), categoryName: 'Others' },
-        'OCR post-process: no category matched, defaulting to Others (needs manual review)'
+        {
+          companyId,
+          reason,
+          textPreview: normalizedText.slice(0, 100),
+          ...metadata,
+        },
+        'OCR post-process: defaulting to Others (needs manual review)'
       );
       return {
         categorySuggestion: othersCategory.name,
         categoryId: othersCategory._id,
-        categoryUnidentified: true, // Flag for manual review
-      };
-    } else {
-      // No "Others" category found either - truly uncategorized
-      logger.warn(
-        { companyId, textPreview: normalizedText.slice(0, 100) },
-        'OCR post-process: no category matched and no Others category available'
-      );
-      return {
-        categorySuggestion: null,
         categoryUnidentified: true,
+        confidence: 0.25,
       };
     }
+
+    logger.warn(
+      {
+        companyId,
+        reason,
+        textPreview: normalizedText.slice(0, 100),
+        ...metadata,
+      },
+      'OCR post-process: no suitable category and no Others category available'
+    );
+    return {
+      categorySuggestion: null,
+      categoryUnidentified: true,
+    };
+  };
+
+  const aiResult = await tryAICategoryInference(normalizedText, categories, companyId, options);
+  if (aiResult !== null) return aiResult;
+
+  let bestScore = 0;
+  const scoredCategories: ScoredCategory[] = [];
+  const bestCategories: ScoredCategory[] = [];
+
+  for (const category of categories) {
+    const scoredCategory = scoreCategoryKeywords(category, normalizedText, normalizedVendor);
+    if (scoredCategory.score <= 0) continue;
+
+    scoredCategories.push(scoredCategory);
+    if (scoredCategory.score > bestScore) {
+      bestScore = scoredCategory.score;
+      bestCategories.length = 0;
+      bestCategories.push(scoredCategory);
+    } else if (scoredCategory.score === bestScore) {
+      bestCategories.push(scoredCategory);
+    }
+  }
+
+  if (bestScore === 0 || bestCategories.length === 0) {
+    return resolveOthersFallback('no_keyword_match');
   }
 
   const compareCategories = (a: ScoredCategory, b: ScoredCategory) => {
@@ -547,12 +605,49 @@ export async function inferCategoryFromReceiptText(
     chosen = bestCategories.sort(compareCategories)[0];
   }
 
+  const sortedByScore = [...scoredCategories].sort((a, b) => b.score - a.score);
+  const secondBestScore = sortedByScore.length > 1 ? sortedByScore[1].score : 0;
+  const chosenName = chosen.category.name.trim().toLowerCase();
+  const chosenNameInText = normalizedText.includes(chosenName);
+  const hasStrongSignal = chosen.matchedInVendor || chosenNameInText || chosen.matchedKeywords.length >= 2;
+  const isWeakMatch = bestScore < KEYWORD_MIN_SCORE && !hasStrongSignal;
+  const isAmbiguousMatch =
+    secondBestScore > 0 &&
+    bestScore - secondBestScore <= KEYWORD_AMBIGUITY_MARGIN &&
+    !hasStrongSignal;
+
+  if (isWeakMatch || isAmbiguousMatch) {
+    return resolveOthersFallback(
+      isWeakMatch ? 'keyword_match_too_weak' : 'keyword_match_ambiguous',
+      {
+        bestScore,
+        secondBestScore,
+        keywordHits: chosen.matchedKeywords,
+      }
+    );
+  }
+
+  const scoreDelta = Math.max(0, bestScore - secondBestScore);
+  let keywordConfidence =
+    0.45 +
+    Math.min(bestScore, KEYWORD_MAX_SCORE_FOR_CONFIDENCE) * 0.04 +
+    Math.min(scoreDelta, 4) * 0.06;
+  if (chosen.matchedInVendor) keywordConfidence += 0.08;
+  if (chosenNameInText) keywordConfidence += 0.05;
+  keywordConfidence = Math.max(0.5, Math.min(0.95, keywordConfidence));
+  const chosenIsOthers = isOthersCategoryName(chosen.category.name);
+  if (chosenIsOthers) {
+    keywordConfidence = Math.min(keywordConfidence, 0.45);
+  }
+
   logger.info(
     {
       companyId,
       categoryName: chosen.category.name,
       categoryId: chosen.category._id,
       keywordHits: chosen.matchedKeywords,
+      bestScore,
+      secondBestScore,
     },
     'OCR post-process: category inferred from dynamic keywords'
   );
@@ -560,8 +655,9 @@ export async function inferCategoryFromReceiptText(
   return {
     categorySuggestion: chosen.category.name,
     categoryId: chosen.category._id,
-    categoryUnidentified: false,
+    categoryUnidentified: chosenIsOthers,
     matchedKeywords: chosen.matchedKeywords,
+    confidence: keywordConfidence,
   };
 }
 

@@ -122,7 +122,48 @@ export async function flushCompanyData(options: FlushDataOptions): Promise<Flush
 
           // Delete report-related records (VoucherUsage, AdvanceCashTransaction, Ledger if they exist)
           try {
-            const { VoucherUsage } = await import('../models/VoucherUsage');
+            const { VoucherUsage, VoucherUsageStatus } = await import('../models/VoucherUsage');
+            const { AdvanceCash, AdvanceCashStatus } = await import('../models/AdvanceCash');
+
+            // Restore voucher balances before deleting report/voucher usage records.
+            const appliedUsages = await VoucherUsage.find({
+              reportId: { $in: reportIds },
+              status: VoucherUsageStatus.APPLIED,
+            })
+              .select('voucherId amountUsed')
+              .session(session)
+              .lean()
+              .exec();
+
+            if (appliedUsages.length > 0) {
+              const amountByVoucher = new Map<string, number>();
+              for (const usage of appliedUsages) {
+                const voucherId = usage.voucherId?.toString?.();
+                if (!voucherId) continue;
+                amountByVoucher.set(
+                  voucherId,
+                  (amountByVoucher.get(voucherId) || 0) + (Number(usage.amountUsed) || 0)
+                );
+              }
+
+              for (const [voucherId, restoreAmount] of amountByVoucher.entries()) {
+                const voucher = await AdvanceCash.findById(voucherId).session(session).exec();
+                if (!voucher) continue;
+
+                voucher.usedAmount = Math.max(0, (voucher.usedAmount || 0) - restoreAmount);
+                voucher.remainingAmount = Math.max(0, (voucher.totalAmount || 0) - voucher.usedAmount);
+                voucher.balance = voucher.remainingAmount;
+
+                if (voucher.status !== AdvanceCashStatus.RETURNED) {
+                  if (voucher.remainingAmount === 0) voucher.status = AdvanceCashStatus.EXHAUSTED;
+                  else if (voucher.remainingAmount < (voucher.totalAmount || 0)) voucher.status = AdvanceCashStatus.PARTIAL;
+                  else voucher.status = AdvanceCashStatus.ACTIVE;
+                }
+
+                await voucher.save({ session });
+              }
+            }
+
             await VoucherUsage.deleteMany({ reportId: { $in: reportIds } }).session(session);
           } catch (e) {
             errors.push(`VoucherUsage: ${(e as Error).message}`);

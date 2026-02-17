@@ -247,7 +247,8 @@ export class ApprovalRecordService {
      * @returns Additional approver info if applicable
      */
     static async resolveAdditionalApprovers(
-        approvalInstance: IApprovalInstance
+        approvalInstance: IApprovalInstance,
+        matrixLevels: any[] = []
     ): Promise<{
         isAdditionalApproverLevel: boolean;
         approverUserId?: string;
@@ -266,8 +267,21 @@ export class ApprovalRecordService {
             return { isAdditionalApproverLevel: false };
         }
 
+        const currentLevelNum = Number(approvalInstance.currentLevel);
+        const hasMatrixLevelAtCurrent = Array.isArray(matrixLevels) && matrixLevels.some(
+            (l: any) =>
+                Number(l?.levelNumber ?? l?.level ?? 0) === currentLevelNum &&
+                l?.enabled !== false
+        );
+
+        // Matrix level always has precedence. Additional approvers are only valid for levels
+        // that are outside the configured matrix chain.
+        if (hasMatrixLevelAtCurrent) {
+            return { isAdditionalApproverLevel: false };
+        }
+
         const currentApprover = (report.approvers as any[]).find(
-            (a: any) => a.level === approvalInstance.currentLevel && a.isAdditionalApproval === true
+            (a: any) => Number(a.level) === currentLevelNum && a.isAdditionalApproval === true
         );
 
         if (!currentApprover) {

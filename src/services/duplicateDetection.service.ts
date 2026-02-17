@@ -11,7 +11,9 @@
  * Matching: vendor_name (normalized), amount (2 decimals), date (UTC ±1 day), invoice_id (optional).
  * Rules:
  * - Any 3 of { vendor, amount, date, invoice_id } match within same company → POTENTIAL_DUPLICATE
- * - invoice_id match within same company → STRONG_DUPLICATE
+ * - invoice_id + at least 2 of { vendor, amount, date } within same company → STRONG_DUPLICATE
+ * - invoice_id + exactly 1 of { vendor, amount, date } within same company → POTENTIAL_DUPLICATE
+ * - invoice_id alone is not enough (invoice numbers can repeat across vendors)
  *
  * Stores duplicateFlag, duplicateReason on expense. Exposed to approver & company admin.
  * Users see warning: "This expense appears similar to another expense submitted in your company."
@@ -60,6 +62,25 @@ function normalizeInvoiceId(s: string): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '');
+}
+
+function buildMatchReason({
+  matchVendor,
+  matchAmount,
+  matchDate,
+  matchInvoiceId,
+}: {
+  matchVendor: boolean;
+  matchAmount: boolean;
+  matchDate: boolean;
+  matchInvoiceId: boolean;
+}): string {
+  const parts: string[] = [];
+  if (matchVendor) parts.push('vendor');
+  if (matchAmount) parts.push('amount');
+  if (matchDate) parts.push('date');
+  if (matchInvoiceId) parts.push('invoice_id');
+  return parts.join(' + ');
 }
 
 export class DuplicateDetectionService {
@@ -146,6 +167,7 @@ export class DuplicateDetectionService {
       });
 
       let strongMatch: (typeof candidates)[0] | null = null;
+      let strongReason: string | null = null;
       let potentialMatch: (typeof candidates)[0] | null = null;
       let potentialReason: string | null = null;
 
@@ -169,22 +191,26 @@ export class DuplicateDetectionService {
           !!oid &&
           normalizeInvoiceId(invoiceId) === normalizeInvoiceId(oid);
 
-        // STRONG_DUPLICATE: invoice_id match
+        // invoice_id requires support from vendor/date/amount to avoid false positives across vendors.
         if (matchInvoiceId) {
-          strongMatch = other;
-          break;
+          const invoiceSupportCount = [matchVendor, matchAmount, matchDate].filter(Boolean).length;
+          if (invoiceSupportCount >= 2) {
+            strongMatch = other;
+            strongReason = buildMatchReason({ matchVendor, matchAmount, matchDate, matchInvoiceId });
+            break;
+          }
+          if (invoiceSupportCount === 1 && !potentialMatch) {
+            potentialMatch = other;
+            potentialReason = buildMatchReason({ matchVendor, matchAmount, matchDate, matchInvoiceId });
+            continue;
+          }
         }
 
         // POTENTIAL_DUPLICATE: any 3 of { vendor, amount, date, invoice_id } match
         const matchCount = [matchVendor, matchAmount, matchDate, matchInvoiceId].filter(Boolean).length;
         if (matchCount >= 3 && !potentialMatch) {
-          const parts: string[] = [];
-          if (matchVendor) parts.push('vendor');
-          if (matchAmount) parts.push('amount');
-          if (matchDate) parts.push('date');
-          if (matchInvoiceId) parts.push('invoice_id');
           potentialMatch = other;
-          potentialReason = parts.slice(0, 3).join(' + ');
+          potentialReason = buildMatchReason({ matchVendor, matchAmount, matchDate, matchInvoiceId });
         }
       }
 
@@ -193,7 +219,7 @@ export class DuplicateDetectionService {
 
       if (strongMatch) {
         flag = 'STRONG_DUPLICATE';
-        reason = 'invoice_id';
+        reason = strongReason || 'invoice_id';
       } else if (potentialMatch && potentialReason) {
         flag = 'POTENTIAL_DUPLICATE';
         reason = potentialReason;
@@ -319,6 +345,7 @@ export class DuplicateDetectionService {
       });
 
       let strongMatch: (typeof candidates)[0] | null = null;
+      let strongReason: string | null = null;
       let potentialMatch: (typeof candidates)[0] | null = null;
       let potentialReason: string | null = null;
 
@@ -343,22 +370,26 @@ export class DuplicateDetectionService {
           !!oid &&
           normalizeInvoiceId(invoiceId) === normalizeInvoiceId(oid);
 
-        // STRONG_DUPLICATE: invoice_id match (optional vendor/amount/date tolerance per plan)
+        // invoice_id requires support from vendor/date/amount to avoid false positives across vendors.
         if (matchInvoiceId) {
-          strongMatch = other;
-          break;
+          const invoiceSupportCount = [matchVendor, matchAmount, matchDate].filter(Boolean).length;
+          if (invoiceSupportCount >= 2) {
+            strongMatch = other;
+            strongReason = buildMatchReason({ matchVendor, matchAmount, matchDate, matchInvoiceId });
+            break;
+          }
+          if (invoiceSupportCount === 1 && !potentialMatch) {
+            potentialMatch = other;
+            potentialReason = buildMatchReason({ matchVendor, matchAmount, matchDate, matchInvoiceId });
+            continue;
+          }
         }
 
         // POTENTIAL_DUPLICATE: any 3 of { vendor, amount, date, invoice_id } match
         const matchCount = [matchVendor, matchAmount, matchDate, matchInvoiceId].filter(Boolean).length;
         if (matchCount >= 3 && !potentialMatch) {
-          const parts: string[] = [];
-          if (matchVendor) parts.push('vendor');
-          if (matchAmount) parts.push('amount');
-          if (matchDate) parts.push('date');
-          if (matchInvoiceId) parts.push('invoice_id');
           potentialMatch = other;
-          potentialReason = parts.slice(0, 3).join(' + ');
+          potentialReason = buildMatchReason({ matchVendor, matchAmount, matchDate, matchInvoiceId });
         }
       }
 
@@ -367,7 +398,7 @@ export class DuplicateDetectionService {
 
       if (strongMatch) {
         flag = 'STRONG_DUPLICATE';
-        reason = 'invoice_id';
+        reason = strongReason || 'invoice_id';
       } else if (potentialMatch && potentialReason) {
         flag = 'POTENTIAL_DUPLICATE';
         reason = potentialReason;

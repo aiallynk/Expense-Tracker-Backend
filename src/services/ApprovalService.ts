@@ -56,6 +56,58 @@ import { DateUtils } from '../utils/dateUtils';
 // Employee-level chains can be integrated later without breaking ApprovalInstance flow.
 
 export class ApprovalService {
+
+  private static getEnabledSortedLevels(levels: any[]): any[] {
+    return [...(Array.isArray(levels) ? levels : [])]
+      .filter((l: any) => l?.enabled !== false)
+      .sort((a: any, b: any) => {
+        const aNum = Number(a?.levelNumber ?? a?.level ?? 0);
+        const bNum = Number(b?.levelNumber ?? b?.level ?? 0);
+        return aNum - bNum;
+      });
+  }
+
+  private static getMaxEnabledLevelNumber(levels: any[]): number {
+    const numericLevels = this.getEnabledSortedLevels(levels)
+      .map((l: any) => Number(l?.levelNumber ?? l?.level ?? 0))
+      .filter((n: number) => Number.isFinite(n) && n > 0);
+
+    return numericLevels.length > 0 ? Math.max(...numericLevels) : 0;
+  }
+
+  private static shouldSkipSelfApprovalLevel(
+    approvalType: 'USER_BASED' | 'ROLE_BASED',
+    explicitApproverUserIds: string[],
+    submitterNorm: string,
+    allowSelfApproval: boolean
+  ): boolean {
+    if (allowSelfApproval) return false;
+    if (approvalType !== 'USER_BASED') return false;
+
+    // Skip ONLY when the submitter is the sole explicit approver at this level.
+    // If multiple explicit approvers exist, the level must remain pending for others.
+    const normalizedExplicit = [...new Set(
+      (explicitApproverUserIds || [])
+        .map((id: string) => id?.toString?.().toLowerCase().trim())
+        .filter(Boolean)
+    )];
+
+    return normalizedExplicit.length === 1 && normalizedExplicit[0] === submitterNorm;
+  }
+
+  private static async normalizeApprovalUserId(userIdLike: any): Promise<string | null> {
+    const rawId = (userIdLike?._id ?? userIdLike)?.toString?.() ?? String(userIdLike ?? '');
+    if (!rawId || rawId === 'undefined' || rawId === 'null' || rawId.includes('object')) {
+      return null;
+    }
+    if (!mongoose.Types.ObjectId.isValid(rawId)) {
+      return null;
+    }
+
+    const resolved = await resolveUserForApproval(rawId);
+    const effectiveId = resolved?.effectiveUserId ?? rawId;
+    return effectiveId.toLowerCase().trim();
+  }
   /**
  * Initiates approval for an Expense Report using the active Approval Matrix.
  * 
@@ -127,6 +179,56 @@ export class ApprovalService {
     // Levels to use: personalized (effectiveMatrix) or company matrix
     const levelsToUse = effectiveMatrix?.levels?.length ? effectiveMatrix.levels : (matrix as any).levels || [];
 
+    // Resolve matrix approvers once so additional approver overlap can be skipped deterministically.
+    const matrixApproverUserIds = new Set<string>();
+    for (const level of this.getEnabledSortedLevels(levelsToUse || [])) {
+      const { userIds } = await this.getApproverUserIdsForLevel(level, companyId);
+      for (const userId of userIds) {
+        const normalizedUserId = await this.normalizeApprovalUserId(userId);
+        if (normalizedUserId) {
+          matrixApproverUserIds.add(normalizedUserId);
+        }
+      }
+    }
+
+    const initialAdditionalApproversRaw = [
+      ...((Array.isArray((initialData as any)?.additionalApprovers) ? (initialData as any).additionalApprovers : []) as any[]),
+      ...((Array.isArray((requestData as any)?.approvers) ? (requestData as any).approvers : []) as any[]),
+    ].filter((a: any) => a?.isAdditionalApproval === true);
+
+    const initialAdditionalApprovers: any[] = [];
+    const seenAdditionalKeys = new Set<string>();
+    for (const additionalApprover of initialAdditionalApproversRaw) {
+      const normalizedAdditionalApproverId = await this.normalizeApprovalUserId(additionalApprover?.userId);
+      if (!normalizedAdditionalApproverId) {
+        continue;
+      }
+
+      // If the additional approver is already present in matrix levels, skip duplicate additional step.
+      if (matrixApproverUserIds.has(normalizedAdditionalApproverId)) {
+        logger.info(
+          {
+            requestId,
+            userId: normalizedAdditionalApproverId,
+            reason: 'additional approver already present in matrix',
+          },
+          'initiateApproval: skipped additional approver due to matrix overlap'
+        );
+        continue;
+      }
+
+      const dedupeKey = `${normalizedAdditionalApproverId}:${Number(additionalApprover?.level ?? 0)}`;
+      if (seenAdditionalKeys.has(dedupeKey)) {
+        continue;
+      }
+      seenAdditionalKeys.add(dedupeKey);
+
+      initialAdditionalApprovers.push({
+        ...additionalApprover,
+        userId: new mongoose.Types.ObjectId(normalizedAdditionalApproverId),
+      });
+    }
+
     // ============================================================
     // STEP 1: CREATE APPROVAL INSTANCE (DETERMINISTIC)
     // ============================================================
@@ -144,8 +246,7 @@ export class ApprovalService {
     const virtualMatrix = { ...(matrix as any).toObject?.() ?? matrix, levels: levelsToUse };
 
     // SKIP_SELF (always): skip levels where submitter is an approver; auto-approve if submitter is last
-    const levels = (levelsToUse || []).filter((l: any) => l.enabled !== false);
-    const sortedLevels = [...levels].sort((a: any, b: any) => (a.levelNumber ?? a.level ?? 0) - (b.levelNumber ?? b.level ?? 0));
+    const sortedLevels = this.getEnabledSortedLevels(levelsToUse || []);
     const history: any[] = [];
     let firstNonSubmitterLevelNum: number | null = null;
     const submitterNorm = submitterId.toString().toLowerCase().trim();
@@ -170,8 +271,12 @@ export class ApprovalService {
       const levelNum = Number(level?.levelNumber ?? level?.level ?? (i + 1));
       const { userIds: approverIds, approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(level, companyId);
       const explicitIds = explicitApproverUserIds ?? [];
-      const isSubmitterExplicitApprover = explicitIds.some((id) => id.toString().toLowerCase().trim() === submitterNorm);
-      const shouldSkip = approvalType === 'USER_BASED' && isSubmitterExplicitApprover && !allowSelfApproval;
+      const shouldSkip = this.shouldSkipSelfApprovalLevel(
+        approvalType,
+        explicitIds,
+        submitterNorm,
+        allowSelfApproval
+      );
       logger.info({
         requestId,
         levelNum,
@@ -207,6 +312,94 @@ export class ApprovalService {
       }
     }
     if (firstNonSubmitterLevelNum == null) {
+      // If matrix levels are fully skipped, route to additional approver chain before auto-approval.
+      if (initialAdditionalApprovers.length > 0) {
+        const maxMatrixLevel = this.getMaxEnabledLevelNumber(sortedLevels);
+        const sortedAdditionalApprovers = [...initialAdditionalApprovers].sort(
+          (a: any, b: any) => Number(a.level ?? 0) - Number(b.level ?? 0)
+        );
+        let previousLevel = maxMatrixLevel;
+        const normalizedAdditionalApprovers = sortedAdditionalApprovers.map((additionalApprover: any) => {
+          const requestedLevel = Number(additionalApprover.level);
+          const normalizedLevel = Number.isFinite(requestedLevel) && requestedLevel > previousLevel
+            ? requestedLevel
+            : previousLevel + 1;
+          previousLevel = normalizedLevel;
+          return {
+            ...additionalApprover,
+            level: normalizedLevel,
+          };
+        });
+
+        let firstEligibleAdditionalApprover: any | null = null;
+        for (const additionalApprover of normalizedAdditionalApprovers) {
+          const additionalLevel = Number(additionalApprover.level ?? (maxMatrixLevel + 1));
+          const additionalApproverId = (additionalApprover.userId?._id ?? additionalApprover.userId)?.toString?.() ?? '';
+          const normalizedAdditionalApproverId = additionalApproverId.toLowerCase().trim();
+
+          // Apply self-skip per additional level as well.
+          if (!allowSelfApproval && normalizedAdditionalApproverId && normalizedAdditionalApproverId === submitterNorm) {
+            history.push({
+              levelNumber: additionalLevel,
+              status: ApprovalStatus.SKIPPED,
+              timestamp: new Date(),
+              comments: 'Self approval skipped per company policy',
+            });
+            await AuditService.log(submitterId, 'ExpenseReport', requestId, AuditAction.SELF_APPROVAL_SKIPPED, {
+              reportId: requestId,
+              userId: submitterId,
+              policy: 'SKIP_SELF',
+              level: additionalLevel,
+            });
+            continue;
+          }
+
+          firstEligibleAdditionalApprover = additionalApprover;
+          break;
+        }
+
+        if (firstEligibleAdditionalApprover) {
+          const additionalLevel = Number(firstEligibleAdditionalApprover.level ?? (maxMatrixLevel + 1));
+          const additionalApproverId = (firstEligibleAdditionalApprover.userId?._id ?? firstEligibleAdditionalApprover.userId)?.toString?.() ?? '';
+
+          if (!additionalApproverId || !mongoose.Types.ObjectId.isValid(additionalApproverId)) {
+            throw new Error('Invalid additional approver configuration');
+          }
+
+          instance.currentLevel = additionalLevel;
+          instance.status = ApprovalStatus.PENDING;
+          instance.history = history;
+          if (levelsToUse?.length) {
+            (instance as any).effectiveLevels = levelsToUse;
+          }
+
+          await instance.save();
+          await this.syncRequestStatus(instance);
+
+          const { NotificationQueueService } = await import('./NotificationQueueService');
+          await NotificationQueueService.enqueue('APPROVAL_REQUIRED', {
+            approvalInstance: instance,
+            levelConfig: {
+              levelNumber: additionalLevel,
+              approverUserIds: [additionalApproverId],
+              approverRoleIds: [],
+              enabled: true,
+            },
+            requestData,
+            approverUserIds: [additionalApproverId],
+          });
+
+          logger.info({
+            instanceId: instance._id,
+            requestId,
+            routedLevel: additionalLevel,
+            additionalApproverId,
+          }, 'Routed to additional approver after skipping all matrix self-approval levels');
+
+          return instance;
+        }
+      }
+
       instance.status = ApprovalStatus.APPROVED;
       instance.history = history;
       try {
@@ -283,7 +476,7 @@ export class ApprovalService {
     const { ApprovalRecordService } = await import('./ApprovalRecordService');
 
     // Check if this is an additional approver level
-    const additionalApproverInfo = await ApprovalRecordService.resolveAdditionalApprovers(instance);
+    const additionalApproverInfo = await ApprovalRecordService.resolveAdditionalApprovers(instance, levelsToUse as any[]);
 
     let recordResult;
     if (additionalApproverInfo.isAdditionalApproverLevel) {
@@ -495,39 +688,40 @@ export class ApprovalService {
     }
     const { user } = resolved;
     const currentUserId = (user._id as mongoose.Types.ObjectId).toString();
-    // Check additional approver first: report.approvers defines the level; do not deny when matrixLevels is empty
-    const report = await ExpenseReport.findById(reportObjId).select('approvers').lean().exec();
-    if (report?.approvers) {
-      const currentAdditional = (report.approvers as any[]).find(
-        (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
-      );
-      if (currentAdditional) {
-        const approverUserId = currentAdditional.userId?.toString?.() || currentAdditional.userId;
-        if (approverUserId === currentUserId) return true;
-        return false;
-      }
-    }
-
     const matrix = instance.matrixId as any;
     const matrixLevels = (instance as any).effectiveLevels?.length
       ? (instance as any).effectiveLevels
       : matrix?.levels ?? [];
-    if (matrixLevels.length === 0) {
-      logger.debug({ reportId, instanceId: (instance as any)._id }, 'isUserAllowedToViewReportAsApprover: no matrix levels');
+
+    // Matrix level: support both levelNumber and level for compatibility
+    const currentMatrixLevel = matrixLevels.find(
+      (l: any) => (l.levelNumber === instance.currentLevel) || (l.level === instance.currentLevel)
+    );
+
+    // Additional approver should only be considered when current level is NOT a matrix level.
+    if (!currentMatrixLevel) {
+      const report = await ExpenseReport.findById(reportObjId).select('approvers').lean().exec();
+      if (report?.approvers) {
+        const currentAdditional = (report.approvers as any[]).find(
+          (a: any) => Number(a.level) === Number(instance.currentLevel) && a.isAdditionalApproval === true
+        );
+        if (currentAdditional) {
+          const approverUserId = currentAdditional.userId?.toString?.() || currentAdditional.userId;
+          return approverUserId === currentUserId;
+        }
+      }
+
+      if (matrixLevels.length === 0) {
+        logger.debug({ reportId, instanceId: (instance as any)._id }, 'isUserAllowedToViewReportAsApprover: no matrix levels');
+      } else {
+        logger.debug({ reportId, currentLevel: instance.currentLevel, levelsCount: matrixLevels.length }, 'isUserAllowedToViewReportAsApprover: current level not found in matrix');
+      }
       return false;
     }
 
-    // Matrix level: support both levelNumber and level for compatibility
-    const currentLevel = matrixLevels.find(
-      (l: any) => (l.levelNumber === instance.currentLevel) || (l.level === instance.currentLevel)
-    );
-    if (!currentLevel) {
-      logger.debug({ reportId, currentLevel: instance.currentLevel, levelsCount: matrixLevels.length }, 'isUserAllowedToViewReportAsApprover: current level not found in matrix');
-      return false;
-    }
     const companyIdStr = user.companyId?.toString?.();
     if (!companyIdStr) return false;
-    const { userIds: resolvedApproverIds } = await this.getApproverUserIdsForLevel(currentLevel, companyIdStr);
+    const { userIds: resolvedApproverIds } = await this.getApproverUserIdsForLevel(currentMatrixLevel, companyIdStr);
     const normalized = new Set(resolvedApproverIds.map((id) => id.toLowerCase().trim()));
     const allowed = normalized.has(currentUserId.toLowerCase().trim());
     if (!allowed) {
@@ -603,16 +797,17 @@ export class ApprovalService {
           const matrixLevels = (instance as any).effectiveLevels?.length
             ? (instance as any).effectiveLevels
             : matrix?.levels ?? [];
+          const currentMatrixLevel = matrixLevels.find(
+            (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(instance.currentLevel)
+          );
 
-          // CRITICAL: Check additional approver level FIRST (before skipping on empty matrixLevels).
-          // When instance is at an additional approver level, report.approvers defines the level;
-          // we must not skip the instance when matrixLevels is empty (e.g. matrix deleted or no effectiveLevels).
+          // Additional approver path is only valid when current level is NOT a matrix level.
           let isAdditionalApproverLevel = false;
           let isAuthorized = false;
           let roleNameForResponse = 'Approver';
           let resolvedApproverCount = 0;
 
-          if (instance.requestType === 'EXPENSE_REPORT') {
+          if (!currentMatrixLevel && instance.requestType === 'EXPENSE_REPORT') {
             const report = await ExpenseReport.findById(instance.requestId)
               .select('approvers')
               .lean()
@@ -620,7 +815,7 @@ export class ApprovalService {
 
             if (report && report.approvers) {
               const currentAdditionalApprover = (report.approvers as any[]).find(
-                (a: any) => a.level === instance.currentLevel && a.isAdditionalApproval === true
+                (a: any) => Number(a.level) === Number(instance.currentLevel) && a.isAdditionalApproval === true
               );
 
               if (currentAdditionalApprover) {
@@ -659,7 +854,7 @@ export class ApprovalService {
 
           // If not an additional approver level, check matrix levels (or effectiveLevels for personalized matrix)
           if (!isAdditionalApproverLevel) {
-            const currentLevel = matrixLevels.find((l: any) => (l.levelNumber ?? l.level) === instance.currentLevel);
+            const currentLevel = currentMatrixLevel;
             if (!currentLevel) {
               logger.warn({
                 instanceId: instance._id,
@@ -1390,7 +1585,7 @@ export class ApprovalService {
 
     while (instance.status === ApprovalStatus.PENDING) {
       const { ApprovalRecordService } = await import('./ApprovalRecordService');
-      const additionalInfo = await ApprovalRecordService.resolveAdditionalApprovers(instance);
+      const additionalInfo = await ApprovalRecordService.resolveAdditionalApprovers(instance, levelsToUse as any[]);
       let currentLevelApproverIds: string[] = [];
 
       if (additionalInfo.isAdditionalApproverLevel && additionalInfo.approverUserId) {
@@ -1485,11 +1680,24 @@ export class ApprovalService {
       // Check if this is an additional approver level
       const report = await ExpenseReport.findById(instance.requestId).exec();
       if (report) {
-        const currentApprover = (report.approvers || []).find(
-          (a: any) => a.level === level && a.isAdditionalApproval === true
+        const effectiveLevels = (instance as any).effectiveLevels ?? [];
+        let hasMatrixLevelAtCurrent = Array.isArray(effectiveLevels) && effectiveLevels.some(
+          (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(level) && l?.enabled !== false
         );
 
-        if (currentApprover) {
+        // Fallback when effectiveLevels are unavailable: use matrix definition.
+        if (!hasMatrixLevelAtCurrent && !(Array.isArray(effectiveLevels) && effectiveLevels.length > 0) && instance.matrixId) {
+          const matrixForStatus = await ApprovalMatrix.findById(instance.matrixId).select('levels').lean().exec();
+          hasMatrixLevelAtCurrent = (matrixForStatus?.levels || []).some(
+            (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(level) && l?.enabled !== false
+          );
+        }
+
+        const currentApprover = (report.approvers || []).find(
+          (a: any) => Number(a.level) === Number(level) && a.isAdditionalApproval === true
+        );
+
+        if (currentApprover && !hasMatrixLevelAtCurrent) {
           // Additional approver level - use highest matrix level status or a generic pending status
           // Use the last matrix level status (L5, L4, L3, L2, or L1) as fallback
           const maxMatrixLevel = Math.max(...(report.approvers || [])
@@ -1583,7 +1791,7 @@ export class ApprovalService {
       if (requestData) {
         const report = requestData as any;
         reportApproverAtLevel = (report.approvers || []).find(
-          (a: any) => a.level === instance.currentLevel
+          (a: any) => Number(a.level) === Number(instance.currentLevel)
         );
         isAdditionalApproverLevel = !!(reportApproverAtLevel?.isAdditionalApproval === true);
       }
@@ -1598,9 +1806,20 @@ export class ApprovalService {
         currentLevelConfig = levelsToUse[currentLevelNum - 1];
       }
 
+      const hasMatrixLevelAtCurrent = !!currentLevelConfig;
+      if (hasMatrixLevelAtCurrent && isAdditionalApproverLevel) {
+        logger.warn({
+          instanceId,
+          requestId: instance.requestId,
+          currentLevel: currentLevelNum,
+          additionalApproverUserId: reportApproverAtLevel?.userId,
+        }, 'processAction: Additional approver overlaps matrix level; using matrix level precedence');
+        isAdditionalApproverLevel = false;
+      }
+
       // When level not in matrix: allow if report.approvers has approver at this level (handles
       // additional approvers, matrix reduction, or legacy reports)
-      let levelInReportApprovers = !!reportApproverAtLevel;
+      let levelInReportApprovers = !hasMatrixLevelAtCurrent && !!reportApproverAtLevel;
 
       // Last resort: when report has no approvers (matrix flow clears them) but instance is at level 3+,
       // dynamically evaluate additional approvers - they may not have been saved to report
@@ -1799,7 +2018,6 @@ export class ApprovalService {
 
           let nextLevelNum = instance.currentLevel + 1;
           let nextState: { levelNumber: number; status: ApprovalStatus };
-          let allLevelsSkippedDueToSubmitter = false;
 
           // Skip self-approval (SKIP_SELF) when company policy allows and level is USER_BASED
           if (reportSubmitterId && instance.requestType === 'EXPENSE_REPORT') {
@@ -1813,14 +2031,17 @@ export class ApprovalService {
               );
               if (!levelConfig) {
                 nextState = { levelNumber: instance.currentLevel, status: ApprovalStatus.APPROVED };
-                allLevelsSkippedDueToSubmitter = true;
                 break;
               }
               const { approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(levelConfig, companyIdStr);
               const explicitIds = explicitApproverUserIds ?? [];
-              const isSubmitterExplicitApprover = explicitIds.some((id) => id.toString().toLowerCase().trim() === submitterNorm);
-              // Only skip when submitter is in explicit approvers AND level is USER_BASED AND company policy is SKIP_SELF
-              if (approvalType === 'USER_BASED' && isSubmitterExplicitApprover && !allowSelfApprovalForAction) {
+              // Only skip when submitter is the sole explicit approver AND level is USER_BASED AND company policy is SKIP_SELF
+              if (this.shouldSkipSelfApprovalLevel(
+                approvalType,
+                explicitIds,
+                submitterNorm,
+                allowSelfApprovalForAction
+              )) {
                 instance.history.push({
                   levelNumber: nextLevelNum,
                   status: ApprovalStatus.SKIPPED,
@@ -1838,35 +2059,6 @@ export class ApprovalService {
                 nextState = await ApprovalService.evaluateLevel(instance as any, virtualMatrix as any, nextLevelNum, requestData);
                 break;
               }
-            }
-
-            if (allLevelsSkippedDueToSubmitter) {
-              instance.status = ApprovalStatus.APPROVED;
-              instance.currentLevel = nextState.levelNumber;
-              await instance.save();
-              const approvalMeta = {
-                type: 'AUTO_APPROVED' as const,
-                reason: 'SUBMITTER_IS_LAST_APPROVER',
-                policy: 'SKIP_SELF',
-                approvedAt: new Date(),
-              };
-              await this.finalizeApproval(instance, approvalMeta);
-              await AuditService.log(reportSubmitterId, 'ExpenseReport', (instance.requestId as mongoose.Types.ObjectId).toString(), AuditAction.AUTO_APPROVED, {
-                reportId: (instance.requestId as mongoose.Types.ObjectId).toString(),
-                reason: 'SUBMITTER_IS_LAST_APPROVER',
-                policy: 'SKIP_SELF',
-              });
-              const { NotificationQueueService } = await import('./NotificationQueueService');
-              await NotificationQueueService.enqueue('STATUS_CHANGE', {
-                approvalInstance: instance,
-                requestData,
-                status: 'APPROVED' as const,
-              });
-              logger.info(
-                { instanceId: instance._id, requestId: instance.requestId, status: 'AUTO_APPROVED' },
-                '✅ Auto-approved (submitter is last approver after level transition)'
-              );
-              return instance;
             }
           } else {
             nextState = await ApprovalService.evaluateLevel(instance as any, virtualMatrix as any, nextLevelNum, requestData);
@@ -1888,13 +2080,105 @@ export class ApprovalService {
               const userIdsAlreadyDecided = new Set(
                 approversList
                   .filter((a: any) => a.decidedAt && a.action)
-                  .map((a: any) => (a.userId?.toString?.() ?? String(a.userId)))
+                  .map((a: any) => (a.userId?.toString?.() ?? String(a.userId)).toLowerCase().trim())
               );
-              let additionalApprovers = approversList.filter(
+              const maxMatrixLevel = this.getMaxEnabledLevelNumber(levelsToUse);
+
+              // Resolve all user IDs that are already approvers in matrix levels.
+              const matrixApproverUserIds = new Set<string>();
+              const companyIdForResolution = companyIdStr || instance.companyId?.toString?.() || '';
+              if (companyIdForResolution) {
+                const enabledLevels = this.getEnabledSortedLevels(levelsToUse);
+                for (const levelConfig of enabledLevels) {
+                  const { userIds } = await this.getApproverUserIdsForLevel(levelConfig, companyIdForResolution);
+                  for (const userId of userIds) {
+                    const normalizedUserId = await this.normalizeApprovalUserId(userId);
+                    if (normalizedUserId) {
+                      matrixApproverUserIds.add(normalizedUserId);
+                    }
+                  }
+                }
+              }
+
+              const companySettingsForAdditional = companyIdForResolution
+                ? await CompanySettings.findOne({ companyId: companyIdForResolution })
+                  .select('selfApprovalPolicy')
+                  .lean()
+                  .exec()
+                : null;
+              const allowSelfApprovalForAdditional = companySettingsForAdditional?.selfApprovalPolicy === 'ALLOW_SELF';
+              const submitterNormForAdditional = await this.normalizeApprovalUserId(freshReport?.userId);
+
+              const pendingAdditionalRaw = approversList.filter(
                 (a: any) =>
                   a.isAdditionalApproval === true &&
                   (!a.decidedAt || !a.action) &&
-                  !userIdsAlreadyDecided.has((a.userId?.toString?.() ?? String(a.userId)))
+                  !userIdsAlreadyDecided.has((a.userId?.toString?.() ?? String(a.userId)).toLowerCase().trim())
+              );
+              let additionalApprovers: any[] = [];
+              for (const approver of pendingAdditionalRaw) {
+                const normalizedApproverUserId = await this.normalizeApprovalUserId(approver?.userId);
+                if (!normalizedApproverUserId) continue;
+                additionalApprovers.push({
+                  ...approver,
+                  _normalizedUserId: normalizedApproverUserId,
+                });
+              }
+
+              // Normalize legacy/incorrect additional levels so they always run strictly after matrix levels.
+              if (additionalApprovers.length > 0) {
+                const sortedPendingAdditional = [...additionalApprovers].sort(
+                  (a: any, b: any) => Number(a?.level ?? 0) - Number(b?.level ?? 0)
+                );
+                let cursorLevel = maxMatrixLevel;
+                let relevelRequired = false;
+
+                const normalizedPendingAdditional = sortedPendingAdditional.map((approver: any) => {
+                  const requestedLevel = Number(approver?.level ?? 0);
+                  const normalizedLevel = Number.isFinite(requestedLevel) && requestedLevel > cursorLevel
+                    ? requestedLevel
+                    : cursorLevel + 1;
+                  if (!Number.isFinite(requestedLevel) || requestedLevel <= maxMatrixLevel || requestedLevel !== normalizedLevel) {
+                    relevelRequired = true;
+                  }
+                  cursorLevel = normalizedLevel;
+                  return {
+                    ...approver,
+                    level: normalizedLevel,
+                  };
+                });
+
+                if (relevelRequired) {
+                  const decidedAdditional = approversList.filter(
+                    (a: any) => a.isAdditionalApproval === true && a.decidedAt && a.action
+                  );
+                  const nonAdditional = approversList.filter((a: any) => a.isAdditionalApproval !== true);
+                  const normalizedPendingForReport = normalizedPendingAdditional.map((approver: any) => {
+                    const { _normalizedUserId, ...rest } = approver;
+                    return rest;
+                  });
+                  const normalizedApproversForReport = [...nonAdditional, ...decidedAdditional, ...normalizedPendingAdditional].sort(
+                    (a: any, b: any) => Number(a?.level ?? 0) - Number(b?.level ?? 0)
+                  );
+
+                  await ExpenseReport.findByIdAndUpdate(instance.requestId, {
+                    approvers: [...nonAdditional, ...decidedAdditional, ...normalizedPendingForReport].sort(
+                      (a: any, b: any) => Number(a?.level ?? 0) - Number(b?.level ?? 0)
+                    ),
+                  }).exec();
+
+                  approversList = normalizedApproversForReport;
+                }
+
+                additionalApprovers = normalizedPendingAdditional;
+              }
+
+              // If additional approver already belongs to matrix approvers, skip duplicate additional step.
+              const additionalSkippedAsMatrixOverlap = additionalApprovers.filter((a: any) =>
+                matrixApproverUserIds.has(String(a?._normalizedUserId || ''))
+              );
+              additionalApprovers = additionalApprovers.filter((a: any) =>
+                !matrixApproverUserIds.has(String(a?._normalizedUserId || ''))
               );
 
               // Fallback: if report has no pending additional approvers, re-evaluate rules (e.g. saved before rules existed or approvers not persisted)
@@ -1916,30 +2200,100 @@ export class ApprovalService {
                   const levelsToUse = (instance as any).effectiveLevels?.length
                     ? (instance as any).effectiveLevels
                     : (virtualMatrix as any)?.levels ?? [];
-                  const maxMatrixLevel = levelsToUse.length
-                    ? Math.max(...levelsToUse.map((l: any) => l.levelNumber ?? l.level ?? 0), 2)
-                    : 2;
-                  const insertAfterLevel = Math.max(maxMatrixLevel, 2);
-                  const newApprovers = dynamicAdditional.map((a: any, index: number) => ({
-                    ...a,
-                    level: insertAfterLevel + index + 1,
-                  }));
+                  const insertAfterLevel = Math.max(this.getMaxEnabledLevelNumber(levelsToUse), 2);
+                  let cursorLevel = insertAfterLevel;
+                  const newApproversRaw = dynamicAdditional.map((a: any) => {
+                    cursorLevel += 1;
+                    return {
+                      ...a,
+                      level: cursorLevel,
+                    };
+                  });
+
+                  const normalizedNewApprovers: any[] = [];
+                  for (const approver of newApproversRaw) {
+                    const normalizedApproverUserId = await this.normalizeApprovalUserId(approver?.userId);
+                    if (!normalizedApproverUserId) continue;
+                    normalizedNewApprovers.push({
+                      ...approver,
+                      _normalizedUserId: normalizedApproverUserId,
+                    });
+                  }
+                  const filteredNewApprovers = normalizedNewApprovers.filter((a: any) =>
+                    !matrixApproverUserIds.has(String(a?._normalizedUserId || ''))
+                  );
+
+                  const filteredNewApproversForReport = filteredNewApprovers.map((approver: any) => {
+                    const { _normalizedUserId, ...rest } = approver;
+                    return rest;
+                  });
                   await ExpenseReport.findByIdAndUpdate(instance.requestId, {
-                    approvers: newApprovers,
+                    approvers: filteredNewApproversForReport,
                   }).exec();
-                  additionalApprovers = newApprovers;
+                  additionalApprovers = filteredNewApprovers;
                   logger.info({
                     reportId: instance.requestId,
                     additionalApproversCount: additionalApprovers.length,
                     insertAfterLevel,
+                    skippedDueToMatrixOverlap: normalizedNewApprovers.length - filteredNewApprovers.length,
                     message: 'Additional approvers evaluated and saved after matrix approval',
                   }, 'ApprovalService: Dynamic additional approvers after Ln');
                 }
               }
 
+              const additionalSkippedAsSelf = !allowSelfApprovalForAdditional && submitterNormForAdditional
+                ? additionalApprovers.filter(
+                  (a: any) => String(a?._normalizedUserId || '') === submitterNormForAdditional
+                )
+                : [];
+
+              if (additionalSkippedAsSelf.length > 0) {
+                for (const skippedAdditional of additionalSkippedAsSelf) {
+                  const skippedLevel = Number(skippedAdditional?.level ?? 0);
+                  if (!Number.isFinite(skippedLevel) || skippedLevel <= 0) continue;
+
+                  const alreadySkipped = (instance.history || []).some(
+                    (h: any) =>
+                      Number(h?.levelNumber ?? 0) === skippedLevel &&
+                      h?.status === ApprovalStatus.SKIPPED
+                  );
+                  if (alreadySkipped) continue;
+
+                  instance.history.push({
+                    levelNumber: skippedLevel,
+                    status: ApprovalStatus.SKIPPED,
+                    timestamp: new Date(),
+                    comments: 'Self approval skipped per company policy',
+                  } as any);
+
+                  if (submitterNormForAdditional) {
+                    await AuditService.log(
+                      submitterNormForAdditional,
+                      'ExpenseReport',
+                      (instance.requestId as mongoose.Types.ObjectId).toString(),
+                      AuditAction.SELF_APPROVAL_SKIPPED,
+                      {
+                        reportId: (instance.requestId as mongoose.Types.ObjectId).toString(),
+                        userId: submitterNormForAdditional,
+                        policy: 'SKIP_SELF',
+                        level: skippedLevel,
+                      }
+                    );
+                  }
+                }
+              }
+              additionalApprovers = additionalApprovers.filter(
+                (a: any) =>
+                  !(!allowSelfApprovalForAdditional &&
+                    submitterNormForAdditional &&
+                    String(a?._normalizedUserId || '') === submitterNormForAdditional)
+              );
+
               logger.info({
                 reportId: instance.requestId,
                 additionalApproversCount: additionalApprovers.length,
+                skippedAsMatrixOverlapCount: additionalSkippedAsMatrixOverlap.length,
+                skippedAsSelfCount: additionalSkippedAsSelf.length,
                 approvers: additionalApprovers.map((a: any) => ({
                   level: a.level,
                   role: a.role,
@@ -1948,8 +2302,13 @@ export class ApprovalService {
               }, 'processAction: Checking for additional approvers after matrix approval');
 
               if (additionalApprovers.length > 0) {
-                const firstAdditionalApprover = additionalApprovers[0];
-                const additionalLevel = firstAdditionalApprover.level || (nextLevelNum);
+                const firstAdditionalApprover = [...additionalApprovers].sort(
+                  (a: any, b: any) => Number(a.level ?? 0) - Number(b.level ?? 0)
+                )[0];
+                const requestedAdditionalLevel = Number(firstAdditionalApprover.level);
+                const additionalLevel = Number.isFinite(requestedAdditionalLevel) && requestedAdditionalLevel > maxMatrixLevel
+                  ? requestedAdditionalLevel
+                  : Math.max(maxMatrixLevel + 1, nextLevelNum);
 
                 instance.currentLevel = additionalLevel;
                 instance.status = ApprovalStatus.PENDING;
@@ -1995,7 +2354,7 @@ export class ApprovalService {
 
           // Resolve current level config for next level notification
           const { ApprovalRecordService } = await import('./ApprovalRecordService');
-          const additionalApproverInfo = await ApprovalRecordService.resolveAdditionalApprovers(instance);
+          const additionalApproverInfo = await ApprovalRecordService.resolveAdditionalApprovers(instance, levelsToUse as any[]);
 
           if (additionalApproverInfo.isAdditionalApproverLevel) {
             // Notify additional approver (pass approverUserIds so they receive the request)
@@ -2397,4 +2756,3 @@ export class ApprovalService {
     }
   }
 }
-

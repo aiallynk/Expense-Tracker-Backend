@@ -11,6 +11,7 @@ import {
   IExpenseReport,
   IApprover,
 } from '../models/ExpenseReport';
+import { ApprovalInstance, ApprovalStatus } from '../models/ApprovalInstance';
 import { Project } from '../models/Project';
 import { User } from '../models/User';
 import { emitManagerReportUpdate, emitManagerDashboardUpdate } from '../socket/realtimeEvents';
@@ -464,6 +465,9 @@ export class ReportsService {
     // Fetch approval instance to get approval chain details
     let approvalChain = [];
     let approvalChainMeta: { mode: 'PERSONALIZED' | 'MATRIX'; levelsCount: number | null } | null = null;
+    let approvalCurrentLevel: number | null = null;
+    let approvalInstanceStatus: string | null = null;
+    let approvalInstanceUpdatedAt: Date | null = null;
     try {
       const { ApprovalInstance } = await import('../models/ApprovalInstance');
       const { Role } = await import('../models/Role');
@@ -477,6 +481,9 @@ export class ReportsService {
         .exec();
 
       if (approvalInstance) {
+        approvalCurrentLevel = Number((approvalInstance as any).currentLevel ?? 0) || null;
+        approvalInstanceStatus = (approvalInstance as any).status ?? null;
+        approvalInstanceUpdatedAt = (approvalInstance as any).updatedAt ?? null;
         const matrix = approvalInstance.matrixId as any;
 
         // Build approval chain from history and matrix levels
@@ -584,6 +591,13 @@ export class ReportsService {
             const approvalType = level && companyIdStr
               ? await ApprovalService.getApprovalTypeForLevel(level, companyIdStr)
               : 'ROLE_BASED';
+            const configuredApprovers = level && companyIdStr
+              ? await this.resolveLevelApproversForDisplay(level, companyIdStr)
+              : [];
+            const levelConditions = Array.isArray(level?.conditions) ? level.conditions : [];
+            const conditionLabels = levelConditions
+              .map((condition: any) => this.formatApprovalConditionForDisplay(condition))
+              .filter(Boolean);
 
             approvalChain.push({
               level: levelNum,
@@ -599,6 +613,12 @@ export class ReportsService {
               action: mappedAction, // Frontend expects 'approve', 'reject', 'request_changes', 'skipped'
               skipped: mappedAction === 'skipped', // Explicit flag for self-approval skipped levels
               approvalType, // USER_BASED or ROLE_BASED - enables UI/future logic
+              workflowType: level?.approvalType || null, // SEQUENTIAL/PARALLEL
+              parallelRule: level?.parallelRule || null,
+              configuredApprovers,
+              configuredApproverNames: configuredApprovers.map((approver: any) => approver.name).filter(Boolean),
+              conditions: levelConditions,
+              conditionLabels,
               isAdditionalApproval: reportApprover ? true : false,
               triggerReason: reportApprover?.triggerReason || null,
               approvalRuleId: reportApprover?.approvalRuleId || null
@@ -631,6 +651,10 @@ export class ReportsService {
               addDecidedAt = addEntry.timestamp || addDecidedAt;
               addComment = addEntry.comments || addComment;
             }
+            const additionalConfiguredApprovers = addName
+              ? [{ id: addUserId, name: addName, email: null }]
+              : [];
+            const additionalConditionLabels = addApprover.triggerReason ? [addApprover.triggerReason] : [];
             approvalChain.push({
               level: addApprover.level,
               step: addStep,
@@ -644,6 +668,12 @@ export class ReportsService {
               comment: addComment,
               action: addAction,
               approvalType: 'USER_BASED', // Additional approvers are always user-specific
+              workflowType: 'SEQUENTIAL',
+              parallelRule: null,
+              configuredApprovers: additionalConfiguredApprovers,
+              configuredApproverNames: additionalConfiguredApprovers.map((approver: any) => approver.name).filter(Boolean),
+              conditions: [],
+              conditionLabels: additionalConditionLabels,
               isAdditionalApproval: true,
               triggerReason: addApprover.triggerReason || null,
               approvalRuleId: addApprover.approvalRuleId || null
@@ -677,6 +707,19 @@ export class ReportsService {
     const reportObj = report.toObject();
     const approversFinal = approvalChain.length > 0 ? approvalChain : reportObj.approvers || [];
     const status = (report.status || '').toUpperCase();
+    const approvalProgress = this.buildDetailedApprovalProgress({
+      reportStatus: status,
+      reportSubmittedAt: report.submittedAt ?? null,
+      reportApprovedAt: report.approvedAt ?? null,
+      reportRejectedAt: report.rejectedAt ?? null,
+      reportChangesRequestedAt: (report as any).changesRequestedAt ?? null,
+      approvers: approversFinal,
+      currentLevel: approvalCurrentLevel,
+      instanceStatus: approvalInstanceStatus,
+      instanceUpdatedAt: approvalInstanceUpdatedAt,
+      mode: approvalChainMeta?.mode ?? null,
+      levelsCount: approvalChainMeta?.levelsCount ?? null,
+    });
     const flags = {
       changes_requested: status === 'CHANGES_REQUESTED',
       rejected: status === 'REJECTED',
@@ -707,6 +750,7 @@ export class ReportsService {
       toDate: report.toDate ? DateUtils.backendDateToFrontend(report.toDate) : reportObj.toDate,
       expenses: expensesWithSignedUrls,
       approvers: approversFinal,
+      approvalProgress,
       ...(approvalChainMeta ? { approvalChainMeta } : {}),
       appliedVouchers: appliedVouchers.length > 0 ? appliedVouchers : reportObj.appliedVouchers,
       voucherTotalUsed,
@@ -1413,7 +1457,7 @@ export class ReportsService {
     }
 
     // Duplicate detection: flag-only, never block. Update expenses with duplicateFlag/duplicateReason.
-    const reportUser = await User.findById(report.userId).select('companyId').exec();
+    const reportUser = await User.findById(report.userId).select('companyId role').exec();
     if (reportUser && reportUser.companyId) {
       try {
         const { DuplicateDetectionService } = await import('./duplicateDetection.service');
@@ -1488,6 +1532,12 @@ export class ReportsService {
     // Use the NEW Approval Matrix System
     if (reportUser && reportUser.companyId) {
       try {
+        logger.info(
+          { reportId: id, submittedByRole: reportUser.role, submittedById: userId },
+          'Report submit triggered by user'
+        );
+        console.log('Report submit triggered by:', reportUser.role, userId);
+
         // Ensure report totals are current before evaluating additional-approver conditions
         await this.recalcTotals(id);
         const refreshed = await ExpenseReport.findById(id).select('totalAmount projectId costCentreId').lean().exec();
@@ -1501,6 +1551,11 @@ export class ReportsService {
           report,
           reportUser.companyId as mongoose.Types.ObjectId
         );
+        console.log('Additional rule matched:', additionalApprovers.length > 0 ? additionalApprovers.map((a: any) => ({
+          userId: a.userId?.toString?.() ?? String(a.userId),
+          role: a.role,
+          triggerReason: a.triggerReason,
+        })) : null);
 
         // Personalized matrix: use employee's approval profile when set (includes selected approver users per level)
         let effectiveMatrixLevels: Array<{ levelNumber: number; enabled: boolean; approvalType: string; parallelRule?: string; approverRoleIds: mongoose.Types.ObjectId[]; approverUserIds: mongoose.Types.ObjectId[]; conditions: any[]; skipAllowed: boolean }> | null = null;
@@ -1578,9 +1633,69 @@ export class ReportsService {
           }
         }
 
+        // Build additional approver levels before initiating approval so matrix + additional routing
+        // can be resolved in one state machine pass (prevents auto-approval when additional rules match).
+        let preparedAdditionalApprovers: IApprover[] = [];
+        if (additionalApprovers.length > 0) {
+          let maxLevel = 2;
+          if (effectiveMatrixLevels?.length) {
+            const enabledLevels = effectiveMatrixLevels
+              .filter((l: any) => l?.enabled !== false)
+              .map((l: any) => Number(l.levelNumber ?? l.level ?? 0))
+              .filter((l: number) => Number.isFinite(l) && l > 0);
+            if (enabledLevels.length > 0) {
+              maxLevel = Math.max(...enabledLevels, 2);
+            }
+          } else {
+            const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
+            const matrix = await ApprovalMatrix.findOne({
+              companyId: reportUser.companyId,
+              isActive: true,
+            }).exec();
+            if (matrix?.levels?.length) {
+              const enabledLevels = matrix.levels
+                .filter((l: any) => l.enabled !== false)
+                .map((l: any) => Number(l.levelNumber ?? l.level ?? 0))
+                .filter((l: number) => l > 0);
+              if (enabledLevels.length > 0) {
+                maxLevel = Math.max(...enabledLevels);
+              }
+            }
+          }
+
+          const insertAfterLevel = Math.max(maxLevel, 2);
+          let currentLevel = insertAfterLevel;
+          preparedAdditionalApprovers = additionalApprovers.map((additionalApprover) => {
+            currentLevel += 1;
+            return {
+              ...additionalApprover,
+              level: currentLevel,
+            };
+          });
+        }
+
+        const requestDataForApproval: any = {
+          ...report.toObject(),
+          approvers: preparedAdditionalApprovers,
+        };
+
         const initialData: any = effectiveMatrixLevels
-          ? { requestData: report, effectiveMatrix: { levels: effectiveMatrixLevels } }
-          : report;
+          ? {
+            requestData: requestDataForApproval,
+            effectiveMatrix: { levels: effectiveMatrixLevels },
+            additionalApprovers: preparedAdditionalApprovers,
+          }
+          : {
+            ...requestDataForApproval,
+            additionalApprovers: preparedAdditionalApprovers,
+          };
+
+        console.log('Approval matrix:', (effectiveMatrixLevels || []).map((l: any) => ({
+          levelNumber: l.levelNumber,
+          enabled: l.enabled !== false,
+          approverUserIdsCount: Array.isArray(l.approverUserIds) ? l.approverUserIds.length : 0,
+          approverRoleIdsCount: Array.isArray(l.approverRoleIds) ? l.approverRoleIds.length : 0,
+        })));
 
         // Initiate approval using the ApprovalService (Matrix-based or personalized)
         const approvalInstance = await ApprovalService.initiateApproval(
@@ -1599,6 +1714,7 @@ export class ReportsService {
           status: approvalInstance.status,
           additionalApproversCount: additionalApprovers.length
         }, 'Approval instance created via ApprovalService');
+        console.log('Current level:', approvalInstance.currentLevel);
 
         // Set initial status based on approval instance status and current level
         // When L1 is skipped, currentLevel is 2+ so we must set the correct pending status
@@ -1609,7 +1725,7 @@ export class ReportsService {
           else if (level === 3) report.status = ExpenseReportStatus.PENDING_APPROVAL_L3;
           else if (level === 4) report.status = ExpenseReportStatus.PENDING_APPROVAL_L4;
           else if (level === 5) report.status = ExpenseReportStatus.PENDING_APPROVAL_L5;
-          else report.status = ExpenseReportStatus.PENDING_APPROVAL_L1;
+          else report.status = ExpenseReportStatus.PENDING_APPROVAL_L5;
         } else if (approvalInstance.status === 'APPROVED') {
           // Matrix has no levels or all levels skipped - auto-approved
           report.status = ExpenseReportStatus.APPROVED;
@@ -1621,39 +1737,12 @@ export class ReportsService {
         // CRITICAL: Save additional approvers to report even when using ApprovalMatrix
         // This allows the approval UI to show additional approver remarks
         // Additional approvers are added after L2 (or after last normal approver)
-        if (additionalApprovers.length > 0) {
-          // Get the max level from effective matrix (personalized) or company ApprovalMatrix
-          let maxLevel = 2; // Default to L2
-          if (effectiveMatrixLevels?.length) {
-            maxLevel = Math.max(...effectiveMatrixLevels.map((l) => l.levelNumber), 2);
-          } else {
-            const { ApprovalMatrix } = await import('../models/ApprovalMatrix');
-            const matrix = await ApprovalMatrix.findOne({
-              companyId: reportUser.companyId,
-              isActive: true
-            }).exec();
-            if (matrix && matrix.levels) {
-              const enabledLevels = matrix.levels
-                .filter((l: any) => l.enabled !== false)
-                .map((l: any) => l.levelNumber);
-              if (enabledLevels.length > 0) {
-                maxLevel = Math.max(...enabledLevels);
-              }
-            }
-          }
-
-          const insertAfterLevel = Math.max(maxLevel, 2); // At minimum, insert after L2
-
-          // Set approvers array with additional approvers (for UI display and notifications)
-          report.approvers = additionalApprovers.map((additionalApprover, index) => ({
-            ...additionalApprover,
-            level: insertAfterLevel + index + 1, // Ensure additional approvals come after L2 (or last normal approver)
-          }));
+        if (preparedAdditionalApprovers.length > 0) {
+          report.approvers = preparedAdditionalApprovers;
 
           logger.info({
             reportId: id,
-            additionalApproversCount: additionalApprovers.length,
-            insertAfterLevel,
+            additionalApproversCount: preparedAdditionalApprovers.length,
             approvers: report.approvers.map((a: any) => ({
               level: a.level,
               role: a.role,
@@ -1978,6 +2067,41 @@ export class ReportsService {
     action: 'approve' | 'reject' | 'request_changes',
     comment?: string
   ): Promise<IExpenseReport> {
+    // Prefer matrix instance state over report.approvers so routing is state-driven.
+    const reportObjectId = mongoose.Types.ObjectId.isValid(id)
+      ? new mongoose.Types.ObjectId(id)
+      : null;
+    const pendingInstance = reportObjectId
+      ? await ApprovalInstance.findOne({
+        requestId: reportObjectId,
+        requestType: { $in: ['EXPENSE_REPORT', 'EXPENSE'] },
+        status: ApprovalStatus.PENDING,
+      })
+        .sort({ createdAt: -1 })
+        .exec()
+      : null;
+
+    if (pendingInstance) {
+      const matrixAction = action === 'approve'
+        ? 'APPROVE'
+        : action === 'reject'
+          ? 'REJECT'
+          : 'REQUEST_CHANGES';
+
+      await ApprovalService.processAction(
+        (pendingInstance._id as mongoose.Types.ObjectId).toString(),
+        userId,
+        matrixAction,
+        comment
+      );
+
+      const refreshedReport = await ExpenseReport.findById(id).exec();
+      if (!refreshedReport) {
+        throw new Error('Report not found');
+      }
+      return refreshedReport;
+    }
+
     const report = await ExpenseReport.findById(id)
       .populate('userId', 'companyId')
       .exec();
@@ -2342,15 +2466,24 @@ export class ReportsService {
       throw new Error(`Only draft reports can be deleted. This report has status: ${report.status}`);
     }
 
+    // Defensive rollback: if voucher usage exists on this draft, reverse it before deletion.
+    try {
+      const { VoucherService } = await import('./voucher.service');
+      await VoucherService.reverseVoucherUsageForReport(
+        reportId,
+        userId,
+        'Report deleted'
+      );
+    } catch (error: any) {
+      logger.warn({ error: error?.message, reportId }, 'Voucher rollback skipped during draft report delete');
+    }
+
     // Delete all expenses associated with this report
     await Expense.deleteMany({ reportId });
 
     // Get companyId from user before deleting
     const user = await User.findById(userId).select('companyId').exec();
     const reportUserId = report.userId.toString();
-
-    // Delete all expenses associated with this report
-    await Expense.deleteMany({ reportId });
 
     // Delete the report
     await ExpenseReport.findByIdAndDelete(reportId);
@@ -2619,6 +2752,344 @@ export class ReportsService {
     };
   }
 
+  private static formatApprovalConditionForDisplay(condition: any): string {
+    if (!condition || typeof condition !== 'object') return '';
+
+    const rawType = String(condition.type || 'CONDITION').trim().toUpperCase();
+    const typeLabel = rawType
+      .replace(/_/g, ' ')
+      .toLowerCase()
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+
+    const operator = String(condition.operator || '').trim();
+    const rawValue = condition.value;
+    let valueLabel = '';
+
+    if (typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+      if (rawType.includes('AMOUNT') || rawType.includes('BUDGET')) {
+        valueLabel = `₹${rawValue.toLocaleString('en-IN')}`;
+      } else {
+        valueLabel = String(rawValue);
+      }
+    } else if (rawValue != null && rawValue !== '') {
+      valueLabel = String(rawValue);
+    } else {
+      valueLabel = 'set value';
+    }
+
+    const rawAction = String(condition.action || '').trim().toUpperCase();
+    const actionLabel = rawAction
+      ? rawAction
+        .replace(/_/g, ' ')
+        .toLowerCase()
+        .replace(/\b\w/g, (char) => char.toUpperCase())
+      : '';
+
+    if (actionLabel) {
+      return `${typeLabel} ${operator} ${valueLabel} -> ${actionLabel}`.trim();
+    }
+
+    return `${typeLabel} ${operator} ${valueLabel}`.trim();
+  }
+
+  private static async resolveLevelApproversForDisplay(
+    level: any,
+    companyId: string
+  ): Promise<Array<{ id: string; name: string; email?: string | null }>> {
+    if (!level || !companyId || !mongoose.Types.ObjectId.isValid(companyId)) {
+      return [];
+    }
+
+    const normalizedCompanyId = new mongoose.Types.ObjectId(companyId);
+    const normalizeIds = (values: any[]): string[] =>
+      (Array.isArray(values) ? values : [])
+        .map((id: any) => (id?._id ?? id)?.toString?.() ?? '')
+        .filter(Boolean);
+
+    const explicitUserIds = normalizeIds(level.approverUserIds || []);
+    let users = await User.find({
+      _id: { $in: explicitUserIds },
+      companyId: normalizedCompanyId,
+      status: 'ACTIVE',
+    })
+      .select('_id name email')
+      .lean()
+      .exec();
+
+    // Fallback path: approverUserIds may contain role IDs due legacy migration.
+    if (!users.length) {
+      const roleIdsToTry = normalizeIds(level.approverRoleIds || []).length > 0
+        ? normalizeIds(level.approverRoleIds || [])
+        : explicitUserIds;
+
+      if (roleIdsToTry.length > 0) {
+        users = await User.find({
+          companyId: normalizedCompanyId,
+          roles: { $in: roleIdsToTry },
+          status: 'ACTIVE',
+        })
+          .select('_id name email')
+          .lean()
+          .exec();
+      }
+    }
+
+    const deduped = new Map<string, { id: string; name: string; email?: string | null }>();
+    for (const user of users as any[]) {
+      const userId = user?._id?.toString?.();
+      if (!userId || deduped.has(userId)) continue;
+      deduped.set(userId, {
+        id: userId,
+        name: user?.name || 'Unknown',
+        email: user?.email || null,
+      });
+    }
+
+    return Array.from(deduped.values());
+  }
+
+  private static mapApprovalActionToProgressStatus(
+    rawAction: any,
+    level: number | null,
+    currentLevel: number | null,
+    instanceStatus: string | null
+  ): 'COMPLETED' | 'REJECTED' | 'CHANGES_REQUESTED' | 'SKIPPED' | 'IN_PROGRESS' | 'WAITING' {
+    const action = String(rawAction || '').toLowerCase().trim();
+
+    if (action === 'approve') return 'COMPLETED';
+    if (action === 'reject') return 'REJECTED';
+    if (action === 'request_changes') return 'CHANGES_REQUESTED';
+    if (action === 'skipped') return 'SKIPPED';
+
+    if (
+      instanceStatus === 'PENDING' &&
+      currentLevel != null &&
+      level != null &&
+      Number(level) === Number(currentLevel)
+    ) {
+      return 'IN_PROGRESS';
+    }
+
+    return 'WAITING';
+  }
+
+  private static buildDetailedApprovalProgress(params: {
+    reportStatus: string;
+    reportSubmittedAt: Date | null;
+    reportApprovedAt: Date | null;
+    reportRejectedAt: Date | null;
+    reportChangesRequestedAt: Date | null;
+    approvers: any[];
+    currentLevel: number | null;
+    instanceStatus: string | null;
+    instanceUpdatedAt: Date | null;
+    mode: 'PERSONALIZED' | 'MATRIX' | null;
+    levelsCount: number | null;
+  }): any {
+    const {
+      reportStatus,
+      reportSubmittedAt,
+      reportApprovedAt,
+      reportRejectedAt,
+      reportChangesRequestedAt,
+      approvers,
+      currentLevel,
+      instanceStatus,
+      instanceUpdatedAt,
+      mode,
+      levelsCount,
+    } = params;
+
+    const progressSteps: any[] = [];
+
+    if (reportSubmittedAt) {
+      progressSteps.push({
+        sequence: progressSteps.length + 1,
+        level: 0,
+        type: 'SYSTEM',
+        title: 'Submitted',
+        status: 'COMPLETED',
+        isCurrent: false,
+        actedAt: reportSubmittedAt,
+        actedBy: null,
+        comment: null,
+        roleNames: [],
+        approvers: [],
+        approverNames: [],
+        conditions: [],
+        conditionLabels: [],
+        triggerReason: null,
+        isAdditionalApproval: false,
+      });
+    }
+
+    const sortedApprovers = [...(Array.isArray(approvers) ? approvers : [])]
+      .map((approver: any) => ({
+        ...approver,
+        level: Number(approver?.level ?? 0),
+      }))
+      .filter((approver: any) => Number.isFinite(approver.level))
+      .sort((a: any, b: any) => a.level - b.level);
+
+    for (const approver of sortedApprovers) {
+      const level = Number(approver.level);
+      const configuredApprovers = Array.isArray(approver.configuredApprovers)
+        ? approver.configuredApprovers
+        : [];
+      const configuredApproverNames = configuredApprovers
+        .map((candidate: any) => candidate?.name)
+        .filter(Boolean);
+      const actedByName =
+        approver?.approverName ||
+        approver?.name ||
+        approver?.userId?.name ||
+        null;
+      const approverNames = Array.from(
+        new Set([
+          ...(actedByName ? [actedByName] : []),
+          ...configuredApproverNames,
+        ])
+      );
+      const conditionLabels = Array.isArray(approver.conditionLabels)
+        ? approver.conditionLabels.filter(Boolean)
+        : [];
+      const roleNames = String(approver.role || '')
+        .split(',')
+        .map((role: string) => role.trim())
+        .filter(Boolean);
+      const status = this.mapApprovalActionToProgressStatus(
+        approver.action,
+        level,
+        currentLevel,
+        instanceStatus
+      );
+
+      progressSteps.push({
+        sequence: progressSteps.length + 1,
+        level,
+        type: approver.isAdditionalApproval ? 'ADDITIONAL' : 'MATRIX',
+        title: approver.step || `Level ${level} Approval`,
+        status,
+        isCurrent: status === 'IN_PROGRESS',
+        actedAt: approver.decidedAt || null,
+        actedBy: actedByName
+          ? {
+            id: approver.approverId ? String(approver.approverId) : null,
+            name: actedByName,
+          }
+          : null,
+        comment: approver.comment || null,
+        roleNames,
+        approvers: configuredApprovers,
+        approverNames,
+        conditions: Array.isArray(approver.conditions) ? approver.conditions : [],
+        conditionLabels,
+        triggerReason: approver.triggerReason || null,
+        approvalType: approver.approvalType || null,
+        workflowType: approver.workflowType || null,
+        parallelRule: approver.parallelRule || null,
+        isAdditionalApproval: approver.isAdditionalApproval === true,
+      });
+    }
+
+    if (reportStatus === 'APPROVED' && reportApprovedAt) {
+      progressSteps.push({
+        sequence: progressSteps.length + 1,
+        level: 9998,
+        type: 'SYSTEM',
+        title: 'Final Approval',
+        status: 'COMPLETED',
+        isCurrent: false,
+        actedAt: reportApprovedAt,
+        actedBy: null,
+        comment: null,
+        roleNames: [],
+        approvers: [],
+        approverNames: [],
+        conditions: [],
+        conditionLabels: [],
+        triggerReason: null,
+        isAdditionalApproval: false,
+      });
+    } else if (reportStatus === 'REJECTED' && reportRejectedAt) {
+      progressSteps.push({
+        sequence: progressSteps.length + 1,
+        level: 9998,
+        type: 'SYSTEM',
+        title: 'Rejected',
+        status: 'REJECTED',
+        isCurrent: false,
+        actedAt: reportRejectedAt,
+        actedBy: null,
+        comment: null,
+        roleNames: [],
+        approvers: [],
+        approverNames: [],
+        conditions: [],
+        conditionLabels: [],
+        triggerReason: null,
+        isAdditionalApproval: false,
+      });
+    } else if (reportStatus === 'CHANGES_REQUESTED') {
+      progressSteps.push({
+        sequence: progressSteps.length + 1,
+        level: 9998,
+        type: 'SYSTEM',
+        title: 'Changes Requested',
+        status: 'CHANGES_REQUESTED',
+        isCurrent: false,
+        actedAt: reportChangesRequestedAt || null,
+        actedBy: null,
+        comment: null,
+        roleNames: [],
+        approvers: [],
+        approverNames: [],
+        conditions: [],
+        conditionLabels: [],
+        triggerReason: null,
+        isAdditionalApproval: false,
+      });
+    }
+
+    const actionableSteps = progressSteps.filter((step) => step.type !== 'SYSTEM');
+    const completedSteps = actionableSteps.filter((step) => step.status === 'COMPLETED' || step.status === 'SKIPPED').length;
+    const currentStep = actionableSteps.find((step) => step.status === 'IN_PROGRESS') || null;
+    const pendingSteps = actionableSteps.filter((step) => step.status === 'IN_PROGRESS' || step.status === 'WAITING').length;
+
+    const appliedConditions = actionableSteps
+      .filter((step) => Array.isArray(step.conditionLabels) && step.conditionLabels.length > 0)
+      .map((step) => ({
+        level: step.level,
+        title: step.title,
+        conditions: step.conditionLabels,
+      }));
+
+    const additionalTriggers = actionableSteps
+      .filter((step) => step.isAdditionalApproval && step.triggerReason)
+      .map((step) => ({
+        level: step.level,
+        title: step.title,
+        triggerReason: step.triggerReason,
+      }));
+
+    return {
+      mode: mode || 'MATRIX',
+      isPersonalized: mode === 'PERSONALIZED',
+      levelsCount: levelsCount,
+      reportStatus,
+      instanceStatus: instanceStatus,
+      currentLevel,
+      lastUpdatedAt: instanceUpdatedAt,
+      totalSteps: actionableSteps.length,
+      completedSteps,
+      pendingSteps,
+      currentStep,
+      appliedConditions,
+      additionalTriggers,
+      steps: progressSteps,
+    };
+  }
+
   /**
    * Helper to deeply compare effective approval levels (array of objects) with matrix levels.
    * Handles ObjectId normalization (string vs Object), missing fields, and basic structure.
@@ -2665,4 +3136,3 @@ export class ReportsService {
     return true;
   }
 }
-
