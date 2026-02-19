@@ -241,7 +241,7 @@ export class VoucherService {
 
   /**
    * Apply voucher to a report (atomic transaction)
-   * Called when user submits a DRAFT report
+   * Called when user submits/resubmits an editable report.
    */
   static async applyVoucherToReport(params: {
     voucherId: string;
@@ -289,9 +289,12 @@ export class VoucherService {
         throw new Error('Access denied: Report does not belong to you');
       }
 
-      // Validate report is in DRAFT status
-      if (report.status !== ExpenseReportStatus.DRAFT) {
-        throw new Error('Voucher can only be applied to DRAFT reports');
+      // Validate report is editable for voucher application
+      const canApplyVoucher =
+        report.status === ExpenseReportStatus.DRAFT ||
+        report.status === ExpenseReportStatus.CHANGES_REQUESTED;
+      if (!canApplyVoucher) {
+        throw new Error('Voucher can only be applied to DRAFT or CHANGES_REQUESTED reports');
       }
 
       // Validate voucher belongs to user
@@ -318,15 +321,14 @@ export class VoucherService {
         throw new Error(`Amount exceeds voucher balance. Available: ${voucher.remainingAmount} ${voucher.currency}`);
       }
 
-      // Check if this voucher is already used in this report (same voucher twice = no)
+      // Check if this voucher already has a usage row for this report.
       const existingUsage = await VoucherUsage.findOne({
         voucherId: voucherObjectId,
         reportId: reportObjectId,
-        status: VoucherUsageStatus.APPLIED,
       })
         .session(session)
         .exec();
-      if (existingUsage) {
+      if (existingUsage && existingUsage.status === VoucherUsageStatus.APPLIED) {
         throw new Error('Voucher is already applied to this report');
       }
       // 1-to-N: report may have other vouchers; no "report already has a voucher" block (plan §2.3)
@@ -337,20 +339,38 @@ export class VoucherService {
         throw new Error('User company not found');
       }
 
-      // Create voucher usage entry
-      const voucherUsage = new VoucherUsage({
-        voucherId: voucherObjectId,
-        reportId: reportObjectId,
-        userId: userObjectId,
-        companyId: user.companyId,
-        amountUsed: amount,
-        currency: voucher.currency,
-        appliedAt: new Date(),
-        appliedBy: userObjectId,
-        status: VoucherUsageStatus.APPLIED,
-      });
+      // Create new usage or reactivate previously reversed usage.
+      let voucherUsage: IVoucherUsage;
+      let usageReactivated = false;
+      if (existingUsage && existingUsage.status === VoucherUsageStatus.REVERSED) {
+        existingUsage.userId = userObjectId;
+        existingUsage.companyId = user.companyId as any;
+        existingUsage.amountUsed = amount;
+        existingUsage.currency = voucher.currency;
+        existingUsage.appliedAt = new Date();
+        existingUsage.appliedBy = userObjectId;
+        existingUsage.status = VoucherUsageStatus.APPLIED;
+        existingUsage.reversedAt = undefined;
+        existingUsage.reversedBy = undefined;
+        existingUsage.reversalReason = undefined;
+        await existingUsage.save({ session });
+        voucherUsage = existingUsage;
+        usageReactivated = true;
+      } else {
+        voucherUsage = new VoucherUsage({
+          voucherId: voucherObjectId,
+          reportId: reportObjectId,
+          userId: userObjectId,
+          companyId: user.companyId,
+          amountUsed: amount,
+          currency: voucher.currency,
+          appliedAt: new Date(),
+          appliedBy: userObjectId,
+          status: VoucherUsageStatus.APPLIED,
+        });
 
-      await voucherUsage.save({ session });
+        await voucherUsage.save({ session });
+      }
 
       // Update voucher
       voucher.usedAmount = (voucher.usedAmount || 0) + amount;
@@ -365,7 +385,10 @@ export class VoucherService {
       const code = (voucher.voucherCode || (voucher._id as mongoose.Types.ObjectId).toString()).trim();
       const newEntry = { voucherId: voucherObjectId, voucherCode: code, amountUsed: amount, currency: voucher.currency };
       const existingApplied = Array.isArray(report.appliedVouchers) ? report.appliedVouchers : [];
-      report.appliedVouchers = [...existingApplied, newEntry];
+      const filteredExistingApplied = existingApplied.filter(
+        (entry: any) => entry?.voucherId?.toString?.() !== voucherObjectId.toString()
+      );
+      report.appliedVouchers = [...filteredExistingApplied, newEntry];
       report.advanceCashId = report.advanceCashId ?? voucherObjectId;
       report.advanceAppliedAmount = (report.advanceAppliedAmount ?? 0) + amount;
       report.advanceCurrency = voucher.currency;
@@ -400,8 +423,9 @@ export class VoucherService {
         params.userId,
         'VoucherUsage',
         (voucherUsage._id as mongoose.Types.ObjectId).toString(),
-        AuditAction.CREATE,
+        usageReactivated ? AuditAction.UPDATE : AuditAction.CREATE,
         {
+          action: usageReactivated ? 'REACTIVATED' : 'CREATE',
           voucherId: params.voucherId,
           reportId: params.reportId,
           amountUsed: amount,
@@ -412,8 +436,11 @@ export class VoucherService {
       await session.commitTransaction();
 
       return voucherUsage;
-    } catch (error) {
+    } catch (error: any) {
       await session.abortTransaction();
+      if (error?.code === 11000) {
+        throw new Error('Voucher is already linked to this report. Please refresh and try again.');
+      }
       throw error;
     } finally {
       session.endSession();
@@ -460,8 +487,8 @@ export class VoucherService {
   }
 
   /**
-   * Reverse all voucher usages for a rejected report
-   * Restores voucher amounts and creates reversal ledger entries
+   * Reverse all applied voucher usages for a report and clear report voucher linkage.
+   * Used when a report is rejected or sent back for changes.
    */
   static async reverseVoucherUsageForReport(
     reportId: string,
@@ -492,18 +519,19 @@ export class VoucherService {
         .exec();
 
       if (voucherUsages.length === 0) {
-        // No voucher usages to reverse
-        await session.commitTransaction();
-        return;
+        logger.info(
+          { reportId },
+          'No applied voucher usages found; clearing report voucher linkage only'
+        );
+      } else {
+        logger.info(
+          {
+            reportId,
+            usageCount: voucherUsages.length,
+          },
+          'Reversing voucher usages for report'
+        );
       }
-
-      logger.info(
-        {
-          reportId,
-          usageCount: voucherUsages.length,
-        },
-        'Reversing voucher usages for rejected report'
-      );
 
       // Reverse each voucher usage
       for (const usage of voucherUsages) {
@@ -533,7 +561,7 @@ export class VoucherService {
         usage.status = VoucherUsageStatus.REVERSED;
         usage.reversedAt = new Date();
         usage.reversedBy = reversedByObjectId;
-        usage.reversalReason = reason || 'Report rejected';
+        usage.reversalReason = reason || 'Report status updated';
 
         await usage.save({ session });
 
@@ -549,7 +577,7 @@ export class VoucherService {
             currency: usage.currency,
             debitAccount: 'EXPENSE_REPORT_ADVANCE',
             creditAccount: 'EMPLOYEE_ADVANCE',
-            description: `Voucher usage reversed due to report rejection${voucher.voucherCode ? ` (Voucher: ${voucher.voucherCode})` : ''}`,
+            description: `Voucher usage reversed${reason ? ` (${reason})` : ''}${voucher.voucherCode ? ` (Voucher: ${voucher.voucherCode})` : ''}`,
             referenceId: voucher.voucherCode || usage.voucherId.toString(),
             entryDate: new Date(),
             createdBy: reversedBy,
@@ -570,7 +598,7 @@ export class VoucherService {
           AuditAction.UPDATE,
           {
             action: 'REVERSED',
-            reason: reason || 'Report rejected',
+            reason: reason || 'Report status updated',
             voucherId: usage.voucherId.toString(),
             reportId: reportId,
             amountReversed: usage.amountUsed,

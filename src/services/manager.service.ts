@@ -926,6 +926,23 @@ export class ManagerService {
       await ExpenseReport.findByIdAndUpdate(report._id, {
         status: ExpenseReportStatus.CHANGES_REQUESTED
       });
+
+      // Release voucher usage so employee can re-select voucher on resubmit.
+      try {
+        const reportId = (report._id as mongoose.Types.ObjectId).toString();
+        const { VoucherService } = await import('./voucher.service');
+        await VoucherService.reverseVoucherUsageForReport(
+          reportId,
+          managerId,
+          comment || 'Expense rejected by manager; report sent for changes'
+        );
+      } catch (voucherError: any) {
+        logger.error(
+          { error: voucherError, reportId: report._id },
+          'ManagerService: Failed to reverse voucher usages for changes-requested report'
+        );
+        // Do not fail expense rejection if voucher reversal fails.
+      }
     }
 
     // Audit log
@@ -1010,6 +1027,23 @@ export class ManagerService {
       await ExpenseReport.findByIdAndUpdate(report._id, {
         status: ExpenseReportStatus.CHANGES_REQUESTED
       });
+
+      // Release voucher usage so employee can re-select voucher on resubmit.
+      try {
+        const reportId = (report._id as mongoose.Types.ObjectId).toString();
+        const { VoucherService } = await import('./voucher.service');
+        await VoucherService.reverseVoucherUsageForReport(
+          reportId,
+          managerId,
+          comment || 'Expense changes requested by manager'
+        );
+      } catch (voucherError: any) {
+        logger.error(
+          { error: voucherError, reportId: report._id },
+          'ManagerService: Failed to reverse voucher usages for changes-requested report'
+        );
+        // Do not fail expense-change request if voucher reversal fails.
+      }
     }
     
     // Audit log
@@ -1488,4 +1522,3 @@ export class ManagerService {
     }
   }
 }
-

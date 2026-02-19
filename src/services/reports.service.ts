@@ -468,17 +468,221 @@ export class ReportsService {
     let approvalCurrentLevel: number | null = null;
     let approvalInstanceStatus: string | null = null;
     let approvalInstanceUpdatedAt: Date | null = null;
+    let historicalApprovalSteps: any[] = [];
     try {
       const { ApprovalInstance } = await import('../models/ApprovalInstance');
       const { Role } = await import('../models/Role');
       const { User } = await import('../models/User');
 
-      const approvalInstance = await ApprovalInstance.findOne({
+      const approvalInstances = await ApprovalInstance.find({
         requestId: id,
         requestType: 'EXPENSE_REPORT'
       })
         .populate('matrixId')
+        .sort({ createdAt: 1 })
         .exec();
+
+      const approvalInstance = approvalInstances.length > 0
+        ? approvalInstances[approvalInstances.length - 1]
+        : null;
+
+      const roleNameCache = new Map<string, string>();
+      const userNameCache = new Map<string, string | null>();
+      const normalizeObjectId = (value: any): string | null => {
+        const rawId = (value?._id ?? value)?.toString?.();
+        if (!rawId || !mongoose.Types.ObjectId.isValid(rawId)) return null;
+        return rawId;
+      };
+      const getRoleNames = async (roleIdsRaw: any[]): Promise<string[]> => {
+        const normalizedIds = (Array.isArray(roleIdsRaw) ? roleIdsRaw : [])
+          .map((roleId: any) => normalizeObjectId(roleId))
+          .filter(Boolean) as string[];
+        if (normalizedIds.length === 0) return [];
+
+        const missingRoleIds = normalizedIds.filter((roleId) => !roleNameCache.has(roleId));
+        if (missingRoleIds.length > 0) {
+          const roles = await Role.find({ _id: { $in: missingRoleIds } }).select('name').lean().exec();
+          for (const role of roles as any[]) {
+            const roleId = role?._id?.toString?.();
+            if (!roleId) continue;
+            roleNameCache.set(roleId, role?.name || '');
+          }
+          for (const missingRoleId of missingRoleIds) {
+            if (!roleNameCache.has(missingRoleId)) {
+              roleNameCache.set(missingRoleId, '');
+            }
+          }
+        }
+
+        return normalizedIds
+          .map((roleId) => roleNameCache.get(roleId) || '')
+          .filter(Boolean);
+      };
+      const getUserName = async (userIdRaw: any): Promise<string | null> => {
+        const normalizedUserId = normalizeObjectId(userIdRaw);
+        if (!normalizedUserId) return null;
+        if (userNameCache.has(normalizedUserId)) {
+          return userNameCache.get(normalizedUserId) || null;
+        }
+        const approver = await User.findById(normalizedUserId).select('name').lean().exec();
+        const approverName = approver?.name || null;
+        userNameCache.set(normalizedUserId, approverName);
+        return approverName;
+      };
+
+      if (approvalInstances.length > 1) {
+        const previousInstances = approvalInstances.slice(0, approvalInstances.length - 1);
+        for (let runIndex = 0; runIndex < previousInstances.length; runIndex++) {
+          const previousInstance = previousInstances[runIndex] as any;
+          const previousMatrix = previousInstance.matrixId as any;
+          const previousLevels = Array.isArray(previousInstance.effectiveLevels) && previousInstance.effectiveLevels.length > 0
+            ? previousInstance.effectiveLevels
+            : (previousMatrix?.levels ?? []);
+          const previousLevelsMap = new Map<number, any>();
+          for (const level of previousLevels) {
+            const levelNum = Number(level?.levelNumber ?? level?.level ?? 0);
+            if (!Number.isFinite(levelNum) || levelNum <= 0) continue;
+            previousLevelsMap.set(levelNum, level);
+          }
+
+          historicalApprovalSteps.push({
+            level: 0,
+            type: 'SYSTEM',
+            title: runIndex == 0 ? 'Submitted' : 'Resubmitted',
+            status: 'COMPLETED',
+            isCurrent: false,
+            actedAt: previousInstance.createdAt ?? null,
+            actedBy: null,
+            comment: null,
+            roleNames: [],
+            approvers: [],
+            approverNames: [],
+            conditions: [],
+            conditionLabels: [],
+            triggerReason: null,
+            isAdditionalApproval: false,
+            workflowRun: runIndex + 1,
+          });
+
+          const previousHistory = [...(previousInstance.history || [])].sort(
+            (a: any, b: any) =>
+              new Date(a?.timestamp || 0).getTime() - new Date(b?.timestamp || 0).getTime()
+          );
+          const previousInstanceStatus = String(previousInstance?.status || '').toUpperCase();
+          const hasRejectedHistory = previousHistory.some(
+            (entry: any) => String(entry?.status || '').toUpperCase() === 'REJECTED'
+          );
+          const hasChangesRequestedHistory = previousHistory.some(
+            (entry: any) => String(entry?.status || '').toUpperCase() === 'CHANGES_REQUESTED'
+          );
+
+          for (const historyEntry of previousHistory) {
+            const levelNum = Number(historyEntry?.levelNumber ?? historyEntry?.level ?? 0);
+            if (!Number.isFinite(levelNum) || levelNum <= 0) continue;
+
+            const levelConfig = previousLevelsMap.get(levelNum);
+            const roleNames = await getRoleNames(levelConfig?.approverRoleIds || []);
+            const roleNameDisplay = roleNames.length > 0 ? roleNames.join(', ') : '';
+            const isAdditionalLevel = (report.approvers || []).some(
+              (a: any) =>
+                a?.isAdditionalApproval === true &&
+                Number(a?.level ?? 0) === levelNum
+            );
+            const additionalTriggerReason = isAdditionalLevel
+              ? ((report.approvers || []).find(
+                (a: any) =>
+                  a?.isAdditionalApproval === true &&
+                  Number(a?.level ?? 0) === levelNum
+              ) as any)?.triggerReason || null
+              : null;
+            const statusRaw = String(historyEntry?.status || '').toUpperCase();
+            const status =
+              statusRaw === 'APPROVED'
+                ? 'COMPLETED'
+                : statusRaw === 'REJECTED'
+                  ? 'REJECTED'
+                  : statusRaw === 'CHANGES_REQUESTED'
+                    ? 'CHANGES_REQUESTED'
+                    : statusRaw === 'SKIPPED'
+                      ? 'SKIPPED'
+                      : 'WAITING';
+            const actedByName = await getUserName(historyEntry?.approverId);
+            const levelConditions = Array.isArray(levelConfig?.conditions) ? levelConfig.conditions : [];
+            const conditionLabels = levelConditions
+              .map((condition: any) => this.formatApprovalConditionForDisplay(condition))
+              .filter(Boolean);
+            const stepTitle = isAdditionalLevel
+              ? (additionalTriggerReason
+                ? `Additional: ${additionalTriggerReason}`
+                : (roleNameDisplay || `Additional Approval (L${levelNum})`))
+              : (roleNameDisplay || `Level ${levelNum} Approval`);
+
+            historicalApprovalSteps.push({
+              level: levelNum,
+              type: isAdditionalLevel ? 'ADDITIONAL' : 'MATRIX',
+              title: stepTitle,
+              status,
+              isCurrent: false,
+              actedAt: historyEntry?.timestamp || null,
+              actedBy: actedByName
+                ? {
+                  id: normalizeObjectId(historyEntry?.approverId),
+                  name: actedByName,
+                }
+                : null,
+              comment: historyEntry?.comments || null,
+              roleNames,
+              approvers: [],
+              approverNames: actedByName ? [actedByName] : [],
+              conditions: levelConditions,
+              conditionLabels,
+              triggerReason: additionalTriggerReason,
+              isAdditionalApproval: isAdditionalLevel,
+              workflowRun: runIndex + 1,
+            });
+          }
+
+          if (previousInstanceStatus === 'CHANGES_REQUESTED' && !hasChangesRequestedHistory) {
+            historicalApprovalSteps.push({
+              level: 9998,
+              type: 'SYSTEM',
+              title: 'Changes Requested',
+              status: 'CHANGES_REQUESTED',
+              isCurrent: false,
+              actedAt: previousInstance.updatedAt ?? null,
+              actedBy: null,
+              comment: null,
+              roleNames: [],
+              approvers: [],
+              approverNames: [],
+              conditions: [],
+              conditionLabels: [],
+              triggerReason: null,
+              isAdditionalApproval: false,
+              workflowRun: runIndex + 1,
+            });
+          } else if (previousInstanceStatus === 'REJECTED' && !hasRejectedHistory) {
+            historicalApprovalSteps.push({
+              level: 9998,
+              type: 'SYSTEM',
+              title: 'Rejected',
+              status: 'REJECTED',
+              isCurrent: false,
+              actedAt: previousInstance.updatedAt ?? null,
+              actedBy: null,
+              comment: null,
+              roleNames: [],
+              approvers: [],
+              approverNames: [],
+              conditions: [],
+              conditionLabels: [],
+              triggerReason: null,
+              isAdditionalApproval: false,
+              workflowRun: runIndex + 1,
+            });
+          }
+        }
+      }
 
       if (approvalInstance) {
         approvalCurrentLevel = Number((approvalInstance as any).currentLevel ?? 0) || null;
@@ -529,13 +733,7 @@ export class ReportsService {
 
             // Get role names for this level (from matrix level if available)
             const roleIds = level?.approverRoleIds || [];
-            let roleNames: string[] = [];
-
-            // Fetch actual role names from Role model - this is the source of truth
-            if (roleIds.length > 0) {
-              const roles = await Role.find({ _id: { $in: roleIds } }).select('name').exec();
-              roleNames = roles.map(r => r.name).filter(Boolean); // Filter out any null/undefined names
-            }
+            const roleNames: string[] = await getRoleNames(roleIds);
 
             // Get approver details from history
             const approverHistory = levelHistory.find((h: any) => h.approverId);
@@ -547,8 +745,7 @@ export class ReportsService {
             let action = null;
 
             if (approverHistory) {
-              const approver = await User.findById(approverHistory.approverId).select('name').exec();
-              approverName = approver?.name || null;
+              approverName = await getUserName(approverHistory.approverId);
               approverId = approverHistory.approverId;
               decidedAt = approverHistory.timestamp;
               comment = approverHistory.comments;
@@ -634,8 +831,7 @@ export class ReportsService {
             const addUserId = addApprover.userId?.toString?.() || addApprover.userId;
             let addName: string | null = null;
             if (addUserId) {
-              const addUser = await User.findById(addUserId).select('name').exec();
-              addName = addUser?.name || null;
+              addName = await getUserName(addUserId);
             }
             const addRole = addApprover.role || 'Additional Approver';
             const addStep = addApprover.triggerReason ? `Additional: ${addApprover.triggerReason}` : `Additional Approval (${addRole})`;
@@ -719,6 +915,7 @@ export class ReportsService {
       instanceUpdatedAt: approvalInstanceUpdatedAt,
       mode: approvalChainMeta?.mode ?? null,
       levelsCount: approvalChainMeta?.levelsCount ?? null,
+      historicalSteps: historicalApprovalSteps,
     });
     const flags = {
       changes_requested: status === 'CHANGES_REQUESTED',
@@ -1467,12 +1664,53 @@ export class ReportsService {
       }
     }
 
+    // CHANGES_REQUESTED resubmits should not carry stale voucher linkage.
+    // If any voucher is still attached due to older flows/data, reverse/clear it first.
+    if (report.status === ExpenseReportStatus.CHANGES_REQUESTED) {
+      const hasLinkedVoucher =
+        (Array.isArray(report.appliedVouchers) && report.appliedVouchers.length > 0) ||
+        !!report.advanceCashId ||
+        (report.advanceAppliedAmount ?? 0) > 0;
+
+      if (hasLinkedVoucher) {
+        try {
+          const { VoucherService } = await import('./voucher.service');
+          await VoucherService.reverseVoucherUsageForReport(
+            id,
+            userId,
+            'Voucher reset on resubmit after changes requested'
+          );
+
+          // Sync in-memory document after external mutation to avoid version conflicts on save.
+          const refreshedAfterVoucherReset = await ExpenseReport.findById(id);
+          if (refreshedAfterVoucherReset) {
+            report.appliedVouchers = refreshedAfterVoucherReset.appliedVouchers;
+            report.advanceCashId = refreshedAfterVoucherReset.advanceCashId;
+            report.advanceAppliedAmount = refreshedAfterVoucherReset.advanceAppliedAmount;
+            report.advanceCurrency = refreshedAfterVoucherReset.advanceCurrency;
+            report.voucherLockedAt = refreshedAfterVoucherReset.voucherLockedAt;
+            report.voucherLockedBy = refreshedAfterVoucherReset.voucherLockedBy;
+            (report as any).__v = refreshedAfterVoucherReset.__v;
+          }
+        } catch (error: any) {
+          logger.error(
+            { error: error?.message || error, reportId: id },
+            'Failed to reset previously linked voucher before resubmission'
+          );
+          throw new Error('Unable to reset previously applied voucher. Please try again.');
+        }
+      }
+    }
+
     // Handle voucher application (NEW voucher system)
-    // Voucher can only be applied when report is in DRAFT status
+    // Voucher can only be applied when report is DRAFT or CHANGES_REQUESTED.
     // MUST be done BEFORE status change
     if (data?.advanceCashId && data.advanceAmount && data.advanceAmount > 0) {
-      if (report.status !== ExpenseReportStatus.DRAFT) {
-        throw new Error('Voucher can only be applied to DRAFT reports');
+      const canApplyVoucher =
+        report.status === ExpenseReportStatus.DRAFT ||
+        report.status === ExpenseReportStatus.CHANGES_REQUESTED;
+      if (!canApplyVoucher) {
+        throw new Error('Voucher can only be applied to DRAFT or CHANGES_REQUESTED reports');
       }
 
       try {
@@ -2004,7 +2242,7 @@ export class ReportsService {
   }
 
   /**
-   * Get available vouchers for a report (only when report is DRAFT)
+   * Get available vouchers for a report (allowed for DRAFT and CHANGES_REQUESTED).
    */
   static async getVoucherSelectionForReport(reportId: string, userId: string): Promise<any[]> {
     const report = await ExpenseReport.findById(reportId).exec();
@@ -2017,9 +2255,12 @@ export class ReportsService {
       throw new Error('Access denied');
     }
 
-    // Only allow voucher selection when report is DRAFT
-    if (report.status !== ExpenseReportStatus.DRAFT) {
-      throw new Error('Vouchers can only be selected for DRAFT reports');
+    // Allow voucher selection for first submit and resubmit-after-changes flows
+    const canSelectVoucher =
+      report.status === ExpenseReportStatus.DRAFT ||
+      report.status === ExpenseReportStatus.CHANGES_REQUESTED;
+    if (!canSelectVoucher) {
+      throw new Error('Vouchers can only be selected for DRAFT or CHANGES_REQUESTED reports');
     }
 
     // Get user's company
@@ -2240,6 +2481,22 @@ export class ReportsService {
 
       // Set status to CHANGES_REQUESTED (not DRAFT) to indicate changes are needed
       report.status = ExpenseReportStatus.CHANGES_REQUESTED;
+
+      // Release voucher amount used on this report so employee can re-select voucher on resubmit.
+      try {
+        const { VoucherService } = await import('./voucher.service');
+        await VoucherService.reverseVoucherUsageForReport(
+          id,
+          userId,
+          comment || 'Changes requested by approver'
+        );
+      } catch (error) {
+        logger.error(
+          { error, reportId: id },
+          'Failed to reverse voucher usages when report was sent back for changes'
+        );
+        // Do not block "request changes" action if voucher reversal fails.
+      }
 
       // Log the approval chain reset for audit purposes
       logger.info(
@@ -2911,6 +3168,7 @@ export class ReportsService {
     instanceUpdatedAt: Date | null;
     mode: 'PERSONALIZED' | 'MATRIX' | null;
     levelsCount: number | null;
+    historicalSteps?: any[];
   }): any {
     const {
       reportStatus,
@@ -2924,16 +3182,19 @@ export class ReportsService {
       instanceUpdatedAt,
       mode,
       levelsCount,
+      historicalSteps,
     } = params;
 
-    const progressSteps: any[] = [];
+    const progressSteps: any[] = Array.isArray(historicalSteps)
+      ? historicalSteps.map((step: any) => ({ ...step }))
+      : [];
 
     if (reportSubmittedAt) {
       progressSteps.push({
-        sequence: progressSteps.length + 1,
+        sequence: 0,
         level: 0,
         type: 'SYSTEM',
-        title: 'Submitted',
+        title: progressSteps.length > 0 ? 'Resubmitted' : 'Submitted',
         status: 'COMPLETED',
         isCurrent: false,
         actedAt: reportSubmittedAt,
@@ -2991,7 +3252,7 @@ export class ReportsService {
       );
 
       progressSteps.push({
-        sequence: progressSteps.length + 1,
+        sequence: 0,
         level,
         type: approver.isAdditionalApproval ? 'ADDITIONAL' : 'MATRIX',
         title: approver.step || `Level ${level} Approval`,
@@ -3020,7 +3281,7 @@ export class ReportsService {
 
     if (reportStatus === 'APPROVED' && reportApprovedAt) {
       progressSteps.push({
-        sequence: progressSteps.length + 1,
+        sequence: 0,
         level: 9998,
         type: 'SYSTEM',
         title: 'Final Approval',
@@ -3039,7 +3300,7 @@ export class ReportsService {
       });
     } else if (reportStatus === 'REJECTED' && reportRejectedAt) {
       progressSteps.push({
-        sequence: progressSteps.length + 1,
+        sequence: 0,
         level: 9998,
         type: 'SYSTEM',
         title: 'Rejected',
@@ -3058,7 +3319,7 @@ export class ReportsService {
       });
     } else if (reportStatus === 'CHANGES_REQUESTED') {
       progressSteps.push({
-        sequence: progressSteps.length + 1,
+        sequence: 0,
         level: 9998,
         type: 'SYSTEM',
         title: 'Changes Requested',
@@ -3076,6 +3337,10 @@ export class ReportsService {
         isAdditionalApproval: false,
       });
     }
+
+    progressSteps.forEach((step: any, index: number) => {
+      step.sequence = index + 1;
+    });
 
     const actionableSteps = progressSteps.filter((step) => step.type !== 'SYSTEM');
     const completedSteps = actionableSteps.filter((step) => step.status === 'COMPLETED' || step.status === 'SKIPPED').length;

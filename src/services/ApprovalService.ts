@@ -78,21 +78,38 @@ export class ApprovalService {
   private static shouldSkipSelfApprovalLevel(
     approvalType: 'USER_BASED' | 'ROLE_BASED',
     explicitApproverUserIds: string[],
+    resolvedApproverUserIds: string[],
     submitterNorm: string,
     allowSelfApproval: boolean
   ): boolean {
     if (allowSelfApproval) return false;
-    if (approvalType !== 'USER_BASED') return false;
+    if (!submitterNorm) return false;
 
-    // Skip ONLY when the submitter is the sole explicit approver at this level.
-    // If multiple explicit approvers exist, the level must remain pending for others.
-    const normalizedExplicit = [...new Set(
-      (explicitApproverUserIds || [])
+    const normalizeIds = (ids: string[] = []) => [...new Set(
+      ids
         .map((id: string) => id?.toString?.().toLowerCase().trim())
         .filter(Boolean)
     )];
 
-    return normalizedExplicit.length === 1 && normalizedExplicit[0] === submitterNorm;
+    // Prefer explicit approvers when present, otherwise use resolved approvers.
+    // This prevents stuck states when a role-based level resolves to only the submitter.
+    const normalizedExplicit = normalizeIds(explicitApproverUserIds || []);
+    const normalizedResolved = normalizeIds(resolvedApproverUserIds || []);
+    const levelApprovers = normalizedExplicit.length > 0 ? normalizedExplicit : normalizedResolved;
+
+    // Skip only when submitter is the sole approver for the level.
+    if (levelApprovers.length !== 1) return false;
+    const soleApprover = levelApprovers[0];
+
+    logger.debug({
+      approvalType,
+      explicitCount: normalizedExplicit.length,
+      resolvedCount: normalizedResolved.length,
+      soleApprover,
+      submitterNorm,
+    }, 'shouldSkipSelfApprovalLevel: evaluated self-approval skip');
+
+    return soleApprover === submitterNorm;
   }
 
   private static async normalizeApprovalUserId(userIdLike: any): Promise<string | null> {
@@ -261,11 +278,11 @@ export class ApprovalService {
       levelsCount: sortedLevels.length,
       allowSelfApproval,
     }, 'initiateApproval: SKIP_SELF check start');
-    // SKIP_SELF: Only skip when submitter IS the approver (not when a broad role includes everyone)
-    // - fromExplicitUsers: level has specific approverUserIds (e.g. ApproverMapping, direct user assignment) -> safe to skip
-    // - fromRoleIds: NEVER skip - role-based levels can include broad roles (Employee, etc.) that incorrectly
-    //   match all submitters; only explicit user IDs guarantee the submitter is truly the designated approver
-    // - allowSelfApproval: when company policy is ALLOW_SELF, do not skip (submitter goes through normal flow)
+    // SKIP_SELF: skip when submitter is the SOLE approver for a level.
+    // Preference order:
+    // 1) explicit approver users on the level
+    // 2) resolved approvers (role-based fallback)
+    // This prevents deadlocks when a level effectively resolves to the submitter only.
     for (let i = 0; i < sortedLevels.length; i++) {
       const level = sortedLevels[i];
       const levelNum = Number(level?.levelNumber ?? level?.level ?? (i + 1));
@@ -274,6 +291,7 @@ export class ApprovalService {
       const shouldSkip = this.shouldSkipSelfApprovalLevel(
         approvalType,
         explicitIds,
+        approverIds,
         submitterNorm,
         allowSelfApproval
       );
@@ -285,7 +303,7 @@ export class ApprovalService {
         submitterId,
         skipDecision: shouldSkip,
       }, 'initiateApproval: SKIP_SELF decision');
-      if (approvalType === 'ROLE_BASED') {
+      if (approvalType === 'ROLE_BASED' && !shouldSkip) {
         logger.info({
           requestId,
           levelNum,
@@ -571,8 +589,10 @@ export class ApprovalService {
 
   /** Resolve approver user IDs for a matrix level (for self-approval skip logic).
    * USER_BASED only when level has NO approverRoleIds AND approverUserIds resolve to users.
-   * ROLE_BASED when approverRoleIds has values - skip logic is disabled, userIds used for notifications only.
-   * Returns { userIds, approvalType, explicitApproverUserIds } - skip uses ONLY explicitApproverUserIds.
+   * Explicit approver IDs are normalized through resolveUserForApproval so CompanyAdmin-linked IDs
+   * map to their effective User IDs consistently across submit/approve/resubmit flows.
+   * ROLE_BASED when approverRoleIds has values - userIds are resolved for notification/authorization paths.
+   * Returns { userIds, approvalType, explicitApproverUserIds }.
    */
   private static async getApproverUserIdsForLevel(
     level: any,
@@ -583,16 +603,27 @@ export class ApprovalService {
     // USER_BASED only when NO role config and approverUserIds resolve to users (explicit assignment)
     if (!hasRoleConfig && level.approverUserIds && level.approverUserIds.length > 0) {
       const rawIds = level.approverUserIds.map((id: any) => (id._id ?? id).toString()).filter(Boolean);
-      const users = await User.find({
-        _id: { $in: rawIds },
-        companyId: new mongoose.Types.ObjectId(companyId),
-      })
-        .select('_id')
-        .lean()
-        .exec();
-      const userIds = users.map((u: any) => u._id.toString());
-      if (userIds.length > 0) {
-        return { userIds, approvalType: 'USER_BASED', explicitApproverUserIds: userIds };
+      const normalizedExplicitIds: string[] = [];
+      for (const rawId of rawIds) {
+        const normalizedId = await this.normalizeApprovalUserId(rawId);
+        if (normalizedId) {
+          normalizedExplicitIds.push(normalizedId);
+        }
+      }
+      const uniqueNormalizedExplicitIds = [...new Set(normalizedExplicitIds)];
+
+      if (uniqueNormalizedExplicitIds.length > 0) {
+        const users = await User.find({
+          _id: { $in: uniqueNormalizedExplicitIds },
+          companyId: new mongoose.Types.ObjectId(companyId),
+        })
+          .select('_id')
+          .lean()
+          .exec();
+        const userIds = users.map((u: any) => u._id.toString());
+        if (userIds.length > 0) {
+          return { userIds, approvalType: 'USER_BASED', explicitApproverUserIds: userIds };
+        }
       }
     }
 
@@ -634,31 +665,134 @@ export class ApprovalService {
   }
 
   /**
-   * Repair stuck instance: L1 was skipped (self-approval) but currentLevel stayed 1.
-   * Advances instance to L2 and syncs report status so L2 approver sees it.
+   * Repair stuck self-approval instances:
+   * when current pending level resolves only to the submitter under SKIP_SELF,
+   * auto-skip consecutive self-only matrix levels and move forward safely.
    */
   private static async repairStuckSkippedL1Instance(reportId: string): Promise<void> {
+    if (!mongoose.Types.ObjectId.isValid(reportId)) return;
     const reportObjId = new mongoose.Types.ObjectId(reportId);
     const instance = await ApprovalInstance.findOne({
       requestId: reportObjId,
       requestType: 'EXPENSE_REPORT',
       status: ApprovalStatus.PENDING,
-      currentLevel: 1,
-    }).exec();
+    })
+      .sort({ createdAt: -1 })
+      .exec();
     if (!instance) return;
-    const hasL1Skipped = instance.history?.some(
-      (h: any) => (h.levelNumber === 1 || h.level === 1) && h.status === ApprovalStatus.SKIPPED
-    );
-    if (!hasL1Skipped) return;
+
+    const report = await ExpenseReport.findById(instance.requestId)
+      .select('userId approvers')
+      .lean()
+      .exec();
+    if (!report) return;
+
+    const submitterNorm = await this.normalizeApprovalUserId((report as any).userId);
+    if (!submitterNorm) return;
+
+    const companySettings = await CompanySettings.findOne({ companyId: instance.companyId })
+      .select('selfApprovalPolicy')
+      .lean()
+      .exec();
+    const allowSelfApproval = companySettings?.selfApprovalPolicy === 'ALLOW_SELF';
+    if (allowSelfApproval) return;
+
     const levelsToUse = (instance as any).effectiveLevels?.length
       ? (instance as any).effectiveLevels
-      : (await ApprovalMatrix.findById(instance.matrixId).exec())?.levels ?? [];
-    const level2 = levelsToUse.find((l: any) => (l.levelNumber ?? l.level) === 2);
-    if (!level2) return;
-    instance.currentLevel = 2;
+      : (await ApprovalMatrix.findById(instance.matrixId).select('levels').lean().exec())?.levels ?? [];
+
+    if (!Array.isArray(levelsToUse) || levelsToUse.length === 0) return;
+
+    let cursorLevel = Number(instance.currentLevel ?? 1);
+    let skippedAny = false;
+
+    while (true) {
+      const levelConfig = levelsToUse.find(
+        (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === cursorLevel && l?.enabled !== false
+      );
+      if (!levelConfig) break;
+
+      const { userIds: levelApproverIds, approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(
+        levelConfig,
+        instance.companyId.toString()
+      );
+      const shouldSkip = this.shouldSkipSelfApprovalLevel(
+        approvalType,
+        explicitApproverUserIds ?? [],
+        levelApproverIds ?? [],
+        submitterNorm,
+        allowSelfApproval
+      );
+      if (!shouldSkip) break;
+
+      const alreadySkipped = (instance.history || []).some(
+        (h: any) => Number(h?.levelNumber ?? 0) === cursorLevel && h?.status === ApprovalStatus.SKIPPED
+      );
+      if (!alreadySkipped) {
+        instance.history.push({
+          levelNumber: cursorLevel,
+          status: ApprovalStatus.SKIPPED,
+          timestamp: new Date(),
+          comments: 'Self approval skipped per company policy',
+        } as any);
+        await AuditService.log(
+          submitterNorm,
+          'ExpenseReport',
+          reportId,
+          AuditAction.SELF_APPROVAL_SKIPPED,
+          {
+            reportId,
+            userId: submitterNorm,
+            policy: 'SKIP_SELF',
+            level: cursorLevel,
+          }
+        );
+      }
+
+      skippedAny = true;
+      cursorLevel += 1;
+    }
+
+    if (!skippedAny) return;
+
+    const nextMatrixLevel = levelsToUse.find(
+      (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === cursorLevel && l?.enabled !== false
+    );
+
+    if (nextMatrixLevel) {
+      instance.currentLevel = cursorLevel;
+      instance.status = ApprovalStatus.PENDING;
+    } else {
+      const pendingAdditionalApprovers = ((report as any).approvers || [])
+        .filter((a: any) => a?.isAdditionalApproval === true && (!a?.decidedAt || !a?.action))
+        .sort((a: any, b: any) => Number(a?.level ?? 0) - Number(b?.level ?? 0));
+
+      if (pendingAdditionalApprovers.length > 0) {
+        instance.currentLevel = Number(pendingAdditionalApprovers[0].level ?? cursorLevel);
+        instance.status = ApprovalStatus.PENDING;
+      } else {
+        instance.status = ApprovalStatus.APPROVED;
+      }
+    }
+
     await instance.save();
+    if (instance.status === ApprovalStatus.APPROVED) {
+      await this.finalizeApproval(instance, {
+        type: 'AUTO_APPROVED',
+        reason: 'SUBMITTER_IS_ONLY_APPROVER_AT_REMAINING_LEVELS',
+        policy: 'SKIP_SELF',
+        approvedAt: new Date(),
+      });
+    }
     await this.syncRequestStatus(instance);
-    logger.info({ instanceId: instance._id, reportId, newLevel: 2 }, 'repairStuckSkippedL1Instance: Advanced to L2');
+
+    logger.info({
+      instanceId: instance._id,
+      reportId,
+      skippedAny,
+      newLevel: instance.currentLevel,
+      newStatus: instance.status,
+    }, 'repairStuckSkippedL1Instance: repaired stuck self-approval instance');
   }
 
   /**
@@ -695,7 +829,7 @@ export class ApprovalService {
 
     // Matrix level: support both levelNumber and level for compatibility
     const currentMatrixLevel = matrixLevels.find(
-      (l: any) => (l.levelNumber === instance.currentLevel) || (l.level === instance.currentLevel)
+      (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(instance.currentLevel)
     );
 
     // Additional approver should only be considered when current level is NOT a matrix level.
@@ -940,7 +1074,7 @@ export class ApprovalService {
                 requestId: instance.requestId,
                 currentLevel: instance.currentLevel,
               }, 'getPendingApprovalsForUser: Skip - submitter is current approver (SKIP_SELF), should not see own report');
-              // Repair stuck instance: L1 was skipped but currentLevel stayed 1 - advance to L2
+              // Repair any stuck self-approval level so workflow can continue automatically.
               this.repairStuckSkippedL1Instance(instance.requestId.toString()).catch((err) =>
                 logger.warn({ err: err?.message, requestId: instance.requestId }, 'repairStuckSkippedL1Instance failed')
               );
@@ -1545,7 +1679,9 @@ export class ApprovalService {
     levelNumber: number,
     requestData: any
   ): Promise<{ levelNumber: number; status: ApprovalStatus }> {
-    const level = matrix.levels.find((l) => l.levelNumber === levelNumber && l.enabled !== false);
+    const level = (matrix.levels || []).find(
+      (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(levelNumber) && l?.enabled !== false
+    );
     if (!level) {
       return { levelNumber: instance.currentLevel, status: ApprovalStatus.APPROVED };
     }
@@ -1591,7 +1727,9 @@ export class ApprovalService {
       if (additionalInfo.isAdditionalApproverLevel && additionalInfo.approverUserId) {
         currentLevelApproverIds = [additionalInfo.approverUserId];
       } else {
-        const levelConfig = levelsToUse.find((l: any) => (l.levelNumber ?? l.level) === instance.currentLevel);
+        const levelConfig = levelsToUse.find(
+          (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(instance.currentLevel)
+        );
         if (levelConfig) {
           const result = await this.getApproverUserIdsForLevel(levelConfig, instance.companyId?.toString?.() ?? '');
           currentLevelApproverIds = result.userIds;
@@ -1616,7 +1754,7 @@ export class ApprovalService {
         const report = await ExpenseReport.findById(instance.requestId).select('approvers').lean().exec();
         const approversList = (report?.approvers || []) as any[];
         const remaining = approversList.filter(
-          (a: any) => a.isAdditionalApproval === true && a.level > instance.currentLevel
+          (a: any) => a.isAdditionalApproval === true && Number(a?.level ?? 0) > Number(instance.currentLevel)
         );
         if (remaining.length > 0) {
           instance.currentLevel = remaining[0].level;
@@ -1774,8 +1912,11 @@ export class ApprovalService {
       // Block self-approval when company policy is SKIP_SELF
       if (action === 'APPROVE' && requestData && instance.requestType === 'EXPENSE_REPORT') {
         const report = requestData as any;
-        const reportSubmitterId = (report.userId?.toString?.() ?? report.userId) as string;
-        if (reportSubmitterId && effectiveUserId === reportSubmitterId) {
+        const reportSubmitterIdRaw = (report.userId?.toString?.() ?? report.userId) as string;
+        const reportSubmitterNorm = (await this.normalizeApprovalUserId(reportSubmitterIdRaw))
+          ?? reportSubmitterIdRaw?.toString?.().toLowerCase?.().trim?.();
+        const currentApproverNorm = effectiveUserId?.toString?.().toLowerCase?.().trim?.();
+        if (reportSubmitterNorm && currentApproverNorm && currentApproverNorm === reportSubmitterNorm) {
           // Always block self-approval (SKIP_SELF)
           if (true) {
             const err: any = new Error('Self approval is not allowed by company policy');
@@ -1988,7 +2129,25 @@ export class ApprovalService {
         instance.status = ApprovalStatus.CHANGES_REQUESTED;
         await instance.save();
         if (instance.requestType === 'EXPENSE_REPORT') {
+          const reportId = (instance.requestId as mongoose.Types.ObjectId).toString();
           await ExpenseReport.findByIdAndUpdate(instance.requestId, { status: ExpenseReportStatus.CHANGES_REQUESTED });
+
+          // Release voucher usage so employee can reselect voucher on resubmission.
+          try {
+            const { VoucherService } = await import('./voucher.service');
+            await VoucherService.reverseVoucherUsageForReport(
+              reportId,
+              userId,
+              comments || 'Changes requested by approver'
+            );
+            logger.info({ reportId }, 'ApprovalService: Voucher usages reversed for changes-requested report');
+          } catch (voucherError: any) {
+            logger.error(
+              { error: voucherError, reportId },
+              'ApprovalService: Failed to reverse voucher usages for changes-requested report'
+            );
+            // Don't fail request-changes flow if voucher reversal fails.
+          }
         }
         // Enqueue changes requested notification (async, non-blocking)
         const { NotificationQueueService } = await import('./NotificationQueueService');
@@ -2013,7 +2172,7 @@ export class ApprovalService {
             const report = requestData as any;
             const remainingAdditionalApprovers = (report.approvers || []).filter(
               (a: any) => a.isAdditionalApproval === true &&
-                a.level > instance.currentLevel &&
+                Number(a?.level ?? 0) > Number(instance.currentLevel) &&
                 (!a.decidedAt || !a.action)
             );
 
@@ -2050,24 +2209,26 @@ export class ApprovalService {
 
           // Skip self-approval (SKIP_SELF) when company policy allows and level is USER_BASED
           if (reportSubmitterId && instance.requestType === 'EXPENSE_REPORT') {
-            const submitterNorm = reportSubmitterId.toString().toLowerCase().trim();
+            const submitterNorm = (await this.normalizeApprovalUserId(reportSubmitterId))
+              ?? reportSubmitterId.toString().toLowerCase().trim();
             const companySettingsForAction = await CompanySettings.findOne({ companyId: companyIdStr }).select('selfApprovalPolicy').lean().exec();
             const allowSelfApprovalForAction = companySettingsForAction?.selfApprovalPolicy === 'ALLOW_SELF';
 
             while (true) {
               const levelConfig = levelsToUse.find(
-                (l: any) => (l.levelNumber ?? l.level) === nextLevelNum && l.enabled !== false
+                (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(nextLevelNum) && l.enabled !== false
               );
               if (!levelConfig) {
                 nextState = { levelNumber: instance.currentLevel, status: ApprovalStatus.APPROVED };
                 break;
               }
-              const { approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(levelConfig, companyIdStr);
+              const { userIds: levelApproverIds, approvalType, explicitApproverUserIds } = await this.getApproverUserIdsForLevel(levelConfig, companyIdStr);
               const explicitIds = explicitApproverUserIds ?? [];
-              // Only skip when submitter is the sole explicit approver AND level is USER_BASED AND company policy is SKIP_SELF
+              // Skip when submitter is the sole approver for the target level under SKIP_SELF.
               if (this.shouldSkipSelfApprovalLevel(
                 approvalType,
                 explicitIds,
+                levelApproverIds,
                 submitterNorm,
                 allowSelfApprovalForAction
               )) {
@@ -2395,7 +2556,9 @@ export class ApprovalService {
             });
           } else {
             // Notify next matrix level approvers (use virtualMatrix so personalized effectiveLevels are used)
-            const nextLevelConfig = (virtualMatrix as any).levels?.find((l: any) => l.levelNumber === instance.currentLevel);
+            const nextLevelConfig = (virtualMatrix as any).levels?.find(
+              (l: any) => Number(l?.levelNumber ?? l?.level ?? 0) === Number(instance.currentLevel)
+            );
             if (nextLevelConfig) {
               await NotificationQueueService.enqueue('APPROVAL_REQUIRED', {
                 approvalInstance: instance,
