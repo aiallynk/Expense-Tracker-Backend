@@ -21,6 +21,24 @@ function getCurrentMonthKey(): string {
   return `${y}-${m}`;
 }
 
+function getMonthTargets(months = 6): Array<{ periodKey: string; name: string }> {
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const now = new Date();
+  const targets: Array<{ periodKey: string; name: string }> = [];
+
+  for (let i = months - 1; i >= 0; i -= 1) {
+    const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    const periodKey =
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}`;
+    targets.push({
+      periodKey,
+      name: monthNames[date.getMonth()],
+    });
+  }
+
+  return targets;
+}
+
 /**
  * Get period keys to update for a report (based on approvedAt date and all-time).
  */
@@ -91,6 +109,7 @@ function snapshotToDashboardPayload(
     return {
       totalReports: 0,
       pendingApprovals: 0,
+      pendingReports: 0,
       totalSpendThisMonth: 0,
       totalAmountThisMonth: 0,
       totalAmount: 0,
@@ -101,6 +120,8 @@ function snapshotToDashboardPayload(
       approvedExpenseAmount: 0,
       voucherUsedAmount: 0,
       employeePaidAmount: 0,
+      totalExpenses: 0,
+      expensesThisMonth: 0,
       categoryBreakdown: {},
       spendTrend: 0,
       ...userCounts,
@@ -110,6 +131,7 @@ function snapshotToDashboardPayload(
   return {
     totalReports: doc.totalReports ?? 0,
     pendingApprovals: 0,
+    pendingReports: 0,
     totalSpendThisMonth: doc.totalExpenseAmount ?? 0,
     totalAmountThisMonth: doc.totalExpenseAmount ?? 0,
     totalAmount: doc.totalExpenseAmount ?? 0,
@@ -120,6 +142,8 @@ function snapshotToDashboardPayload(
     approvedExpenseAmount: doc.approvedExpenseAmount ?? 0,
     voucherUsedAmount: doc.voucherUsedAmount ?? 0,
     employeePaidAmount: doc.employeePaidAmount ?? 0,
+    totalExpenses: 0,
+    expensesThisMonth: 0,
     categoryBreakdown: doc.categoryBreakdown ?? {},
     spendTrend: 0,
     ...userCounts,
@@ -202,6 +226,125 @@ async function getUserCountsForCompany(companyId: string): Promise<{
     managers: users.filter((u: any) => u.role === 'MANAGER').length,
     businessHeads: users.filter((u: any) => u.role === 'BUSINESS_HEAD').length,
   };
+}
+
+async function getLiveDashboardCounters(companyId: string): Promise<{
+  pendingApprovals: number;
+  pendingReports: number;
+  submittedReports: number;
+  inApprovalReports: number;
+  changesRequestedReports: number;
+  draftReports: number;
+  totalExpenses: number;
+  expensesThisMonth: number;
+}> {
+  const companyUsers = await User.find({ companyId: new mongoose.Types.ObjectId(companyId) })
+    .select('_id')
+    .lean()
+    .exec();
+  const userIds = companyUsers.map((user: any) => user._id);
+
+  if (userIds.length === 0) {
+    return {
+      pendingApprovals: 0,
+      pendingReports: 0,
+      submittedReports: 0,
+      inApprovalReports: 0,
+      changesRequestedReports: 0,
+      draftReports: 0,
+      totalExpenses: 0,
+      expensesThisMonth: 0,
+    };
+  }
+
+  const now = new Date();
+  const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+  const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59);
+
+  const [statusCounts, totalExpenses, expensesThisMonth] = await Promise.all([
+    ExpenseReport.aggregate([
+      {
+        $match: {
+          userId: { $in: userIds },
+        },
+      },
+      {
+        $group: {
+          _id: '$status',
+          count: { $sum: 1 },
+        },
+      },
+    ]),
+    Expense.countDocuments({ userId: { $in: userIds } }),
+    Expense.countDocuments({
+      userId: { $in: userIds },
+      expenseDate: {
+        $gte: startOfMonth,
+        $lte: endOfMonth,
+      },
+    }),
+  ]);
+
+  const statusMap = new Map<string, number>();
+  statusCounts.forEach((row: any) => {
+    statusMap.set(String(row._id || ''), Number(row.count) || 0);
+  });
+
+  const submittedReports = statusMap.get(ExpenseReportStatus.SUBMITTED) || 0;
+  const inApprovalReports = [
+    ExpenseReportStatus.PENDING_APPROVAL_L1,
+    ExpenseReportStatus.PENDING_APPROVAL_L2,
+    ExpenseReportStatus.PENDING_APPROVAL_L3,
+    ExpenseReportStatus.PENDING_APPROVAL_L4,
+    ExpenseReportStatus.PENDING_APPROVAL_L5,
+    ExpenseReportStatus.MANAGER_APPROVED,
+    ExpenseReportStatus.BH_APPROVED,
+  ].reduce((sum, status) => sum + (statusMap.get(status) || 0), 0);
+  const changesRequestedReports = statusMap.get(ExpenseReportStatus.CHANGES_REQUESTED) || 0;
+  const draftReports = statusMap.get(ExpenseReportStatus.DRAFT) || 0;
+  const pendingApprovals = submittedReports + inApprovalReports;
+
+  return {
+    pendingApprovals,
+    pendingReports: pendingApprovals,
+    submittedReports,
+    inApprovalReports,
+    changesRequestedReports,
+    draftReports,
+    totalExpenses,
+    expensesThisMonth,
+  };
+}
+
+async function getMonthlySpendTrend(companyId: string, months = 6): Promise<Array<{
+  name: string;
+  periodKey: string;
+  value: number;
+}>> {
+  const targets = getMonthTargets(months);
+  const targetKeys = targets.map((target) => target.periodKey);
+  const docs = await CompanyAnalyticsSnapshot.find({
+    companyId: new mongoose.Types.ObjectId(companyId),
+    period: PERIOD_MONTH,
+    periodKey: { $in: targetKeys },
+  })
+    .select('periodKey totalExpenseAmount approvedExpenseAmount')
+    .lean()
+    .exec();
+
+  const amountMap = new Map<string, number>();
+  docs.forEach((doc: any) => {
+    amountMap.set(
+      doc.periodKey,
+      doc.totalExpenseAmount ?? doc.approvedExpenseAmount ?? 0
+    );
+  });
+
+  return targets.map((target) => ({
+    name: target.name,
+    periodKey: target.periodKey,
+    value: amountMap.get(target.periodKey) || 0,
+  }));
 }
 
 async function getCategoryBreakdownForReport(reportId: string): Promise<Record<string, number>> {
@@ -466,12 +609,18 @@ export async function getSnapshotAllTime(companyId: string): Promise<ICompanyAna
  * Get dashboard payload for API (current month snapshot + all-time total + user counts).
  */
 export async function getDashboardPayload(companyId: string, periodKey?: string): Promise<any> {
-  const [snapshot, allTimeSnapshot, userCounts] = await Promise.all([
+  const [snapshot, allTimeSnapshot, userCounts, liveCounters, monthlySpendTrend] = await Promise.all([
     getSnapshotForDashboard(companyId, periodKey),
     getSnapshotAllTime(companyId),
     getUserCountsForCompany(companyId),
+    getLiveDashboardCounters(companyId),
+    getMonthlySpendTrend(companyId),
   ]);
-  const payload = snapshotToDashboardPayload(snapshot, userCounts);
+  const payload = {
+    ...snapshotToDashboardPayload(snapshot, userCounts),
+    ...liveCounters,
+    monthlySpendTrend,
+  };
   payload.totalSpendsAllTime = allTimeSnapshot?.totalExpenseAmount ?? allTimeSnapshot?.approvedExpenseAmount ?? 0;
   return payload;
 }

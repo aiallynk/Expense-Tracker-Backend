@@ -51,6 +51,17 @@ export class CacheService {
   }
 
   /**
+   * Delete all cache entries that start with the provided prefix
+   */
+  deleteByPrefix(prefix: string): void {
+    for (const key of this.cache.keys()) {
+      if (key.startsWith(prefix)) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  /**
    * Clear all cache entries
    */
   clear(): void {

@@ -15,44 +15,50 @@ const seedUsers = async () => {
     });
     console.log('Connected to MongoDB');
 
-    // Default password for all seed users
-    const defaultPassword = 'password123';
-    const passwordHash = await bcrypt.hash(defaultPassword, 10);
+    const defaultPasswordHash = await bcrypt.hash('password123', 10);
+    const superAdminPasswordHash = await bcrypt.hash('111111', 10);
 
     // Seed users with different roles
     const users = [
       {
         email: 'example@employee.com',
-        passwordHash,
+        passwordHash: defaultPasswordHash,
         name: 'Employee User',
         role: UserRole.EMPLOYEE,
         status: UserStatus.ACTIVE,
       },
       {
         email: 'example@manager.com',
-        passwordHash,
+        passwordHash: defaultPasswordHash,
         name: 'Manager User',
         role: UserRole.MANAGER,
         status: UserStatus.ACTIVE,
       },
       {
         email: 'example@bh.com',
-        passwordHash,
+        passwordHash: defaultPasswordHash,
         name: 'Business Head User',
         role: UserRole.BUSINESS_HEAD,
         status: UserStatus.ACTIVE,
       },
       {
         email: 'example@ca.com',
-        passwordHash,
+        passwordHash: defaultPasswordHash,
         name: 'Company Admin User',
         role: UserRole.COMPANY_ADMIN,
         status: UserStatus.ACTIVE,
       },
       {
         email: 'example@sa.com',
-        passwordHash,
+        passwordHash: superAdminPasswordHash,
         name: 'Super Admin User',
+        role: UserRole.SUPER_ADMIN,
+        status: UserStatus.ACTIVE,
+      },
+      {
+        email: 'superadmin@aially.in',
+        passwordHash: superAdminPasswordHash,
+        name: 'Alternate Super Admin',
         role: UserRole.SUPER_ADMIN,
         status: UserStatus.ACTIVE,
       },
@@ -83,7 +89,8 @@ const seedUsers = async () => {
     console.log('Email: example@manager.com | Password: password123 | Role: MANAGER');
     console.log('Email: example@bh.com | Password: password123 | Role: BUSINESS_HEAD');
     console.log('Email: example@ca.com | Password: password123 | Role: COMPANY_ADMIN');
-    console.log('Email: example@sa.com | Password: password123 | Role: SUPER_ADMIN');
+    console.log('Email: example@sa.com | Password: 111111 | Role: SUPER_ADMIN');
+    console.log('Email: superadmin@aially.in | Password: 111111 | Role: SUPER_ADMIN');
 
     process.exit(0);
   } catch (error) {

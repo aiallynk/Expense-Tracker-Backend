@@ -15,6 +15,7 @@
     "generate:jwt-secrets": "node scripts/generate-jwt-secrets.js",
     "setup:s3": "tsx scripts/setup-s3-buckets.ts",
     "seed:users": "tsx scripts/seed-users.ts",
+    "ensure:super-admins": "tsx scripts/ensure-super-admins.ts",
     "check-db-roles": "tsx scripts/check-db-roles.ts",
     "migrate:db": "tsx scripts/migrate-add-fields.ts",
     "seed:sample-data": "tsx scripts/seed-sample-data.ts",

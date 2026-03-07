@@ -5,9 +5,11 @@
  * - Provides aggregation APIs for Super Admin
  */
 
+import mongoose from 'mongoose';
 import type { ChatCompletion } from 'openai/resources/chat/completions';
 
 import { AiTokenUsage } from '../models/AiTokenUsage';
+import { Company } from '../models/Company';
 import { redisConnection, isRedisAvailable } from '../config/queue';
 import { calculateCostUsd } from '../config/aiPricing';
 import { AiFeature } from '../utils/enums';
@@ -244,13 +246,13 @@ export async function getSummary(_timeRange: TimeRange = '30d'): Promise<{
 
 /** Top companies by token usage */
 export async function getTopCompanies(limit = 10, timeRange: TimeRange = '30d'): Promise<{
-  companies: Array<{ companyId: string; totalTokens: number; costUsd: number }>;
+  companies: Array<{ companyId: string; companyName: string; totalTokens: number; costUsd: number }>;
   generatedAt: string;
   dataSource: 'LIVE_DB';
   confidence: 'REALTIME';
 }> {
   const { start } = getDateRange(timeRange);
-  const agg = await AiTokenUsage.aggregate([
+  const agg = await AiTokenUsage.aggregate<{ companyId: string; totalTokens: number; costUsd: number }>([
     { $match: { createdAt: { $gte: start } } },
     { $group: { _id: '$companyId', totalTokens: { $sum: '$totalTokens' }, costUsd: { $sum: '$costUsd' } } },
     { $sort: { totalTokens: -1 } },
@@ -258,8 +260,26 @@ export async function getTopCompanies(limit = 10, timeRange: TimeRange = '30d'):
     { $project: { companyId: '$_id', totalTokens: 1, costUsd: 1, _id: 0 } },
   ]);
 
+  const validCompanyIds = agg
+    .map(({ companyId }) => companyId)
+    .filter((companyId): companyId is string => mongoose.Types.ObjectId.isValid(companyId));
+
+  const companyDocs = validCompanyIds.length > 0
+    ? await Company.find({ _id: { $in: validCompanyIds } })
+      .select('name')
+      .lean()
+      .exec()
+    : [];
+
+  const companyNameById = new Map(
+    companyDocs.map((company) => [company._id.toString(), company.name])
+  );
+
   return {
-    companies: agg,
+    companies: agg.map((company) => ({
+      ...company,
+      companyName: companyNameById.get(company.companyId) || 'Unknown Company',
+    })),
     generatedAt: new Date().toISOString(),
     dataSource: 'LIVE_DB',
     confidence: 'REALTIME',

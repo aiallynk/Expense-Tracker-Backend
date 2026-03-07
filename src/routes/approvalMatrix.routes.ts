@@ -2,6 +2,7 @@ import express from 'express';
 
 import { ApprovalMatrixController } from '../controllers/approvalMatrix.controller';
 import { authMiddleware as protect } from '../middleware/auth.middleware';
+import { pendingApprovalRateLimiter } from '../middleware/rateLimit.middleware';
 import { requireRole as authorize } from '../middleware/role.middleware';
 import { UserRole } from '../utils/enums';
 
@@ -18,7 +19,7 @@ router.post('/', protect, authorize(UserRole.COMPANY_ADMIN), ApprovalMatrixContr
 router.get('/', protect, authorize(UserRole.COMPANY_ADMIN), ApprovalMatrixController.getMatrix);
 
 // Approval Actions (Approvers)
-router.get('/pending', protect, ApprovalMatrixController.getPendingApprovals);
+router.get('/pending', protect, pendingApprovalRateLimiter, ApprovalMatrixController.getPendingApprovals);
 router.get('/history', protect, ApprovalMatrixController.getApprovalHistory);
 router.post('/instances/:instanceId/approve', protect, ApprovalMatrixController.approveRequest);
 router.post('/instances/:instanceId/reject', protect, ApprovalMatrixController.rejectRequest);

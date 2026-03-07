@@ -9,6 +9,7 @@ import { Project } from '../models/Project';
 import { Role } from '../models/Role';
 import { User } from '../models/User';
 import { ApprovalService, getEffectiveUserIdForApproval } from '../services/ApprovalService';
+import { logger } from '@/config/logger';
 
 export class ApprovalMatrixController {
 
@@ -157,6 +158,7 @@ export class ApprovalMatrixController {
         }
 
         const result = await ApprovalService.processAction(instanceId, userId, 'APPROVE', comment);
+        ApprovalService.invalidatePendingApprovalsCache();
         return res.json({ success: true, data: result });
     });
 
@@ -169,6 +171,7 @@ export class ApprovalMatrixController {
         }
 
         const result = await ApprovalService.processAction(instanceId, userId, 'REJECT', comment);
+        ApprovalService.invalidatePendingApprovalsCache();
         return res.json({ success: true, data: result });
     });
 
@@ -181,6 +184,7 @@ export class ApprovalMatrixController {
         }
 
         const result = await ApprovalService.processAction(instanceId, userId, 'REQUEST_CHANGES', comment);
+        ApprovalService.invalidatePendingApprovalsCache();
         return res.json({ success: true, data: result });
     });
 
@@ -196,6 +200,17 @@ export class ApprovalMatrixController {
         if (limit) options.limit = parseInt(limit as string);
         if (startDate) options.startDate = startDate as string;
         if (endDate) options.endDate = endDate as string;
+
+        const requestLogger = (req as any).logger || logger;
+        requestLogger.info({
+            requestId: (req as any).requestId,
+            userId,
+            route: req.originalUrl,
+            method: req.method,
+            timestamp: new Date().toISOString(),
+            page: options.page || 1,
+            limit: options.limit || 10,
+        }, 'ApprovalMatrixController.getPendingApprovals');
 
         // ApprovalService resolves CompanyAdmin -> linked User internally
         const result = await ApprovalService.getPendingApprovalsForUser(userId, options);

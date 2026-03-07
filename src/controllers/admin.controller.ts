@@ -282,8 +282,6 @@ export class AdminController {
   // Dashboard – read from company_analytics_snapshot only (no aggregation)
   static getDashboard = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { CompanyAdmin } = await import('../models/CompanyAdmin');
-    const { ExpenseReport } = await import('../models/ExpenseReport');
-    const { User } = await import('../models/User');
     let companyId: string | undefined;
 
     if (req.user!.role === 'COMPANY_ADMIN') {
@@ -299,14 +297,19 @@ export class AdminController {
         data: {
           totalReports: 0,
           totalExpenses: 0,
+          expensesThisMonth: 0,
           pendingReports: 0,
+          pendingApprovals: 0,
           approvedReports: 0,
           totalAmount: 0,
           totalAmountThisMonth: 0,
+          totalSpendThisMonth: 0,
+          totalSpendsAllTime: 0,
           totalUsers: 0,
           employees: 0,
           managers: 0,
           businessHeads: 0,
+          spendTrend: 0,
         },
       }) as any;
     }
@@ -322,35 +325,9 @@ export class AdminController {
         // ignore
       }
     }
-    const companyUsers = await User.find({ companyId }).select('_id').exec();
-    const userIds = companyUsers.map((u) => u._id);
-    const [pendingReports, totalExpenses] = await Promise.all([
-      userIds.length > 0
-        ? ExpenseReport.countDocuments({
-            userId: { $in: userIds },
-            status: {
-              $nin: [
-                ExpenseReportStatus.DRAFT,
-                ExpenseReportStatus.APPROVED,
-                ExpenseReportStatus.REJECTED,
-                ExpenseReportStatus.CHANGES_REQUESTED,
-              ],
-            },
-          })
-        : 0,
-      userIds.length > 0
-        ? (await import('../models/Expense')).Expense.countDocuments({ userId: { $in: userIds } })
-        : 0,
-    ]);
-
     res.status(200).json({
       success: true,
-      data: {
-        ...dashboardData,
-        pendingReports,
-        pendingApprovals: pendingReports,
-        totalExpenses,
-      },
+      data: dashboardData,
     });
   });
 
@@ -1036,7 +1013,7 @@ export class AdminController {
   });
 
   /**
-   * Day-wise expense totals for a selected month (company-scoped for COMPANY_ADMIN).
+   * Day-wise expense creation totals for a selected month (company-scoped for COMPANY_ADMIN).
    * GET /admin/analytics/expenses-daily?month=1&year=2026
    * Returns realtime data: one point per day (01 to last day of month) with amount and count.
    */
@@ -1070,15 +1047,15 @@ export class AdminController {
       {
         $match: {
           userId: { $in: userIds },
-          expenseDate: { $gte: startOfMonth, $lte: endOfMonth },
+          createdAt: { $gte: startOfMonth, $lte: endOfMonth },
         },
       },
       {
         $group: {
           _id: {
-            year: { $year: '$expenseDate' },
-            month: { $month: '$expenseDate' },
-            day: { $dayOfMonth: '$expenseDate' },
+            year: { $year: '$createdAt' },
+            month: { $month: '$createdAt' },
+            day: { $dayOfMonth: '$createdAt' },
           },
           amount: { $sum: '$amount' },
           count: { $sum: 1 },
@@ -1441,4 +1418,3 @@ export class AdminController {
     });
   });
 }
-

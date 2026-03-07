@@ -185,3 +185,26 @@ export const apiRateLimiter = rateLimit({
   },
 });
 
+// Pending approvals limiter - protects the heavy approval inbox endpoint from request storms
+// Allows normal dashboard usage while blocking infinite loops or rapid multi-rerender bursts.
+export const pendingApprovalRateLimiter = rateLimit({
+  windowMs: 15 * 1000, // 15 seconds
+  max: parseInt(process.env.PENDING_APPROVAL_RATE_LIMIT || '30', 10),
+  message: {
+    success: false,
+    message: 'Too many approval refresh requests, please wait a moment and try again',
+    code: 'RATE_LIMIT_EXCEEDED',
+  },
+  standardHeaders: true,
+  legacyHeaders: false,
+  validate: {
+    trustProxy: false,
+  },
+  skip: (req) => req.method === 'OPTIONS',
+  keyGenerator: (req: any) => {
+    if (req.user?.id) {
+      return `user:${req.user.id}`;
+    }
+    return req.ip || req.socket.remoteAddress || 'unknown';
+  },
+});
