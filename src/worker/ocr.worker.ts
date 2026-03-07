@@ -1,3 +1,5 @@
+import '../register-path-aliases';
+
 import { Worker, Job } from 'bullmq';
 
 import { connectDB, disconnectDB } from '../config/db';

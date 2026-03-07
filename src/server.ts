@@ -1,3 +1,5 @@
+import './register-path-aliases';
+
 import { createServer, Server } from 'http';
 import os from 'os';
 

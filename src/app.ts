@@ -1,3 +1,5 @@
+import './register-path-aliases';
+
 import cors from 'cors';
 import express, { Express } from 'express';
 import helmet from 'helmet';
