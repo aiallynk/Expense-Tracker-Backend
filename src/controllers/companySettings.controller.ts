@@ -121,7 +121,7 @@ export class CompanySettingsController {
   /**
    * Update self-approval policy
    * PUT /api/v1/company-admin/settings/self-approval
-   * Body: { selfApprovalPolicy: 'SKIP_SELF' | 'ALLOW_SELF' }
+   * Body: { selfApprovalPolicy: 'SKIP_SELF' }
    */
   static updateSelfApprovalPolicy = asyncHandler(async (req: AuthRequest, res: Response) => {
     const companyAdmin = await CompanyAdmin.findById(req.user!.id).exec();
@@ -135,18 +135,14 @@ export class CompanySettingsController {
     }
     const companyId = companyAdmin.companyId.toString();
     const { selfApprovalPolicy } = req.body;
-    if (!selfApprovalPolicy || (selfApprovalPolicy !== 'SKIP_SELF' && selfApprovalPolicy !== 'ALLOW_SELF')) {
-      res.status(400).json({
-        success: false,
-        message: 'selfApprovalPolicy must be SKIP_SELF or ALLOW_SELF',
-        code: 'VALIDATION_ERROR',
-      });
-      return;
-    }
-    const settings = await CompanySettingsService.updateSelfApprovalPolicy(companyId, selfApprovalPolicy, req.user!.id);
+    const settings = await CompanySettingsService.updateSelfApprovalPolicy(
+      companyId,
+      selfApprovalPolicy ?? 'SKIP_SELF',
+      req.user!.id
+    );
     res.status(200).json({
       success: true,
-      message: 'Self-approval policy updated successfully',
+      message: 'Self-approval policy enforced as SKIP_SELF',
       data: settings,
     });
   });
@@ -228,4 +224,3 @@ export class CompanySettingsController {
     });
   });
 }
-

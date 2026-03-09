@@ -12,7 +12,6 @@ import {
   ApprovalType,
   ParallelRule,
 } from "../models/ApprovalMatrix";
-import { CompanySettings } from "../models/CompanySettings";
 import { Expense } from "../models/Expense";
 import { ExpenseReport } from "../models/ExpenseReport";
 import { User } from "../models/User";
@@ -431,12 +430,8 @@ export class ApprovalService {
     let firstNonSubmitterLevelNum: number | null = null;
     const submitterNorm = submitterId.toString().toLowerCase().trim();
 
-    const companySettings = await CompanySettings.findOne({ companyId })
-      .select("selfApprovalPolicy")
-      .lean()
-      .exec();
-    const allowSelfApproval =
-      companySettings?.selfApprovalPolicy === "ALLOW_SELF";
+    // Self-approval is always disabled: enforce SKIP_SELF for all companies.
+    const allowSelfApproval = false;
 
     logger.info(
       {
@@ -989,14 +984,7 @@ export class ApprovalService {
     );
     if (!submitterNorm) return;
 
-    const companySettings = await CompanySettings.findOne({
-      companyId: instance.companyId,
-    })
-      .select("selfApprovalPolicy")
-      .lean()
-      .exec();
-    const allowSelfApproval =
-      companySettings?.selfApprovalPolicy === "ALLOW_SELF";
+    const allowSelfApproval = false;
     if (allowSelfApproval) return;
 
     const levelsToUse = (instance as any).effectiveLevels?.length
@@ -1406,11 +1394,20 @@ export class ApprovalService {
         }
       }
 
+      const effectiveUserObjectId = mongoose.Types.ObjectId.isValid(
+        effectiveUserId,
+      )
+        ? new mongoose.Types.ObjectId(effectiveUserId)
+        : null;
+
       const additionalApprovalReports = await ExpenseReport.find({
-        companyId: companyIdForQuery,
+        // ExpenseReport does not persist companyId. Company scoping is enforced by the
+        // pending ApprovalInstance query below, so only filter by the assigned approver here.
         approvers: {
           $elemMatch: {
-            userId: user._id as mongoose.Types.ObjectId,
+            userId:
+              effectiveUserObjectId ??
+              (user._id as mongoose.Types.ObjectId),
             isAdditionalApproval: true,
             decidedAt: null,
           },
@@ -1430,7 +1427,7 @@ export class ApprovalService {
               return (
                 approver.isAdditionalApproval === true &&
                 !approver.decidedAt &&
-                approverUserId === effectiveUserId
+                approverUserId.toLowerCase().trim() === effectiveUserIdNorm
               );
             })
             .map((approver: any) => ({
@@ -1479,8 +1476,9 @@ export class ApprovalService {
         "getPendingApprovalsForUser - Start",
       );
 
-      // Always use SKIP_SELF: self-approval is never allowed
+      // Self-approval is globally disabled.
       const selfApprovalPolicyForPending = "SKIP_SELF";
+      const allowSelfApprovalForPending = false;
 
       const pendingForUser: any[] = [];
       for (const instance of pendingInstances) {
@@ -1665,7 +1663,7 @@ export class ApprovalService {
             continue;
           }
 
-          // SKIP_SELF: Never show report to submitter when they are current approver - backend should have skipped
+          // Under SKIP_SELF, never show the report to the submitter when they are the current approver.
           if (instance.requestType === "EXPENSE_REPORT") {
             const reportForSubmitter = await ExpenseReport.findById(
               instance.requestId,
@@ -1685,6 +1683,7 @@ export class ApprovalService {
                 ?.toLowerCase?.()
                 ?.trim?.() ?? "";
             if (
+              !allowSelfApprovalForPending &&
               effectiveSubmitterId &&
               currentUserId.toLowerCase().trim() === effectiveSubmitterId
             ) {
@@ -2839,7 +2838,10 @@ export class ApprovalService {
       if (!resolved) throw new Error("User not found");
       const { user: resolvedUser, effectiveUserId } = resolved;
 
-      // Block self-approval when company policy is SKIP_SELF
+      // Self-approval is globally disabled.
+      const allowSelfApprovalForAction = false;
+
+      // Block self-approval only when company policy is SKIP_SELF
       if (
         action === "APPROVE" &&
         requestData &&
@@ -2856,19 +2858,17 @@ export class ApprovalService {
           .toLowerCase?.()
           .trim?.();
         if (
+          !allowSelfApprovalForAction &&
           reportSubmitterNorm &&
           currentApproverNorm &&
           currentApproverNorm === reportSubmitterNorm
         ) {
-          // Always block self-approval (SKIP_SELF)
-          if (true) {
-            const err: any = new Error(
-              "Self approval is not allowed by company policy",
-            );
-            err.statusCode = 403;
-            err.code = "SELF_APPROVAL_NOT_ALLOWED";
-            throw err;
-          }
+          const err: any = new Error(
+            "Self approval is not allowed by company policy",
+          );
+          err.statusCode = 403;
+          err.code = "SELF_APPROVAL_NOT_ALLOWED";
+          throw err;
         }
       }
 
@@ -3243,19 +3243,12 @@ export class ApprovalService {
           let nextLevelNum = instance.currentLevel + 1;
           let nextState: { levelNumber: number; status: ApprovalStatus };
 
-          // Skip self-approval (SKIP_SELF) when company policy allows and level is USER_BASED
+          // Skip self-approval (SKIP_SELF) when level resolves back to submitter.
           if (reportSubmitterId && instance.requestType === "EXPENSE_REPORT") {
             const submitterNorm =
               (await this.normalizeApprovalUserId(reportSubmitterId)) ??
               reportSubmitterId.toString().toLowerCase().trim();
-            const companySettingsForAction = await CompanySettings.findOne({
-              companyId: companyIdStr,
-            })
-              .select("selfApprovalPolicy")
-              .lean()
-              .exec();
-            const allowSelfApprovalForAction =
-              companySettingsForAction?.selfApprovalPolicy === "ALLOW_SELF";
+            const allowSelfApprovalForLevelAdvance = false;
 
             while (true) {
               const levelConfig = levelsToUse.find(
@@ -3286,7 +3279,7 @@ export class ApprovalService {
                   explicitIds,
                   levelApproverIds,
                   submitterNorm,
-                  allowSelfApprovalForAction,
+                  allowSelfApprovalForLevelAdvance,
                 )
               ) {
                 instance.history.push({
@@ -3382,17 +3375,7 @@ export class ApprovalService {
                 }
               }
 
-              const companySettingsForAdditional = companyIdForResolution
-                ? await CompanySettings.findOne({
-                    companyId: companyIdForResolution,
-                  })
-                    .select("selfApprovalPolicy")
-                    .lean()
-                    .exec()
-                : null;
-              const allowSelfApprovalForAdditional =
-                companySettingsForAdditional?.selfApprovalPolicy ===
-                "ALLOW_SELF";
+              const allowSelfApprovalForAdditional = false;
               const submitterNormForAdditional =
                 await this.normalizeApprovalUserId(freshReport?.userId);
 

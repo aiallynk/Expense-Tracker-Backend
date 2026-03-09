@@ -16,6 +16,12 @@ export class CompanySettingsService {
       // Create default settings if none exist
       return await CompanySettings.create({ companyId });
     }
+
+    // Enforce SKIP_SELF as the only supported behavior.
+    if (settings.selfApprovalPolicy !== 'SKIP_SELF') {
+      settings.selfApprovalPolicy = 'SKIP_SELF' as any;
+      await settings.save();
+    }
     
     return settings;
   }
@@ -52,8 +58,8 @@ export class CompanySettingsService {
   /**
    * Validate selfApprovalPolicy value
    */
-  static validateSelfApprovalPolicy(policy: string): policy is 'SKIP_SELF' | 'ALLOW_SELF' {
-    return policy === 'SKIP_SELF' || policy === 'ALLOW_SELF';
+  static validateSelfApprovalPolicy(policy: string): policy is 'SKIP_SELF' {
+    return policy === 'SKIP_SELF';
   }
 
   /**
@@ -72,8 +78,13 @@ export class CompanySettingsService {
       }
     }
 
+    // Self-approval policy is fixed: normalize any incoming value to SKIP_SELF.
+    if (updates.selfApprovalPolicy !== undefined) {
+      updates.selfApprovalPolicy = 'SKIP_SELF' as any;
+    }
+
     if (updates.selfApprovalPolicy !== undefined && !this.validateSelfApprovalPolicy(updates.selfApprovalPolicy)) {
-      throw new Error('selfApprovalPolicy must be SKIP_SELF or ALLOW_SELF');
+      throw new Error('selfApprovalPolicy must be SKIP_SELF');
     }
 
     let settings = await CompanySettings.findOne({ companyId });
@@ -86,6 +97,10 @@ export class CompanySettingsService {
         updatedBy: userId as any,
       });
     } else {
+      if (settings.selfApprovalPolicy !== 'SKIP_SELF') {
+        settings.selfApprovalPolicy = 'SKIP_SELF' as any;
+      }
+
       // Merge updates with existing settings
       if (settings) {
         Object.keys(updates).forEach((key) => {
@@ -121,13 +136,17 @@ export class CompanySettingsService {
    */
   static async updateSelfApprovalPolicy(
     companyId: string,
-    selfApprovalPolicy: 'SKIP_SELF' | 'ALLOW_SELF',
+    selfApprovalPolicy: string,
     userId: string
   ): Promise<ICompanySettings> {
-    if (!this.validateSelfApprovalPolicy(selfApprovalPolicy)) {
-      throw new Error('selfApprovalPolicy must be SKIP_SELF or ALLOW_SELF');
+    // Backward compatible: ignore requested value and always persist SKIP_SELF.
+    if (selfApprovalPolicy !== 'SKIP_SELF') {
+      logger.warn(
+        { companyId, requestedPolicy: selfApprovalPolicy },
+        'Ignoring unsupported selfApprovalPolicy; enforcing SKIP_SELF'
+      );
     }
-    return this.updateSettings(companyId, { selfApprovalPolicy }, userId);
+    return this.updateSettings(companyId, { selfApprovalPolicy: 'SKIP_SELF' as any }, userId);
   }
 
   /**
