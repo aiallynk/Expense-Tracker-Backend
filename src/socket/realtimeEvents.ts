@@ -13,6 +13,8 @@ export enum SuperAdminEvent {
   AI_USAGE_UPDATE = 'super-admin:ai-usage-update',
   LOG_ENTRY = 'super-admin:log-entry',
   SETTINGS_UPDATED = 'super-admin:settings-updated',
+  COMPANY_LIMITS_UPDATED = 'super-admin:company-limits-updated',
+  COMPANY_LIMIT_WARNING = 'super-admin:company-limit-warning',
   BACKUP_CREATED = 'super-admin:backup-created',
   BACKUP_RESTORED = 'super-admin:backup-restored',
 }
@@ -76,6 +78,48 @@ export const emitSettingsUpdated = (settings: any) => {
   logger.debug('Emitted settings updated');
 };
 
+export interface CompanyLimitsSocketPayload {
+  companyId: string;
+  limitsEnabled: boolean;
+  maxExpenses: number;
+  maxReports: number;
+  expensesUsed: number;
+  reportsUsed: number;
+  expenseUsagePct: number;
+  reportUsagePct: number;
+  usagePct: number;
+  status: 'ok' | 'warning' | 'critical' | 'reached';
+  lastUpdated?: Date;
+}
+
+export interface CompanyLimitWarningSocketPayload {
+  companyId: string;
+  metric: 'expenses' | 'reports';
+  threshold: number;
+  usagePct: number;
+  expenseUsagePct: number;
+  reportUsagePct: number;
+  expensesUsed: number;
+  reportsUsed: number;
+  maxExpenses: number;
+  maxReports: number;
+}
+
+export const emitCompanyLimitsUpdated = (payload: CompanyLimitsSocketPayload) => {
+  emitToSuperAdmin(SuperAdminEvent.COMPANY_LIMITS_UPDATED, payload);
+  emitToCompanyAdmin(payload.companyId, CompanyAdminEvent.COMPANY_LIMITS_UPDATED, payload);
+  logger.debug({ companyId: payload.companyId }, 'Emitted company limits updated');
+};
+
+export const emitCompanyLimitWarning = (payload: CompanyLimitWarningSocketPayload) => {
+  emitToSuperAdmin(SuperAdminEvent.COMPANY_LIMIT_WARNING, payload);
+  emitToCompanyAdmin(payload.companyId, CompanyAdminEvent.COMPANY_LIMIT_WARNING, payload);
+  logger.debug(
+    { companyId: payload.companyId, metric: payload.metric, threshold: payload.threshold },
+    'Emitted company limit warning'
+  );
+};
+
 // Emit backup events
 export const emitBackupCreated = (backup: any) => {
   emitToSuperAdmin(SuperAdminEvent.BACKUP_CREATED, backup);
@@ -137,6 +181,8 @@ export enum CompanyAdminEvent {
   NOTIFICATION_CREATED = 'company-admin:notification-created',
   NOTIFICATION_UPDATED = 'company-admin:notification-updated',
   NOTIFICATIONS_MARKED_READ = 'company-admin:notifications-marked-read',
+  COMPANY_LIMITS_UPDATED = 'company-admin:company-limits-updated',
+  COMPANY_LIMIT_WARNING = 'company-admin:company-limit-warning',
 }
 
 // Real-time event types for manager
@@ -451,4 +497,3 @@ export const emitNotificationToAll = (notification: any) => {
     logger.error({ error }, 'Error emitting notification to all');
   }
 };
-

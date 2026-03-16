@@ -1,5 +1,6 @@
 import { logger } from '@/config/logger';
 import { AdminController } from '../controllers/admin.controller';
+import { AnalyticsRollupService } from './analyticsRollup.service';
 
 interface ScheduledJob {
   name: string;
@@ -113,6 +114,20 @@ export class SchedulerService {
           logger.error({ error, job: 'cache-cleanup' }, 'Cache cleanup failed');
         }
       }
+    });
+
+    // Analytics rollup - every 5 minutes
+    this.addJob({
+      name: 'analytics-rollup',
+      interval: 5 * 60 * 1000,
+      enabled: true,
+      run: async () => {
+        try {
+          await AnalyticsRollupService.rollupLatestBucket();
+        } catch (error) {
+          logger.error({ error, job: 'analytics-rollup' }, 'Analytics rollup failed');
+        }
+      },
     });
   }
 

@@ -19,6 +19,7 @@ import { OcrService } from './ocr.service';
 import { ReportsService } from './reports.service';
 import { ReceiptHashService } from './receiptHash.service';
 import { ReceiptDuplicateDetectionService } from './receiptDuplicateDetection.service';
+import { CompanyLimitsService } from './companyLimits.service';
 
 import { logger } from '@/config/logger';
 
@@ -195,6 +196,10 @@ export class BatchUploadService {
         continue;
       }
 
+      if (companyId) {
+        await CompanyLimitsService.ensureExpenseCreationAllowed(companyId.toString());
+      }
+
       const expense = new Expense({
         reportId: new mongoose.Types.ObjectId(reportId),
         userId: report.userId,
@@ -209,6 +214,19 @@ export class BatchUploadService {
         receiptPrimaryId: receipt._id as mongoose.Types.ObjectId,
       });
       const savedExpense = await expense.save();
+      if (companyId) {
+        try {
+          await CompanyLimitsService.consumeExpenseQuota(companyId.toString());
+        } catch (quotaError) {
+          await Expense.findByIdAndDelete(savedExpense._id).exec();
+          try {
+            await ReportsService.recalcTotals(reportId);
+          } catch (_) {
+            // Best effort rollback of totals.
+          }
+          throw quotaError;
+        }
+      }
 
       receipt.expenseId = savedExpense._id as mongoose.Types.ObjectId;
       receipt.uploadConfirmed = true;

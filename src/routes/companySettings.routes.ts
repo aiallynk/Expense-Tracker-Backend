@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { ApprovalRulesController } from '../controllers/approvalRules.controller';
 import { ApproverMappingController } from '../controllers/approverMapping.controller';
 import { BrandingController } from '../controllers/branding.controller';
+import { CompanyLimitsController } from '../controllers/companyLimits.controller';
 import { CompanyNotificationsController } from '../controllers/companyNotifications.controller';
 import { CompanySettingsController } from '../controllers/companySettings.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
@@ -20,6 +21,9 @@ router.use(authMiddleware);
 router.use(requireCompanyAdmin);
 
 // Company Settings routes
+// GET /api/v1/company-admin/usage/limits - Get company usage limits summary
+router.get('/usage/limits', CompanyLimitsController.getCompanyAdminUsageLimits);
+
 // GET /api/v1/company-admin/settings - Get company settings
 router.get('/settings', CompanySettingsController.getSettings);
 

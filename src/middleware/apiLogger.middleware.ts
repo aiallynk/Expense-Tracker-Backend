@@ -1,6 +1,8 @@
 import { Request, Response, NextFunction } from 'express';
 
 import { ApiRequestLog } from '../models/ApiRequestLog';
+import { CompanyAdmin } from '../models/CompanyAdmin';
+import { User } from '../models/User';
 import { emitLogEntry } from '../socket/realtimeEvents';
 
 import { logger } from '@/config/logger';
@@ -26,12 +28,25 @@ export const apiLoggerMiddleware = async (
     setImmediate(async () => {
       try {
         const authReq = req as AuthRequest;
+        let companyId = authReq.user?.companyId;
+
+        if (!companyId && authReq.user?.id) {
+          if (authReq.user.role === 'COMPANY_ADMIN') {
+            const companyAdmin = await CompanyAdmin.findById(authReq.user.id).select('companyId').lean();
+            companyId = companyAdmin?.companyId ? companyAdmin.companyId.toString() : undefined;
+          } else if (authReq.user.role !== 'SUPER_ADMIN' && authReq.user.role !== 'SERVICE_ACCOUNT') {
+            const user = await User.findById(authReq.user.id).select('companyId').lean();
+            companyId = user?.companyId ? user.companyId.toString() : undefined;
+          }
+        }
+
         const logEntry = await ApiRequestLog.create({
           method: req.method,
           path: req.path,
           statusCode: res.statusCode,
           responseTime,
           userId: authReq.user?.id ? (authReq.user.id as any) : undefined,
+          companyId: companyId ? (companyId as any) : undefined,
           ipAddress: req.ip || req.socket.remoteAddress,
           userAgent: req.get('user-agent'),
         });
@@ -130,4 +145,3 @@ export const apiLoggerMiddleware = async (
 
   next();
 };
-

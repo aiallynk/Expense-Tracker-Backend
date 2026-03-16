@@ -18,6 +18,7 @@
     "ensure:super-admins": "tsx scripts/ensure-super-admins.ts",
     "check-db-roles": "tsx scripts/check-db-roles.ts",
     "migrate:db": "tsx scripts/migrate-add-fields.ts",
+    "migrate:company-limits": "tsx scripts/migrate-company-limits-analytics.ts",
     "seed:sample-data": "tsx scripts/seed-sample-data.ts",
     "worker": "tsx src/worker/ocr.worker.ts",
     "worker:prod": "node dist/worker/ocr.worker.js",

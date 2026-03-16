@@ -1,5 +1,7 @@
 import { Router } from 'express';
 
+import { CompanyLimitsController } from '../controllers/companyLimits.controller';
+import { SuperAdminAnalyticsController } from '../controllers/superAdminAnalytics.controller';
 import { SuperAdminController } from '../controllers/superAdmin.controller';
 import { authMiddleware } from '../middleware/auth.middleware';
 import { requireRole } from '../middleware/role.middleware';
@@ -22,6 +24,10 @@ router.use(authMiddleware);
 router.get('/dashboard/stats', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getDashboardStats);
 router.get('/system-analytics', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getSystemAnalytics);
 router.get('/system-analytics/detailed', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getSystemAnalyticsDetailed);
+router.get('/analytics/system', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminAnalyticsController.getSystemAnalytics);
+router.get('/analytics/api', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminAnalyticsController.getApiAnalytics);
+router.get('/analytics/errors', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminAnalyticsController.getErrorAnalytics);
+router.get('/analytics/company', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminAnalyticsController.getCompanyAnalytics);
 
 // AI Usage Analytics (read-only)
 router.get('/ai-usage/snapshot', requireServiceAccountReadOnly, validateServiceAccountEndpoint, SuperAdminController.getAiUsageSnapshot);
@@ -46,6 +52,12 @@ router.get('/companies/:id/mini-stats', SuperAdminController.getCompanyMiniStats
 router.put('/companies/:id', validate(updateCompanySchema), SuperAdminController.updateCompany);
 router.delete('/companies/:id', SuperAdminController.deleteCompany);
 
+// Company Limits
+router.get('/company-limits', CompanyLimitsController.listCompanyLimits);
+router.get('/company-limits/:companyId', CompanyLimitsController.getCompanyLimitsByCompanyId);
+router.patch('/company-limits/:companyId', CompanyLimitsController.patchCompanyLimits);
+router.post('/company-limits/:companyId/increase', CompanyLimitsController.increaseCompanyLimits);
+
 // Note: Company Admin routes have been moved to /api/v1/companies/:companyId/admins
 // See companyAdmin.routes.ts for company admin CRUD operations
 
@@ -56,6 +68,10 @@ router.get('/logs', SuperAdminController.getLogs);
 router.post('/backup/full', SuperAdminController.createFullBackup);
 router.post('/backup/company/:companyId', SuperAdminController.createCompanyBackup);
 router.get('/backups', SuperAdminController.getBackups);
+router.get('/backups/:id/restore/preview', SuperAdminController.previewBackupRestore);
+router.post('/backups/:id/restore/validate', SuperAdminController.validateBackupRestore);
+router.post('/backups/:id/restore/stage', SuperAdminController.stageBackupRestore);
+router.post('/backups/:id/restore/commit', SuperAdminController.commitBackupRestore);
 router.post('/backups/:id/restore', SuperAdminController.restoreBackup);
 router.get('/backups/:id/download', SuperAdminController.downloadBackup);
 router.delete('/backup/:id', SuperAdminController.deleteBackup);
@@ -66,4 +82,3 @@ router.patch('/settings', SuperAdminController.updateGlobalSettings);
 router.post('/settings/reset', SuperAdminController.resetGlobalSettings);
 
 export default router;
-

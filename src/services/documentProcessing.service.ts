@@ -15,6 +15,7 @@ import { User } from '../models/User';
 import { ExpenseStatus } from '../utils/enums';
 
 import { ReportsService } from './reports.service';
+import { CompanyLimitsService } from './companyLimits.service';
 import {
   buildFullReceiptText,
   inferCategoryFromReceiptText,
@@ -305,7 +306,8 @@ export class DocumentProcessingService {
               userId,
               documentReceiptId, // Pass document receipt ID for linking
               'pdf', // Source document type
-              i + 1 // Sequence number (1-indexed)
+              i + 1, // Sequence number (1-indexed)
+              companyId
             );
             result.expensesCreated.push(expenseId);
             // Flag-only duplicate check: updates expense.duplicateFlag/duplicateReason; never blocks
@@ -916,7 +918,8 @@ Rules:
               userId,
               documentReceiptId, // Link Excel document to expenses
               'excel', // Source document type
-              i + 1 // Row number (1-indexed, excluding header)
+              i + 1, // Row number (1-indexed, excluding header)
+              companyId
             );
             result.expensesCreated.push(expenseId);
             let duplicateFlag: string | null = null;
@@ -1245,7 +1248,8 @@ Rules:
               userId,
               documentReceiptId,
               'image',
-              1
+              1,
+              companyId
             );
             result.expensesCreated.push(expenseId);
             result.results?.push({ index: 0, status: 'created', expenseId });
@@ -1273,7 +1277,8 @@ Rules:
                 userId,
                 documentReceiptId, // Link image document to expenses
                 'image', // Source document type
-                i + 1 // Sequence number (1-indexed)
+                i + 1, // Sequence number (1-indexed)
+                companyId
               );
               result.expensesCreated.push(expenseId);
               let duplicateFlag: string | null = null;
@@ -1337,10 +1342,12 @@ Rules:
     userId: string,
     documentReceiptId?: string,
     sourceDocumentType?: 'pdf' | 'excel' | 'image',
-    sourceDocumentSequence?: number
+    sourceDocumentSequence?: number,
+    companyIdForLimit?: mongoose.Types.ObjectId
   ): Promise<string> {
     const report = await ExpenseReport.findById(reportId).select('fromDate toDate').exec();
     if (!report) throw new Error('Report not found');
+    const companyId = companyIdForLimit?.toString();
 
     const confidence = typeof receipt.confidence === 'number' ? receipt.confidence : 0;
     const threshold = (config.ocr as any).confidenceThreshold ?? 0.75;
@@ -1475,7 +1482,19 @@ Rules:
       ocrConfidence: needsReview ? confidence : undefined,
     });
 
+    if (companyId) {
+      await CompanyLimitsService.ensureExpenseCreationAllowed(companyId);
+    }
+
     const saved = await expense.save();
+    if (companyId) {
+      try {
+        await CompanyLimitsService.consumeExpenseQuota(companyId);
+      } catch (quotaError) {
+        await Expense.findByIdAndDelete(saved._id).exec();
+        throw quotaError;
+      }
+    }
 
     // Recalculate report totals
     await ReportsService.recalcTotals(reportId);

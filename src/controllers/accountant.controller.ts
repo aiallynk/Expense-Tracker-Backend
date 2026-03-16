@@ -3,10 +3,19 @@ import { Response } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { AccountantService } from '../services/accountant.service';
+import { CompanyLimitsService } from '../services/companyLimits.service';
 import { ExportService } from '../services/export.service';
 import { reportFiltersSchema, bulkCsvExportFiltersSchema } from '../utils/dtoTypes';
 
 export class AccountantController {
+  private static async resolveCompanyId(req: AuthRequest): Promise<string | null> {
+    return CompanyLimitsService.resolveCompanyIdForActor({
+      userId: req.user!.id,
+      role: req.user!.role,
+      companyIdFromToken: req.user!.companyId,
+    });
+  }
+
   /**
    * Get dashboard statistics
    * GET /api/v1/accountant/dashboard
@@ -157,12 +166,20 @@ export class AccountantController {
 
     const companyId = accountant.companyId.toString();
 
+    const resolvedCompanyId = await AccountantController.resolveCompanyId(req);
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.ensureReportGenerationAllowed(resolvedCompanyId);
+    }
+
     const excelBuffer = await ExportService.generateBulkExcel({
       ...filters,
       companyId,
       fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
       toDate: filters.toDate ? new Date(filters.toDate) : undefined,
     });
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.consumeReportQuota(resolvedCompanyId);
+    }
 
     // Generate filename
     const timestamp = new Date().toISOString().split('T')[0];
@@ -195,12 +212,20 @@ export class AccountantController {
 
     const companyId = accountant.companyId.toString();
 
+    const resolvedCompanyId = await AccountantController.resolveCompanyId(req);
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.ensureReportGenerationAllowed(resolvedCompanyId);
+    }
+
     const excelBuffer = await ExportService.generateBulkExcel({
       ...filters,
       companyId,
       fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
       toDate: filters.toDate ? new Date(filters.toDate) : undefined,
     });
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.consumeReportQuota(resolvedCompanyId);
+    }
 
     // Generate filename
     const timestamp = new Date().toISOString().split('T')[0];
@@ -211,4 +236,3 @@ export class AccountantController {
     res.status(200).send(excelBuffer);
   });
 }
-

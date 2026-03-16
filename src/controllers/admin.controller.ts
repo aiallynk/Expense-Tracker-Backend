@@ -5,6 +5,7 @@ import { asyncHandler } from '../middleware/error.middleware';
 import { ExpensesService } from '../services/expenses.service';
 import { ExportService } from '../services/export.service';
 import { ReportsService } from '../services/reports.service';
+import { CompanyLimitsService } from '../services/companyLimits.service';
 import { getDashboardPayload, enqueueAnalyticsEvent, rebuildSnapshotsForCompany } from '../services/companyAnalyticsSnapshot.service';
 import {
   reportFiltersSchema,
@@ -33,6 +34,15 @@ const emitSuperAdminEvent = (event: string, data: any) => {
 };
 
 export class AdminController {
+  private static async resolveCompanyId(req: AuthRequest, explicitCompanyId?: string): Promise<string | null> {
+    return CompanyLimitsService.resolveCompanyIdForActor({
+      userId: req.user!.id,
+      role: req.user!.role,
+      explicitCompanyId,
+      companyIdFromToken: req.user!.companyId,
+    });
+  }
+
   // Reports
   static getAllReports = asyncHandler(async (req: AuthRequest, res: Response) => {
     const filters = reportFiltersSchema.parse(req.query);
@@ -78,8 +88,15 @@ export class AdminController {
     const query = exportQuerySchema.parse(req.query);
     const format = (query.format || ExportFormat.XLSX) as ExportFormat;
     const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const companyId = await AdminController.resolveCompanyId(req);
+    if (companyId) {
+      await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+    }
 
     const result = await ExportService.generateExport(reportId, format);
+    if (companyId) {
+      await CompanyLimitsService.consumeReportQuota(companyId);
+    }
 
     res.status(200).json({
       success: true,
@@ -97,6 +114,10 @@ export class AdminController {
    */
   static exportReportsList = asyncHandler(async (req: AuthRequest, res: Response) => {
     const filters = reportsListExportSchema.parse(req.query);
+    const companyId = await AdminController.resolveCompanyId(req);
+    if (companyId) {
+      await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+    }
     const { buffer, format, fileName } = await ExportService.generateReportsListExport(
       {
         projectId: filters.projectId,
@@ -107,6 +128,9 @@ export class AdminController {
       },
       req
     );
+    if (companyId) {
+      await CompanyLimitsService.consumeReportQuota(companyId);
+    }
 
     const contentType = format === 'pdf' ? 'application/pdf' : 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
     res.setHeader('Content-Type', contentType);
@@ -139,12 +163,20 @@ export class AdminController {
       }
     }
 
+    const resolvedCompanyId = await AdminController.resolveCompanyId(req, companyId);
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.ensureReportGenerationAllowed(resolvedCompanyId);
+    }
+
     const excelBuffer = await ExportService.generateBulkExcel({
       ...filters,
       companyId,
       fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
       toDate: filters.toDate ? new Date(filters.toDate) : undefined,
     });
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.consumeReportQuota(resolvedCompanyId);
+    }
 
     // Generate filename
     const timestamp = new Date().toISOString().split('T')[0];
@@ -180,12 +212,20 @@ export class AdminController {
       }
     }
 
+    const resolvedCompanyId = await AdminController.resolveCompanyId(req, companyId);
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.ensureReportGenerationAllowed(resolvedCompanyId);
+    }
+
     const excelBuffer = await ExportService.generateBulkExcel({
       ...filters,
       companyId,
       fromDate: filters.fromDate ? new Date(filters.fromDate) : undefined,
       toDate: filters.toDate ? new Date(filters.toDate) : undefined,
     });
+    if (resolvedCompanyId) {
+      await CompanyLimitsService.consumeReportQuota(resolvedCompanyId);
+    }
 
     // Generate filename
     const timestamp = new Date().toISOString().split('T')[0];

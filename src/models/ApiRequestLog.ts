@@ -6,6 +6,7 @@ export interface IApiRequestLog extends Document {
   statusCode: number;
   responseTime: number; // in milliseconds
   userId?: mongoose.Types.ObjectId;
+  companyId?: mongoose.Types.ObjectId;
   ipAddress?: string;
   userAgent?: string;
   createdAt: Date;
@@ -37,6 +38,10 @@ const apiRequestLogSchema = new Schema<IApiRequestLog>(
       ref: 'User',
       // No explicit index needed (not used in compound indexes)
     },
+    companyId: {
+      type: Schema.Types.ObjectId,
+      ref: 'Company',
+    },
     ipAddress: {
       type: String,
     },
@@ -54,6 +59,7 @@ apiRequestLogSchema.index({ createdAt: -1 });
 apiRequestLogSchema.index({ path: 1, createdAt: -1 });
 apiRequestLogSchema.index({ statusCode: 1, createdAt: -1 });
 apiRequestLogSchema.index({ method: 1, path: 1 });
+apiRequestLogSchema.index({ companyId: 1, createdAt: -1 });
 
 // TTL index to auto-delete logs older than 30 days
 apiRequestLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });

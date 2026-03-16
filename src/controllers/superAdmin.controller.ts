@@ -11,9 +11,16 @@ import { Expense } from '../models/Expense';
 import { ExpenseReport } from '../models/ExpenseReport';
 import { OcrJob } from '../models/OcrJob';
 import { Receipt } from '../models/Receipt';
+import { Role, RoleType } from '../models/Role';
 import { User } from '../models/User';
 import { AuditService } from '../services/audit.service';
-import { emitSystemAnalyticsUpdate, emitDashboardStatsUpdate, emitCompanyCreated } from '../socket/realtimeEvents';
+import {
+  emitSystemAnalyticsUpdate,
+  emitDashboardStatsUpdate,
+  emitCompanyCreated,
+  emitCompanyUpdated,
+  emitCompanyDeleted,
+} from '../socket/realtimeEvents';
 import { SystemAnalyticsService } from '../services/systemAnalytics.service';
 import {
   getSummary,
@@ -35,6 +42,9 @@ import { logger } from '@/config/logger';
 export class SuperAdminController {
   // Dashboard Stats
   static getDashboardStats = asyncHandler(async (_req: AuthRequest, res: Response) => {
+    const oneMonthAgo = new Date();
+    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+
     // Get all real-time stats from database
     const [
       totalUsers,
@@ -42,10 +52,15 @@ export class SuperAdminController {
       totalReports,
       totalExpenses,
       totalReceipts,
+      totalOcrJobs,
       completedOcrJobs,
       approvedReports,
       approvedExpenses,
       totalAmountApproved,
+      totalCompanies,
+      activeCompanies,
+      activeCompaniesForRevenue,
+      activeCompaniesBeforeLastMonth,
     ] = await Promise.all([
       User.countDocuments(),
       User.countDocuments({ status: UserStatus.ACTIVE }),
@@ -60,15 +75,26 @@ export class SuperAdminController {
         { $match: { status: ExpenseReportStatus.APPROVED } },
         { $group: { _id: null, total: { $sum: '$totalAmount' } } },
       ]) as Promise<Array<{ _id: null; total: number }>>,
+      Company.countDocuments(),
+      Company.countDocuments({
+        status: CompanyStatus.ACTIVE,
+      }),
+      Company.find({
+        status: CompanyStatus.ACTIVE,
+      })
+        .select('plan')
+        .lean(),
+      Company.find({
+        status: CompanyStatus.ACTIVE,
+        createdAt: { $lte: oneMonthAgo },
+      })
+        .select('plan')
+        .lean(),
     ]);
 
     // Calculate storage used (estimate based on receipts)
     // Assuming average receipt size of 500KB
     const estimatedStorageGB = (totalReceipts * 500) / (1024 * 1024); // Convert to GB
-
-    // Get stats from last month for trends
-    const oneMonthAgo = new Date();
-    oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
 
     const [
       usersLastMonth,
@@ -82,42 +108,70 @@ export class SuperAdminController {
     const userTrend = totalUsers > 0 ? ((usersLastMonth / totalUsers) * 100).toFixed(1) : '0';
     const reportTrend = totalReports > 0 ? ((reportsLastMonth / totalReports) * 100).toFixed(1) : '0';
 
-    // Count companies from Company collection
-    const totalCompanies = await Company.countDocuments();
-    const activeCompanies = await Company.countDocuments({ 
-      status: CompanyStatus.ACTIVE 
-    });
+    const planMonthlyPrice: Record<string, number> = {
+      [CompanyPlan.FREE]: 0,
+      [CompanyPlan.ENTERPRISE]: 45000,
+      [CompanyPlan.PROFESSIONAL]: 25000,
+      [CompanyPlan.BASIC]: 10000,
+    };
 
-    // Get most common currency for MRR/ARR
-    const currencyCounts = await ExpenseReport.aggregate([
-      { $match: { status: ExpenseReportStatus.APPROVED } },
-      { $group: { _id: '$currency', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-      { $limit: 1 },
-    ]);
-    const defaultCurrency = currencyCounts.length > 0 ? currencyCounts[0]._id : 'INR';
+    const getPlanMonthlyPrice = (planValue?: string): number => {
+      const normalizedPlan = String(planValue || '').trim().toLowerCase();
+      if (!normalizedPlan) return 0;
+
+      if (planMonthlyPrice[normalizedPlan] !== undefined) {
+        return planMonthlyPrice[normalizedPlan];
+      }
+
+      if (normalizedPlan.includes('enterprise')) {
+        return planMonthlyPrice[CompanyPlan.ENTERPRISE];
+      }
+      if (normalizedPlan.includes('professional') || normalizedPlan === 'pro') {
+        return planMonthlyPrice[CompanyPlan.PROFESSIONAL];
+      }
+      if (normalizedPlan.includes('basic') || normalizedPlan.includes('starter')) {
+        return planMonthlyPrice[CompanyPlan.BASIC];
+      }
+
+      return 0;
+    };
+
+    const calcPlanMrr = (rows: Array<{ plan?: string }>) => {
+      return rows.reduce((sum, row) => sum + getPlanMonthlyPrice(row.plan), 0);
+    };
+
+    const mrr = calcPlanMrr(activeCompaniesForRevenue as Array<{ plan?: string }>);
+    const previousMrr = calcPlanMrr(activeCompaniesBeforeLastMonth as Array<{ plan?: string }>);
+    const arr = mrr * 12;
+    const mrrTrend =
+      previousMrr > 0
+        ? ((mrr - previousMrr) / previousMrr) * 100
+        : mrr > 0
+          ? 100
+          : 0;
 
     const dashboardStats = {
       totalCompanies,
       activeCompanies,
-      mrr: 0, // Monthly recurring revenue - would need subscription model
-      arr: 0, // Annual recurring revenue - would need subscription model
+      mrr: Math.round(mrr * 100) / 100,
+      arr: Math.round(arr * 100) / 100,
       totalUsers,
       activeUsers,
       storageUsed: Math.round(estimatedStorageGB * 100) / 100, // Round to 2 decimals
       ocrUsage: completedOcrJobs,
+      totalOcrJobs,
       reportsCreated: totalReports,
       expensesCreated: totalExpenses,
       receiptsUploaded: totalReceipts,
-      mrrTrend: 0,
+      mrrTrend: Math.round(mrrTrend * 100) / 100,
       userTrend: parseFloat(userTrend),
       storageTrend: 0,
       reportTrend: parseFloat(reportTrend),
       totalAmountApproved: (Array.isArray(totalAmountApproved) && totalAmountApproved.length > 0) ? totalAmountApproved[0].total : 0,
       approvedReports,
       approvedExpenses,
-      mrrCurrency: defaultCurrency,
-      arrCurrency: defaultCurrency,
+      mrrCurrency: 'INR',
+      arrCurrency: 'INR',
     };
 
     // Emit real-time update for dashboard stats
@@ -439,147 +493,297 @@ export class SuperAdminController {
 
   // Get Companies
   static getCompanies = asyncHandler(async (req: AuthRequest, res: Response) => {
-    const limit = parseInt(req.query.limit as string) || 100;
-    const sortBy = req.query.sortBy as string || 'newest';
+    const page = Math.max(parseInt((req.query.page as string) || '1', 10) || 1, 1);
+    const limit = parseInt((req.query.limit as string) || '0', 10) || 0;
+    const requestedPageSize = parseInt((req.query.pageSize as string) || '0', 10) || 0;
+    const pageSize = Math.min(Math.max(requestedPageSize || limit || 25, 1), 100);
+    const sortBy = (req.query.sortBy as string) || 'newest';
     const statusFilter = req.query.status as string;
-    const searchQuery = req.query.search as string;
+    const searchQuery = (req.query.search as string) || '';
 
-    // Build query
-    const query: any = {};
-    
-    if (statusFilter && statusFilter !== 'all') {
-      query.status = statusFilter;
-    }
+    const cacheKey = `super-admin:companies:v2:${JSON.stringify({
+      page,
+      pageSize,
+      sortBy,
+      statusFilter: statusFilter || '',
+      searchQuery,
+    })}`;
 
-    if (searchQuery) {
-      query.$or = [
-        { name: { $regex: searchQuery, $options: 'i' } },
-        { location: { $regex: searchQuery, $options: 'i' } },
-        { domain: { $regex: searchQuery, $options: 'i' } },
-      ];
-    }
+    const responsePayload = await cacheService.getOrSet(
+      cacheKey,
+      async () => {
+        const query: any = {};
+        if (statusFilter && statusFilter !== 'all') {
+          query.status = statusFilter;
+        }
+        if (searchQuery.trim()) {
+          query.$or = [
+            { name: { $regex: searchQuery.trim(), $options: 'i' } },
+            { location: { $regex: searchQuery.trim(), $options: 'i' } },
+            { domain: { $regex: searchQuery.trim(), $options: 'i' } },
+          ];
+        }
 
-    let sort: any = { createdAt: -1 }; // Default: newest first
+        const sort: any = sortBy === 'oldest' ? { createdAt: 1 } : { createdAt: -1 };
+        const skip = (page - 1) * pageSize;
 
-    if (sortBy === 'oldest') {
-      sort = { createdAt: 1 };
-    } else if (sortBy === 'top-spenders') {
-      // For top spenders, we'll need to aggregate by total expenses
-      // For now, sort by newest
-      sort = { createdAt: -1 };
-    }
-
-    const companies = await Company.find(query)
-      .sort(sort)
-      .limit(limit)
-      .lean();
-
-    // Get stats for each company
-    const formattedCompanies = await Promise.all(
-      companies.map(async (company) => {
-        const companyId = company._id.toString();
-        
-        // Count users by role for this company (excluding company admins)
-        const [employees, managers, businessHeads, totalUsers, companyAdmins] = await Promise.all([
-          User.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId), role: UserRole.EMPLOYEE }),
-          User.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId), role: UserRole.MANAGER }),
-          User.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId), role: UserRole.BUSINESS_HEAD }),
-          User.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId) }),
-          CompanyAdmin.countDocuments({ companyId: new mongoose.Types.ObjectId(companyId) }),
+        const [companies, filteredTotal, statsCards] = await Promise.all([
+          Company.find(query).sort(sort).skip(skip).limit(pageSize).lean(),
+          Company.countDocuments(query),
+          Promise.all([
+            Company.countDocuments(),
+            Company.countDocuments({ status: CompanyStatus.ACTIVE }),
+            User.countDocuments(),
+            ExpenseReport.countDocuments(),
+          ]),
         ]);
 
-        // Get first company admin for display
-        const firstAdmin = await CompanyAdmin.findOne({
-          companyId: new mongoose.Types.ObjectId(companyId),
-        })
-          .select('email name')
-          .lean();
+        const companyIds = companies.map((company) => company._id as mongoose.Types.ObjectId);
+        if (companyIds.length === 0) {
+          const [totalCompanies, activeCompanies, totalUsers, totalReports] = statsCards;
+          return {
+            companies: [],
+            stats: {
+              totalCompanies,
+              activeCompanies,
+              totalUsers,
+              totalReports,
+            },
+            pagination: {
+              page,
+              pageSize,
+              total: filteredTotal,
+              totalPages: filteredTotal > 0 ? Math.ceil(filteredTotal / pageSize) : 0,
+              hasNext: false,
+              hasPrev: page > 1,
+            },
+          };
+        }
 
-        // Count reports for this company
-        const companyUsers = await User.find({ companyId: new mongoose.Types.ObjectId(companyId) })
-          .select('_id')
-          .lean();
-        const userIds = companyUsers.map(u => u._id);
-        const totalReports = await ExpenseReport.countDocuments({ userId: { $in: userIds } });
-
-        // Calculate storage (estimate based on receipts for this company)
-        const companyExpenses = await Expense.find({ userId: { $in: userIds } })
-          .select('_id')
-          .lean();
-        const expenseIds = companyExpenses.map(e => e._id);
-        const totalReceipts = await Receipt.countDocuments({ expenseId: { $in: expenseIds } });
-        const estimatedStorageGB = (totalReceipts * 500) / (1024 * 1024);
-
-        // Get monthly spend (from approved reports for this company) - group by currency
-        const monthlySpendResult = await ExpenseReport.aggregate([
-          { $match: { userId: { $in: userIds }, status: ExpenseReportStatus.APPROVED } },
-          { $group: { _id: '$currency', total: { $sum: '$totalAmount' } } },
+        const [companyAdmins, users] = await Promise.all([
+          CompanyAdmin.find({ companyId: { $in: companyIds } })
+            .select('companyId name email createdAt')
+            .sort({ createdAt: 1 })
+            .lean(),
+          User.find({ companyId: { $in: companyIds } })
+            .select('_id companyId role')
+            .lean(),
         ]);
-        // Get the most common currency or default to INR
-        const currencyCounts = await ExpenseReport.aggregate([
-          { $match: { userId: { $in: userIds }, status: ExpenseReportStatus.APPROVED } },
-          { $group: { _id: '$currency', count: { $sum: 1 } } },
-          { $sort: { count: -1 } },
-          { $limit: 1 },
-        ]);
-        const companyCurrency = currencyCounts.length > 0 ? currencyCounts[0]._id : 'INR';
-        const monthlySpend = monthlySpendResult.reduce((sum, item) => sum + item.total, 0);
+
+        const companyUserIds = new Map<string, mongoose.Types.ObjectId[]>();
+        const userStatsByCompany = new Map<
+          string,
+          { employees: number; managers: number; businessHeads: number; totalUsers: number }
+        >();
+        const userIdToCompanyId = new Map<string, string>();
+
+        users.forEach((user: any) => {
+          const companyId = user.companyId?.toString();
+          if (!companyId) return;
+          if (!companyUserIds.has(companyId)) companyUserIds.set(companyId, []);
+          companyUserIds.get(companyId)!.push(user._id);
+          userIdToCompanyId.set(user._id.toString(), companyId);
+
+          if (!userStatsByCompany.has(companyId)) {
+            userStatsByCompany.set(companyId, {
+              employees: 0,
+              managers: 0,
+              businessHeads: 0,
+              totalUsers: 0,
+            });
+          }
+
+          const stats = userStatsByCompany.get(companyId)!;
+          stats.totalUsers += 1;
+          if (user.role === UserRole.EMPLOYEE) stats.employees += 1;
+          if (user.role === UserRole.MANAGER) stats.managers += 1;
+          if (user.role === UserRole.BUSINESS_HEAD) stats.businessHeads += 1;
+        });
+
+        const adminMetaByCompany = new Map<
+          string,
+          { adminCount: number; adminName: string; adminEmail: string }
+        >();
+        companyAdmins.forEach((admin: any) => {
+          const companyId = admin.companyId?.toString();
+          if (!companyId) return;
+          if (!adminMetaByCompany.has(companyId)) {
+            adminMetaByCompany.set(companyId, {
+              adminCount: 0,
+              adminName: admin.name || 'No Admin',
+              adminEmail: admin.email || '',
+            });
+          }
+          const meta = adminMetaByCompany.get(companyId)!;
+          meta.adminCount += 1;
+        });
+
+        const allUserIds = users.map((user: any) => user._id);
+
+        let reportCountsByCompany = new Map<string, number>();
+        let approvedSpendByCompany = new Map<string, number>();
+        const approvedCurrencyCountsByCompany = new Map<string, Map<string, number>>();
+        let receiptCountsByCompany = new Map<string, number>();
+
+        if (allUserIds.length > 0) {
+          const [reportCounts, approvedSpendRows, receiptCounts] = await Promise.all([
+            ExpenseReport.aggregate([
+              { $match: { userId: { $in: allUserIds } } },
+              { $group: { _id: '$userId', count: { $sum: 1 } } },
+            ]),
+            ExpenseReport.aggregate([
+              { $match: { userId: { $in: allUserIds }, status: ExpenseReportStatus.APPROVED } },
+              {
+                $group: {
+                  _id: { userId: '$userId', currency: '$currency' },
+                  totalAmount: { $sum: '$totalAmount' },
+                  count: { $sum: 1 },
+                },
+              },
+            ]),
+            Receipt.aggregate([
+              {
+                $lookup: {
+                  from: 'expenses',
+                  localField: 'expenseId',
+                  foreignField: '_id',
+                  as: 'expense',
+                },
+              },
+              { $unwind: '$expense' },
+              { $match: { 'expense.userId': { $in: allUserIds } } },
+              { $group: { _id: '$expense.userId', count: { $sum: 1 } } },
+            ]),
+          ]);
+
+          reportCountsByCompany = new Map<string, number>();
+          reportCounts.forEach((row: any) => {
+            const companyId = userIdToCompanyId.get(row._id?.toString());
+            if (!companyId) return;
+            reportCountsByCompany.set(companyId, (reportCountsByCompany.get(companyId) || 0) + (row.count || 0));
+          });
+
+          approvedSpendByCompany = new Map<string, number>();
+          approvedSpendRows.forEach((row: any) => {
+            const userId = row._id?.userId?.toString?.();
+            const companyId = userId ? userIdToCompanyId.get(userId) : undefined;
+            if (!companyId) return;
+
+            const totalAmount = Number(row.totalAmount || 0);
+            approvedSpendByCompany.set(companyId, (approvedSpendByCompany.get(companyId) || 0) + totalAmount);
+
+            const currency = row._id?.currency || 'INR';
+            if (!approvedCurrencyCountsByCompany.has(companyId)) {
+              approvedCurrencyCountsByCompany.set(companyId, new Map<string, number>());
+            }
+            const currencyMap = approvedCurrencyCountsByCompany.get(companyId)!;
+            currencyMap.set(currency, (currencyMap.get(currency) || 0) + Number(row.count || 0));
+          });
+
+          receiptCountsByCompany = new Map<string, number>();
+          receiptCounts.forEach((row: any) => {
+            const companyId = userIdToCompanyId.get(row._id?.toString());
+            if (!companyId) return;
+            receiptCountsByCompany.set(companyId, (receiptCountsByCompany.get(companyId) || 0) + (row.count || 0));
+          });
+        }
+
+        const formattedCompanies = companies.map((company: any) => {
+          const companyId = company._id.toString();
+          const adminMeta = adminMetaByCompany.get(companyId) || {
+            adminCount: 0,
+            adminName: 'No Admin',
+            adminEmail: '',
+          };
+          const userStats = userStatsByCompany.get(companyId) || {
+            employees: 0,
+            managers: 0,
+            businessHeads: 0,
+            totalUsers: 0,
+          };
+
+          const totalReports = reportCountsByCompany.get(companyId) || 0;
+          const monthlySpend = Math.round((approvedSpendByCompany.get(companyId) || 0) * 100) / 100;
+          const receiptCount = receiptCountsByCompany.get(companyId) || 0;
+          const storageUsed = Math.round(((receiptCount * 500) / (1024 * 1024)) * 100) / 100;
+
+          const currencyMap = approvedCurrencyCountsByCompany.get(companyId);
+          let currency = 'INR';
+          if (currencyMap && currencyMap.size > 0) {
+            let maxCount = -1;
+            currencyMap.forEach((count, key) => {
+              if (count > maxCount) {
+                maxCount = count;
+                currency = key;
+              }
+            });
+          }
+
+          return {
+            id: companyId,
+            name: company.name,
+            location: company.location,
+            type: company.type,
+            domain: company.domain,
+            adminName: adminMeta.adminName,
+            adminEmail: adminMeta.adminEmail,
+            employees: userStats.employees,
+            managers: userStats.managers,
+            businessHeads: userStats.businessHeads,
+            totalUsers: userStats.totalUsers,
+            totalReports,
+            status: company.status,
+            plan: company.plan,
+            storageUsed,
+            createdAt: company.createdAt,
+            monthlySpend,
+            currency,
+            adminCount: adminMeta.adminCount,
+          };
+        });
+
+        if (sortBy === 'top-spenders') {
+          formattedCompanies.sort((a, b) => b.monthlySpend - a.monthlySpend);
+        }
+
+        const [totalCompanies, activeCompanies, totalUsers, totalReports] = statsCards;
+        const totalPages = filteredTotal > 0 ? Math.ceil(filteredTotal / pageSize) : 0;
 
         return {
-          id: company._id.toString(),
-          name: company.name,
-          location: company.location,
-          type: company.type,
-          domain: company.domain,
-          adminName: firstAdmin?.name || 'No Admin',
-          adminEmail: firstAdmin?.email || '',
-          employees,
-          managers,
-          businessHeads,
-          totalUsers,
-          totalReports,
-          status: company.status,
-          plan: company.plan,
-          storageUsed: Math.round(estimatedStorageGB * 100) / 100,
-          createdAt: company.createdAt,
-          monthlySpend,
-          currency: companyCurrency,
-          adminCount: companyAdmins,
+          companies: formattedCompanies,
+          stats: {
+            totalCompanies,
+            activeCompanies,
+            totalUsers,
+            totalReports,
+          },
+          pagination: {
+            page,
+            pageSize,
+            total: filteredTotal,
+            totalPages,
+            hasNext: page < totalPages,
+            hasPrev: page > 1,
+          },
         };
-      })
+      },
+      60 * 1000
     );
-
-    // Sort by monthly spend if needed
-    if (sortBy === 'top-spenders') {
-      formattedCompanies.sort((a, b) => b.monthlySpend - a.monthlySpend);
-    }
-
-    // Get totals for stats cards
-    const [totalCompanies, activeCompanies, totalUsers, totalReports] = await Promise.all([
-      Company.countDocuments(),
-      Company.countDocuments({ status: CompanyStatus.ACTIVE }),
-      User.countDocuments(),
-      ExpenseReport.countDocuments(),
-    ]);
 
     res.status(200).json({
       success: true,
       data: {
-        companies: formattedCompanies,
-        stats: {
-          totalCompanies,
-          activeCompanies,
-          totalUsers,
-          totalReports,
-        },
+        companies: responsePayload.companies,
+        stats: responsePayload.stats,
       },
+      pagination: responsePayload.pagination,
     });
   });
 
   // Get Company by ID
   static getCompanyById = asyncHandler(async (req: AuthRequest, res: Response) => {
     const companyId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
-    
+
     // Validate ObjectId format
     if (!mongoose.Types.ObjectId.isValid(companyId)) {
       res.status(400).json({
@@ -589,7 +793,7 @@ export class SuperAdminController {
       });
       return;
     }
-    
+
     const company = await Company.findById(companyId).lean();
 
     if (!company) {
@@ -603,173 +807,313 @@ export class SuperAdminController {
 
     const companyObjectId = new mongoose.Types.ObjectId(companyId);
 
-    // Get company admins
-    const companyAdmins = await CompanyAdmin.find({
-      companyId: companyObjectId,
-    })
-      .select('email name status createdAt lastLoginAt')
-      .sort({ createdAt: -1 })
-      .lean();
-
-    // Get company stats - filter by companyId
-    const companyUsers = await User.find({ companyId: companyObjectId })
-      .select('_id')
-      .lean();
-    const userIds = companyUsers.map(u => u._id);
-
-    // Get company expenses first
-    const companyExpenses = await Expense.find({ userId: { $in: userIds } })
-      .select('_id')
-      .lean();
-    const expenseIds = companyExpenses.map(e => e._id);
-
-    const [employees, managers, businessHeads, totalUsers, totalReports, companyReceipts, ocrUsage] = await Promise.all([
-      User.countDocuments({ companyId: companyObjectId, role: UserRole.EMPLOYEE }),
-      User.countDocuments({ companyId: companyObjectId, role: UserRole.MANAGER }),
-      User.countDocuments({ companyId: companyObjectId, role: UserRole.BUSINESS_HEAD }),
-      User.countDocuments({ companyId: companyObjectId }),
-      ExpenseReport.countDocuments({ userId: { $in: userIds } }),
-      Receipt.countDocuments({ expenseId: { $in: expenseIds } }),
-      OcrJob.countDocuments({ status: OcrJobStatus.COMPLETED }),
+    const [companyAdmins, users, companyCustomRoles] = await Promise.all([
+      CompanyAdmin.find({
+        companyId: companyObjectId,
+      })
+        .select('email name status createdAt lastLoginAt')
+        .sort({ createdAt: -1 })
+        .lean(),
+      User.find({ companyId: companyObjectId })
+        .select('_id email name role roles status lastLoginAt createdAt')
+        .sort({ createdAt: -1 })
+        .lean(),
+      Role.find({ companyId: companyObjectId, type: RoleType.CUSTOM })
+        .select('_id name isActive')
+        .lean(),
     ]);
 
-    // Calculate storage
-    const estimatedStorageGB = (companyReceipts * 500) / (1024 * 1024);
+    const userIds = users.map((u) => u._id);
+    const totalUsers = users.length;
+
+    const primaryRoleLabelMap: Record<string, string> = {
+      SUPER_ADMIN: 'Super Admin',
+      COMPANY_ADMIN: 'Company Admin',
+      ADMIN: 'Admin',
+      BUSINESS_HEAD: 'Business Head',
+      MANAGER: 'Manager',
+      EMPLOYEE: 'Employee',
+      ACCOUNTANT: 'Accountant',
+    };
+
+    const toRoleLabel = (roleKey: string): string => {
+      return (
+        primaryRoleLabelMap[roleKey] ||
+        roleKey
+          .toLowerCase()
+          .split('_')
+          .map((token) => token.charAt(0).toUpperCase() + token.slice(1))
+          .join(' ')
+      );
+    };
+
+    const primaryRoleCounts = users.reduce<Record<string, number>>((acc, user) => {
+      const key = user.role || UserRole.EMPLOYEE;
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    const activeUsers = users.filter((user) => user.status === UserStatus.ACTIVE).length;
+    const inactiveUsers = totalUsers - activeUsers;
+    const employees = primaryRoleCounts[UserRole.EMPLOYEE] || 0;
+    const managers = primaryRoleCounts[UserRole.MANAGER] || 0;
+    const businessHeads = primaryRoleCounts[UserRole.BUSINESS_HEAD] || 0;
+
+    const referencedRoleIds = Array.from(
+      new Set(
+        users
+          .flatMap((user) => (Array.isArray(user.roles) ? user.roles : []))
+          .filter((roleId: any) => !!roleId)
+          .map((roleId: any) => roleId.toString())
+      )
+    );
+
+    const referencedRoles = referencedRoleIds.length > 0
+      ? await Role.find({
+        _id: { $in: referencedRoleIds },
+        companyId: companyObjectId,
+      })
+        .select('_id name type isActive')
+        .lean()
+      : [];
+
+    const referencedRoleMap = new Map(
+      referencedRoles.map((role) => [
+        role._id.toString(),
+        {
+          name: role.name,
+          type: role.type,
+          isActive: !!role.isActive,
+        },
+      ])
+    );
+
+    const customRoleMap = new Map(
+      companyCustomRoles.map((role) => [
+        role._id.toString(),
+        {
+          name: role.name,
+          isActive: !!role.isActive,
+        },
+      ])
+    );
+
+    const customRoleUsage = new Map<string, number>();
+    let usersWithCustomRoles = 0;
+    let customRoleAssignments = 0;
+
+    const userRows = users.map((user) => {
+      const additionalRoleIds = (Array.isArray(user.roles) ? user.roles : [])
+        .filter((roleId: any) => !!roleId)
+        .map((roleId: any) => roleId.toString());
+      const additionalRoleNames = additionalRoleIds
+        .map((roleId) => referencedRoleMap.get(roleId)?.name)
+        .filter((name): name is string => !!name);
+      const userCustomRoleIds = additionalRoleIds.filter((roleId) => customRoleMap.has(roleId));
+
+      if (userCustomRoleIds.length > 0) {
+        usersWithCustomRoles += 1;
+      }
+
+      userCustomRoleIds.forEach((roleId) => {
+        customRoleUsage.set(roleId, (customRoleUsage.get(roleId) || 0) + 1);
+      });
+      customRoleAssignments += userCustomRoleIds.length;
+
+      return {
+        id: user._id.toString(),
+        name: user.name || 'Unknown',
+        email: user.email,
+        role: user.role.toLowerCase().replace('_', '-'),
+        primaryRole: user.role,
+        primaryRoleLabel: toRoleLabel(user.role),
+        customRoles: additionalRoleNames,
+        lastActive: user.lastLoginAt ? user.lastLoginAt.toISOString().split('T')[0] : 'Never',
+        status: user.status === UserStatus.ACTIVE ? 'active' : 'inactive',
+      };
+    });
+
+    // Keep payload size bounded for UI tables.
+    const formattedUsers = userRows.slice(0, 100);
+
+    const topCustomRoles = Array.from(customRoleMap.entries())
+      .map(([roleId, role]) => ({
+        id: roleId,
+        name: role.name,
+        isActive: role.isActive,
+        assignedUsers: customRoleUsage.get(roleId) || 0,
+      }))
+      .sort((a, b) => b.assignedUsers - a.assignedUsers || a.name.localeCompare(b.name));
+
+    const primaryRoleBreakdown = Object.entries(primaryRoleCounts)
+      .map(([key, count]) => ({
+        key,
+        name: toRoleLabel(key),
+        value: count,
+      }))
+      .sort((a, b) => b.value - a.value || a.name.localeCompare(b.name));
+
+    const companyExpenses = userIds.length > 0
+      ? await Expense.find({ userId: { $in: userIds } })
+        .select('_id')
+        .lean()
+      : [];
+    const expenseIds = companyExpenses.map((expense) => expense._id);
+
+    const companyReceiptIds = expenseIds.length > 0
+      ? await Receipt.find({ expenseId: { $in: expenseIds } }).distinct('_id')
+      : [];
+    const companyReceipts = companyReceiptIds.length;
+
+    const [totalReports, ocrUsage] = await Promise.all([
+      userIds.length > 0
+        ? ExpenseReport.countDocuments({ userId: { $in: userIds } })
+        : Promise.resolve(0),
+      companyReceiptIds.length > 0
+        ? OcrJob.countDocuments({
+          status: OcrJobStatus.COMPLETED,
+          receiptId: { $in: companyReceiptIds },
+        })
+        : Promise.resolve(0),
+    ]);
+
+    const estimatedStorageGB = (companyReceipts * 500) / (1024 * 1024); // 500KB per receipt
 
     // Get monthly spend trends (last 7 months)
     const sevenMonthsAgo = new Date();
     sevenMonthsAgo.setMonth(sevenMonthsAgo.getMonth() - 7);
 
-    const monthlySpend = await ExpenseReport.aggregate([
-      {
-        $match: {
-          status: ExpenseReportStatus.APPROVED,
-          approvedAt: { $gte: sevenMonthsAgo },
-          userId: { $in: userIds },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$approvedAt' },
-            month: { $month: '$approvedAt' },
-            currency: '$currency',
-          },
-          value: { $sum: '$totalAmount' },
-        },
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-    ]);
-    
     // Get most common currency for this company
-    const currencyCounts = await ExpenseReport.aggregate([
-      {
-        $match: {
-          userId: { $in: userIds },
-          status: ExpenseReportStatus.APPROVED,
+    const currencyCounts = userIds.length > 0
+      ? await ExpenseReport.aggregate([
+        {
+          $match: {
+            userId: { $in: userIds },
+            status: ExpenseReportStatus.APPROVED,
+          },
         },
-      },
-      { $group: { _id: '$currency', count: { $sum: 1 } } },
-      { $sort: { count: -1 } },
-      { $limit: 1 },
-    ]);
+        { $group: { _id: '$currency', count: { $sum: 1 } } },
+        { $sort: { count: -1 } },
+        { $limit: 1 },
+      ])
+      : [];
     const companyCurrency = currencyCounts.length > 0 ? currencyCounts[0]._id : 'INR';
 
-    const monthNames = ['Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan'];
-    const formattedMonthlySpend = monthlySpend.map((item, idx) => ({
-      name: monthNames[idx] || `${item._id.month}/${item._id.year}`,
-      value: item.value,
-    }));
-
-    // Report creation trend - for this company
-    const reportTrend = await ExpenseReport.aggregate([
-      {
-        $match: {
-          userId: { $in: userIds },
-          createdAt: { $gte: sevenMonthsAgo },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
+    const [monthlySpend, reportTrend, receiptTrend, ocrJobs, reportsByStatus] = await Promise.all([
+      userIds.length > 0
+        ? ExpenseReport.aggregate([
+          {
+            $match: {
+              status: ExpenseReportStatus.APPROVED,
+              approvedAt: { $gte: sevenMonthsAgo },
+              userId: { $in: userIds },
+              currency: companyCurrency,
+            },
           },
-          value: { $sum: 1 },
-        },
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-    ]);
-
-    const formattedReportTrend = reportTrend.map((item, idx) => ({
-      name: monthNames[idx] || `${item._id.month}/${item._id.year}`,
-      value: item.value,
-    }));
-
-    // Receipt upload trend - for this company
-    const receiptTrend = await Receipt.aggregate([
-      {
-        $match: {
-          expenseId: { $in: expenseIds },
-          createdAt: { $gte: sevenMonthsAgo },
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
+          {
+            $group: {
+              _id: {
+                year: { $year: '$approvedAt' },
+                month: { $month: '$approvedAt' },
+              },
+              value: { $sum: '$totalAmount' },
+            },
           },
-          value: { $sum: 1 },
-        },
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
-    ]);
-
-    const formattedReceiptTrend = receiptTrend.map((item, idx) => ({
-      name: monthNames[idx] || `${item._id.month}/${item._id.year}`,
-      value: item.value,
-    }));
-
-    // OCR jobs trend
-    const ocrJobs = await OcrJob.aggregate([
-      {
-        $match: {
-          createdAt: { $gte: sevenMonthsAgo },
-          status: OcrJobStatus.COMPLETED,
-        },
-      },
-      {
-        $group: {
-          _id: {
-            year: { $year: '$createdAt' },
-            month: { $month: '$createdAt' },
+          { $sort: { '_id.year': 1, '_id.month': 1 } },
+        ])
+        : Promise.resolve([]),
+      userIds.length > 0
+        ? ExpenseReport.aggregate([
+          {
+            $match: {
+              userId: { $in: userIds },
+              createdAt: { $gte: sevenMonthsAgo },
+            },
           },
-          value: { $sum: 1 },
-        },
-      },
-      { $sort: { '_id.year': 1, '_id.month': 1 } },
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+              },
+              value: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1 } },
+        ])
+        : Promise.resolve([]),
+      expenseIds.length > 0
+        ? Receipt.aggregate([
+          {
+            $match: {
+              expenseId: { $in: expenseIds },
+              createdAt: { $gte: sevenMonthsAgo },
+            },
+          },
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+              },
+              value: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1 } },
+        ])
+        : Promise.resolve([]),
+      companyReceiptIds.length > 0
+        ? OcrJob.aggregate([
+          {
+            $match: {
+              receiptId: { $in: companyReceiptIds },
+              createdAt: { $gte: sevenMonthsAgo },
+              status: OcrJobStatus.COMPLETED,
+            },
+          },
+          {
+            $group: {
+              _id: {
+                year: { $year: '$createdAt' },
+                month: { $month: '$createdAt' },
+              },
+              value: { $sum: 1 },
+            },
+          },
+          { $sort: { '_id.year': 1, '_id.month': 1 } },
+        ])
+        : Promise.resolve([]),
+      userIds.length > 0
+        ? ExpenseReport.aggregate([
+          {
+            $match: {
+              userId: { $in: userIds },
+            },
+          },
+          {
+            $group: {
+              _id: '$status',
+              value: { $sum: 1 },
+            },
+          },
+        ])
+        : Promise.resolve([]),
     ]);
 
-    const formattedOcrJobs = ocrJobs.map((item, idx) => ({
-      name: monthNames[idx] || `${item._id.month}/${item._id.year}`,
-      value: item.value,
-    }));
+    const formatSeries = (series: Array<{ _id: { year: number; month: number }; value: number }>) => {
+      return series.map((item) => ({
+        name: new Date(item._id.year, item._id.month - 1, 1).toLocaleString('en-US', {
+          month: 'short',
+          year: '2-digit',
+        }),
+        value: item.value,
+      }));
+    };
 
-    // Reports by status - filter by company users only
-    const reportsByStatus = await ExpenseReport.aggregate([
-      {
-        $match: {
-          userId: { $in: userIds }, // Only include reports from this company's users
-        },
-      },
-      {
-        $group: {
-          _id: '$status',
-          value: { $sum: 1 },
-        },
-      },
-    ]);
+    const formattedMonthlySpend = formatSeries(monthlySpend as any);
+    const formattedReportTrend = formatSeries(reportTrend as any);
+    const formattedReceiptTrend = formatSeries(receiptTrend as any);
+    const formattedOcrJobs = formatSeries(ocrJobs as any);
 
     const statusMap: Record<string, string> = {
       DRAFT: 'Draft',
@@ -786,7 +1130,7 @@ export class SuperAdminController {
       REJECTED: 'Rejected',
     };
 
-    const formattedReportsByStatus = reportsByStatus.map((item) => ({
+    const formattedReportsByStatus = (reportsByStatus as Array<{ _id: string; value: number }>).map((item) => ({
       name: statusMap[item._id] || item._id,
       value: item.value,
     }));
@@ -799,21 +1143,6 @@ export class SuperAdminController {
       { name: 'Logs', value: Math.round(estimatedStorageGB * 0.02) },
     ];
 
-    // Get users list for this company (employees, managers, business heads only)
-    const users = await User.find({ companyId: companyObjectId })
-      .select('email name role status lastLoginAt createdAt')
-      .limit(100)
-      .lean();
-
-    const formattedUsers = users.map((user) => ({
-      id: user._id.toString(),
-      name: user.name || 'Unknown',
-      email: user.email,
-      role: user.role.toLowerCase().replace('_', '-'),
-      lastActive: user.lastLoginAt ? user.lastLoginAt.toISOString().split('T')[0] : 'Never',
-      status: user.status === UserStatus.ACTIVE ? 'active' : 'inactive',
-    }));
-
     // Format company admins
     const formattedAdmins = companyAdmins.map((admin) => ({
       id: admin._id.toString(),
@@ -823,6 +1152,19 @@ export class SuperAdminController {
       createdAt: admin.createdAt,
       lastLogin: admin.lastLoginAt ? admin.lastLoginAt.toISOString() : null,
     }));
+
+    const roleStats = {
+      totalUsers,
+      activeUsers,
+      inactiveUsers,
+      primaryRoleBreakdown,
+      customRolesConfigured: companyCustomRoles.length,
+      activeCustomRoles: companyCustomRoles.filter((role) => role.isActive).length,
+      usersWithCustomRoles,
+      usersWithoutCustomRoles: Math.max(totalUsers - usersWithCustomRoles, 0),
+      customRoleAssignments,
+      topCustomRoles,
+    };
 
     res.status(200).json({
       success: true,
@@ -834,9 +1176,13 @@ export class SuperAdminController {
         domain: company.domain,
         createdAt: company.createdAt,
         totalUsers,
+        activeUsers,
+        inactiveUsers,
         employees,
         managers,
         businessHeads,
+        customRolesConfigured: companyCustomRoles.length,
+        usersWithCustomRoles,
         totalReports,
         ocrUsage,
         storageUsed: Math.round(estimatedStorageGB * 100) / 100,
@@ -853,6 +1199,7 @@ export class SuperAdminController {
         },
         reportsByStatus: formattedReportsByStatus,
         storageByType,
+        roleStats,
         users: formattedUsers,
         admins: formattedAdmins,
       },
@@ -1319,33 +1666,44 @@ export class SuperAdminController {
       return;
     }
 
-    // Get real-time mini stats
-    const [ocrJobsCount, reportsCount, apiCallsCount]: [number, number, number] = await Promise.all([
-      // OCR jobs completed this month by company users
-      OcrJob.countDocuments({
-        status: OcrJobStatus.COMPLETED,
-        createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
-      }),
+    const monthStart = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
 
-      // Reports created this month by company users
-      ExpenseReport.countDocuments({
-        userId: { $in: userIds },
-        createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
-      }),
-
-      // API calls this month (we'll use a sample or estimate since we don't have detailed logging)
-      ApiRequestLog.countDocuments({
-        userId: { $in: userIds },
-        createdAt: { $gte: new Date(new Date().getFullYear(), new Date().getMonth(), 1) }
-      }).catch((): number => Math.floor(reportsCount * 5)) // Fallback estimate: 5 API calls per report
-    ]);
-
-    // Calculate storage used by company
+    // Gather company expense/receipt scope once, then reuse for mini-stats.
     const companyExpenses = await Expense.find({ userId: { $in: userIds } })
       .select('_id')
       .lean();
     const expenseIds = companyExpenses.map(e => e._id);
-    const totalReceipts = await Receipt.countDocuments({ expenseId: { $in: expenseIds } });
+    const companyReceiptIds = expenseIds.length > 0
+      ? await Receipt.find({ expenseId: { $in: expenseIds } }).distinct('_id')
+      : [];
+
+    // Get real-time mini stats (company-scoped).
+    const [ocrJobsCount, reportsCount]: [number, number] = await Promise.all([
+      companyReceiptIds.length > 0
+        ? OcrJob.countDocuments({
+          status: OcrJobStatus.COMPLETED,
+          receiptId: { $in: companyReceiptIds },
+          createdAt: { $gte: monthStart }
+        })
+        : Promise.resolve(0),
+
+      ExpenseReport.countDocuments({
+        userId: { $in: userIds },
+        createdAt: { $gte: monthStart }
+      }),
+    ]);
+
+    let apiCallsCount = reportsCount * 5; // Fallback estimate: 5 API calls per report.
+    try {
+      apiCallsCount = await ApiRequestLog.countDocuments({
+        userId: { $in: userIds },
+        createdAt: { $gte: monthStart }
+      });
+    } catch (apiLogError: any) {
+      logger.warn({ error: apiLogError.message, companyId }, 'ApiRequestLog mini-stats query failed, using fallback');
+    }
+
+    const totalReceipts = companyReceiptIds.length;
     const estimatedStorageGB = (totalReceipts * 500) / (1024 * 1024); // 500KB per receipt
 
     const miniStats = {
@@ -1426,6 +1784,7 @@ export class SuperAdminController {
 
     await company.save();
     logger.info({ requestId, companyId: company._id }, 'Create Company - Company saved successfully');
+    cacheService.deleteByPrefix('super-admin:companies:v2:');
 
     // Emit real-time company created event
     emitCompanyCreated({
@@ -1494,6 +1853,18 @@ export class SuperAdminController {
     if (domain !== undefined) company.domain = domain || undefined;
 
     await company.save();
+    cacheService.deleteByPrefix('super-admin:companies:v2:');
+
+    emitCompanyUpdated({
+      id: (company._id as mongoose.Types.ObjectId).toString(),
+      name: company.name,
+      location: company.location,
+      type: company.type,
+      status: company.status,
+      plan: company.plan,
+      domain: company.domain,
+      updatedAt: company.updatedAt,
+    });
 
     // Log audit
     await AuditService.log(
@@ -1557,6 +1928,8 @@ export class SuperAdminController {
 
     // Delete the company
     await Company.deleteOne({ _id: companyId });
+    emitCompanyDeleted(companyId);
+    cacheService.deleteByPrefix('super-admin:companies:v2:');
 
     // Log audit
     await AuditService.log(
@@ -2903,6 +3276,70 @@ export class SuperAdminController {
     });
   });
 
+  static previewBackupRestore = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { BackupService } = await import('../services/backup.service');
+    const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const preview = await BackupService.getRestorePreview(backupId);
+
+    res.status(200).json({
+      success: true,
+      data: preview,
+    });
+  });
+
+  static validateBackupRestore = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { BackupService } = await import('../services/backup.service');
+    const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const { restoreToCompanyId } = req.body || {};
+    const validation = await BackupService.validateRestoreRequest(backupId, restoreToCompanyId);
+
+    res.status(validation.valid ? 200 : 400).json({
+      success: validation.valid,
+      data: validation,
+      message: validation.valid ? 'Restore validation passed' : 'Restore validation failed',
+    });
+  });
+
+  static stageBackupRestore = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { BackupService } = await import('../services/backup.service');
+    const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const { restoreToCompanyId } = req.body || {};
+
+    const staged = await BackupService.stageRestoreRequest(backupId, req.user!.id, restoreToCompanyId);
+    if (!staged.validation.valid) {
+      return res.status(400).json({
+        success: false,
+        data: staged.validation,
+        message: 'Restore staging failed validation',
+      });
+    }
+
+    return res.status(200).json({
+      success: true,
+      data: staged,
+      message: 'Restore request staged successfully',
+    });
+  });
+
+  static commitBackupRestore = asyncHandler(async (req: AuthRequest, res: Response) => {
+    const { BackupService } = await import('../services/backup.service');
+    const stageId = req.body?.stageId;
+    const confirmText = req.body?.confirmText;
+
+    if (!stageId) {
+      return res.status(400).json({
+        success: false,
+        message: 'stageId is required',
+      });
+    }
+
+    await BackupService.commitStagedRestore(stageId, req.user!.id, confirmText);
+    return res.status(200).json({
+      success: true,
+      message: 'Backup restore process started',
+    });
+  });
+
   static restoreBackup = asyncHandler(async (req: AuthRequest, res: Response) => {
     const { BackupService } = await import('../services/backup.service');
     const backupId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -3054,4 +3491,3 @@ export class SuperAdminController {
     });
   });
 }
-

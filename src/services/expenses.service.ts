@@ -14,6 +14,7 @@ import { enqueueAnalyticsEvent } from './companyAnalyticsSnapshot.service';
 import { ProjectStakeholderService } from './projectStakeholder.service';
 import { ReportsService } from './reports.service';
 import { CompanySettingsService } from './companySettings.service';
+import { CompanyLimitsService } from './companyLimits.service';
 import { currencyService } from './currency.service';
 
 import { logger } from '@/config/logger';
@@ -40,6 +41,12 @@ export class ExpensesService {
     // Allow adding expenses if report is DRAFT or CHANGES_REQUESTED
     if (report.status !== ExpenseReportStatus.DRAFT && report.status !== ExpenseReportStatus.CHANGES_REQUESTED) {
       throw new Error('Can only add expenses to draft reports or reports with changes requested');
+    }
+
+    const actorUser = await User.findById(userId).select('companyId').exec();
+    const actorCompanyId = actorUser?.companyId?.toString() || null;
+    if (actorCompanyId) {
+      await CompanyLimitsService.ensureExpenseCreationAllowed(actorCompanyId);
     }
 
     // Receipt is source of truth: SCANNED expenses must be linked to a receipt
@@ -276,6 +283,21 @@ export class ExpensesService {
     // Recalculate report total
     await ReportsService.recalcTotals(reportId);
 
+    if (actorCompanyId) {
+      try {
+        await CompanyLimitsService.consumeExpenseQuota(actorCompanyId);
+      } catch (limitError) {
+        // Roll back the newly created expense if quota increment fails atomically.
+        await Expense.findByIdAndDelete(saved._id).exec();
+        try {
+          await ReportsService.recalcTotals(reportId);
+        } catch (_) {
+          // Best effort rollback of totals.
+        }
+        throw limitError;
+      }
+    }
+
     // Run duplicate detection again after saving to set flags (for reporting)
     try {
       const { DuplicateDetectionService } = await import('./duplicateDetection.service');
@@ -298,10 +320,9 @@ export class ExpensesService {
 
     // Enqueue analytics update (EXPENSE_ADDED; worker no-ops unless report is APPROVED)
     try {
-      const user = await User.findById(userId).select('companyId').exec();
-      if (user && user.companyId) {
+      if (actorCompanyId) {
         enqueueAnalyticsEvent({
-          companyId: user.companyId.toString(),
+          companyId: actorCompanyId,
           event: 'EXPENSE_ADDED',
           reportId,
           userId,
@@ -1222,4 +1243,3 @@ export class ExpensesService {
     }
   }
 }
-

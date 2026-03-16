@@ -5,6 +5,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { asyncHandler } from '../middleware/error.middleware';
 import { ExportService } from '../services/export.service';
 import { ReportsService } from '../services/reports.service';
+import { CompanyLimitsService } from '../services/companyLimits.service';
 import {
   createReportSchema,
   updateReportSchema,
@@ -18,6 +19,14 @@ import { DateUtils } from '@/utils/dateUtils';
 // import { ExpenseReportStatus } from '../utils/enums'; // Unused
 
 export class ReportsController {
+  private static async resolveCompanyId(req: AuthRequest): Promise<string | null> {
+    return CompanyLimitsService.resolveCompanyIdForActor({
+      userId: req.user!.id,
+      role: req.user!.role,
+      companyIdFromToken: req.user!.companyId,
+    });
+  }
+
   static create = asyncHandler(async (req: AuthRequest, res: Response) => {
     logger.info({ userId: req.user!.id, userEmail: req.user!.email }, 'POST /api/v1/reports - Creating new report');
     logger.debug({ body: req.body }, 'Request body');
@@ -252,11 +261,18 @@ export class ReportsController {
   static exportExcel = asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const companyId = await ReportsController.resolveCompanyId(req);
+      if (companyId) {
+        await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+      }
       const buffer = await ExportService.generateStructuredExport(
         reportId,
         req.user!.id,
         req.user!.role
       );
+      if (companyId) {
+        await CompanyLimitsService.consumeReportQuota(companyId);
+      }
 
       const report = await ReportsService.getReportById(
         reportId,
@@ -295,11 +311,18 @@ export class ReportsController {
   static exportPDF = asyncHandler(async (req: AuthRequest, res: Response) => {
     try {
       const reportId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const companyId = await ReportsController.resolveCompanyId(req);
+      if (companyId) {
+        await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+      }
       const buffer = await ExportService.generateExport(
         reportId,
         ExportFormat.PDF,
         true // return buffer directly
       ) as Buffer;
+      if (companyId) {
+        await CompanyLimitsService.consumeReportQuota(companyId);
+      }
 
       const report = await ReportsService.getReportById(
         reportId,
@@ -434,10 +457,17 @@ export class ReportsController {
     }
 
     try {
+      const companyId = await ReportsController.resolveCompanyId(req);
+      if (companyId) {
+        await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+      }
       const reportData = await ExportService.generateDynamicReport(
         { reportType, projectId: projectId || null, startDate, endDate },
         req
       );
+      if (companyId) {
+        await CompanyLimitsService.consumeReportQuota(companyId);
+      }
 
       return res.status(200).json({
         success: true,
@@ -467,10 +497,17 @@ export class ReportsController {
     }
 
     try {
+      const companyId = await ReportsController.resolveCompanyId(req);
+      if (companyId) {
+        await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+      }
       const buffer = await ExportService.generateDynamicReportXLSX(
         { reportType, projectId: projectId || null, startDate, endDate },
         req
       );
+      if (companyId) {
+        await CompanyLimitsService.consumeReportQuota(companyId);
+      }
 
       const typeLabel = reportType.charAt(0).toUpperCase() + reportType.slice(1);
       const filename = `${typeLabel}_Expense_Report_${DateUtils.getCurrentISTDate()}.xlsx`;
@@ -505,10 +542,17 @@ export class ReportsController {
     }
 
     try {
+      const companyId = await ReportsController.resolveCompanyId(req);
+      if (companyId) {
+        await CompanyLimitsService.ensureReportGenerationAllowed(companyId);
+      }
       const buffer = await ExportService.generateDynamicReportPDF(
         { reportType, projectId: projectId || null, startDate, endDate },
         req
       );
+      if (companyId) {
+        await CompanyLimitsService.consumeReportQuota(companyId);
+      }
 
       const typeLabel = reportType.charAt(0).toUpperCase() + reportType.slice(1);
       const filename = `${typeLabel}_Expense_Report_${DateUtils.getCurrentISTDate()}.pdf`;

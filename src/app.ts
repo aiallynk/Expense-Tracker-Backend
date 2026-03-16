@@ -6,7 +6,7 @@ import helmet from 'helmet';
 import mongoose from 'mongoose';
 
 import { config } from './config/index';
-import { redisConnection } from './config/queue';
+import { isRedisAvailable, redisConnection } from './config/queue';
 import { apiLoggerMiddleware } from './middleware/apiLogger.middleware';
 import { errorMiddleware } from './middleware/error.middleware';
 import { apiRateLimiter } from './middleware/rateLimit.middleware';
@@ -217,6 +217,34 @@ export const createApp = (): Express => {
       },
     });
   });
+
+  const redisStatusHandler = async (_req: any, res: any) => {
+    let connected = false;
+    let ping = 'UNAVAILABLE';
+
+    try {
+      connected = isRedisAvailable();
+      if (redisConnection) {
+        ping = await redisConnection.ping();
+      }
+    } catch (_) {
+      connected = false;
+      ping = 'UNAVAILABLE';
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        connected,
+        status: connected ? 'connected' : 'disconnected',
+        ping,
+        clientStatus: redisConnection?.status || 'not-initialized',
+      },
+    });
+  };
+
+  app.get('/api/v1/system/redis-status', redisStatusHandler);
+  app.get('/system/redis-status', redisStatusHandler);
 
   // API routes
   app.use('/api/v1/auth', authRoutes);

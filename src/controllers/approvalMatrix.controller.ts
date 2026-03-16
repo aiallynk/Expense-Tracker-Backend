@@ -114,6 +114,19 @@ export class ApprovalMatrixController {
         const companyId = new mongoose.Types.ObjectId(companyIdString);
 
         const { name, levels } = req.body;
+        const normalizedLevels = Array.isArray(levels)
+            ? levels.map((level: any) => {
+                const approvalType = level?.approvalType === 'PARALLEL' ? 'PARALLEL' : 'SEQUENTIAL';
+                return {
+                    ...level,
+                    approvalType,
+                    // Defensive normalization: PARALLEL levels must always carry an explicit rule.
+                    parallelRule: approvalType === 'PARALLEL'
+                        ? (level?.parallelRule === 'ALL' ? 'ALL' : 'ANY')
+                        : undefined,
+                };
+            })
+            : [];
 
         // Set all other matrices to inactive
         await ApprovalMatrix.updateMany({ companyId }, { isActive: false });
@@ -121,7 +134,7 @@ export class ApprovalMatrixController {
         const matrix = await ApprovalMatrix.create({
             companyId,
             name,
-            levels,
+            levels: normalizedLevels,
             isActive: true
         });
 

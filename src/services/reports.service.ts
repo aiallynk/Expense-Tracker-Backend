@@ -26,6 +26,7 @@ import { BusinessHeadSelectionService } from './businessHeadSelection.service';
 import { enqueueAnalyticsEvent } from './companyAnalyticsSnapshot.service';
 import { EmployeeApprovalProfileService } from './EmployeeApprovalProfileService';
 import { NotificationService } from './notification.service';
+import { CompanyLimitsService } from './companyLimits.service';
 import { ApprovalType, ParallelRule } from '../models/ApprovalMatrix';
 
 import { logger } from '@/config/logger';
@@ -83,10 +84,16 @@ export class ReportsService {
       const requestedName = (data.name || '').trim();
       let finalName = requestedName;
 
+      const actorUser = await User.findById(userId).select('name email companyId').exec();
+      const actorCompanyId = actorUser?.companyId?.toString() || null;
+
       if (!finalName) {
-        const user = await User.findById(userId).select('name email').exec();
-        const employeeName = (user?.name || user?.email || 'Employee').toString();
+        const employeeName = (actorUser?.name || actorUser?.email || 'Employee').toString();
         finalName = this.buildDefaultReportName(fromDate, employeeName);
+      }
+
+      if (actorCompanyId) {
+        await CompanyLimitsService.ensureReportGenerationAllowed(actorCompanyId);
       }
 
       // Handle advance cash (report-level)
@@ -126,6 +133,14 @@ export class ReportsService {
 
       logger.info('Saving report to database (expensereports collection)...');
       const saved = await report.save();
+      if (actorCompanyId) {
+        try {
+          await CompanyLimitsService.consumeReportQuota(actorCompanyId);
+        } catch (limitError) {
+          await ExpenseReport.findByIdAndDelete(saved._id).exec();
+          throw limitError;
+        }
+      }
       logger.info('Report saved successfully to expensereports collection');
       logger.info({ reportId: saved._id }, 'Saved report ID');
       logger.info({
@@ -149,9 +164,8 @@ export class ReportsService {
 
       // Enqueue analytics update (background worker will refresh snapshot)
       try {
-        const user = await User.findById(userId).select('companyId').exec();
-        if (user && user.companyId) {
-          enqueueAnalyticsEvent({ companyId: user.companyId.toString(), event: 'REBUILD_SNAPSHOT' });
+        if (actorCompanyId) {
+          enqueueAnalyticsEvent({ companyId: actorCompanyId, event: 'REBUILD_SNAPSHOT' });
         }
       } catch (error) {
         logger.error({ error }, 'Error enqueueing analytics update');

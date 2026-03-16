@@ -9,7 +9,7 @@ import { createApp } from './app';
 import { connectDB, disconnectDB } from './config/db';
 import { initializeFirebase } from './config/firebase';
 import { config } from './config/index';
-import { redisConnection , ocrQueue } from './config/queue';
+import { initializeRedisIfNeeded, redisConnection, ocrQueue } from './config/queue';
 import { CompanyAdminDashboardService } from './services/companyAdminDashboard.service';
 import { NotificationBroadcastService } from './services/notificationBroadcast.service';
 import { SystemAnalyticsService } from './services/systemAnalytics.service';
@@ -205,6 +205,15 @@ const initializeServices = async (): Promise<void> => {
     } catch (err) {
       logger.warn({ error: err }, 'Firebase initialization failed, continuing without it');
     }
+
+    // Initialize Redis in API startup path for visibility and health checks.
+    initializeRedisIfNeeded()
+      .then((started) => {
+        logger.info({ started }, 'Redis initialization attempted from API startup');
+      })
+      .catch((err) => {
+        logger.warn({ error: err }, 'Redis initialization from API startup failed');
+      });
 
     // Start periodic system analytics updates (every 30 seconds)
     setInterval(() => {

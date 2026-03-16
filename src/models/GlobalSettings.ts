@@ -14,6 +14,8 @@ export interface IGlobalSettings extends Document {
     darkModeEnabled: boolean;
     maintenanceMode: boolean;
     registrationEnabled: boolean;
+    companyLimitsEnforcementEnabled: boolean;
+    analyticsSegregationEnabled: boolean;
   };
   security: {
     sessionTimeout: number; // minutes
@@ -73,6 +75,8 @@ const globalSettingsSchema = new Schema<IGlobalSettings>(
       darkModeEnabled: { type: Boolean, default: false },
       maintenanceMode: { type: Boolean, default: false },
       registrationEnabled: { type: Boolean, default: true },
+      companyLimitsEnforcementEnabled: { type: Boolean, default: false },
+      analyticsSegregationEnabled: { type: Boolean, default: false },
     },
     security: {
       sessionTimeout: { type: Number, default: 30 },

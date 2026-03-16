@@ -2,6 +2,7 @@
 import { createWriteStream, readFileSync, unlinkSync, existsSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
+import { randomUUID } from 'crypto';
 
 import { PutObjectCommand, GetObjectCommand, ServerSideEncryption } from '@aws-sdk/client-s3';
 import mongoose from 'mongoose';
@@ -51,6 +52,21 @@ import { logger } from '@/config/logger';
 export class BackupService {
   private static readonly APP_VERSION = '2.0.0';
   private static readonly BACKUP_VERSION = '2.0';
+  private static readonly RESTORE_STAGE_TTL_MS = 30 * 60 * 1000;
+  private static readonly restoreStages = new Map<
+    string,
+    {
+      backupId: string;
+      backupType: BackupType;
+      restoreToCompanyId?: string;
+      createdAt: number;
+      createdBy: string;
+      validation: {
+        valid: boolean;
+        warnings: string[];
+      };
+    }
+  >();
 
   /**
    * Create a full system backup
@@ -441,6 +457,170 @@ export class BackupService {
       .populate('createdBy', 'email name')
       .populate('companyId', 'name')
       .exec();
+  }
+
+  static async getRestorePreview(backupId: string): Promise<{
+    backupId: string;
+    backupType: BackupType;
+    backupName?: string;
+    status: BackupStatus;
+    companyId?: string;
+    companyName?: string;
+    createdAt: Date;
+    size: number;
+    recordCounts: IBackupManifest['recordCounts'];
+    warnings: string[];
+  }> {
+    const backup = await this.getBackupById(backupId);
+    if (!backup) {
+      throw new Error('Backup not found');
+    }
+
+    const warnings: string[] = [];
+    if (backup.status !== BackupStatus.COMPLETED) {
+      warnings.push('Backup is not completed yet.');
+    }
+    if (!backup.storageKey) {
+      warnings.push('Backup file storage key is missing.');
+    }
+    if (backup.manifest?.appVersion && !backup.manifest.appVersion.startsWith('2.')) {
+      warnings.push(`Backup app version ${backup.manifest.appVersion} differs from current major version.`);
+    }
+
+    return {
+      backupId: (backup._id as any).toString(),
+      backupType: backup.backupType,
+      backupName: backup.backupName,
+      status: backup.status,
+      companyId: backup.companyId ? backup.companyId.toString() : undefined,
+      companyName: (backup.companyId as any)?.name || backup.manifest?.companyName,
+      createdAt: backup.createdAt,
+      size: backup.size || 0,
+      recordCounts: backup.manifest?.recordCounts || {},
+      warnings,
+    };
+  }
+
+  static async validateRestoreRequest(
+    backupId: string,
+    restoreToCompanyId?: string
+  ): Promise<{
+    valid: boolean;
+    warnings: string[];
+    errors: string[];
+  }> {
+    const errors: string[] = [];
+    const warnings: string[] = [];
+
+    const backup = await Backup.findById(backupId);
+    if (!backup) {
+      errors.push('Backup not found');
+      return { valid: false, warnings, errors };
+    }
+
+    if (backup.status !== BackupStatus.COMPLETED) {
+      errors.push('Backup is not completed');
+    }
+    if (!backup.storageKey) {
+      errors.push('Backup storage key not found');
+    }
+
+    if (backup.backupType === BackupType.COMPANY) {
+      if (!backup.companyId) {
+        errors.push('Company backup is missing source companyId');
+      }
+      if (restoreToCompanyId) {
+        const companyExists = await Company.exists({ _id: restoreToCompanyId });
+        if (!companyExists) {
+          errors.push('Target restore company does not exist');
+        } else {
+          warnings.push('Restore will overwrite existing company-scoped data for the target company.');
+        }
+      } else {
+        warnings.push('Restore target is source company ID from backup.');
+      }
+    } else {
+      warnings.push('Full restore will replace current platform data at commit time.');
+    }
+
+    return {
+      valid: errors.length === 0,
+      warnings,
+      errors,
+    };
+  }
+
+  static async stageRestoreRequest(
+    backupId: string,
+    userId: string,
+    restoreToCompanyId?: string
+  ): Promise<{
+    stageId: string;
+    expiresAt: Date;
+    validation: { valid: boolean; warnings: string[]; errors: string[] };
+  }> {
+    this.cleanupExpiredRestoreStages();
+    const backup = await Backup.findById(backupId);
+    if (!backup) {
+      throw new Error('Backup not found');
+    }
+
+    const validation = await this.validateRestoreRequest(backupId, restoreToCompanyId);
+    if (!validation.valid) {
+      return {
+        stageId: '',
+        expiresAt: new Date(),
+        validation,
+      };
+    }
+
+    const stageId = randomUUID();
+    const createdAt = Date.now();
+    this.restoreStages.set(stageId, {
+      backupId,
+      backupType: backup.backupType,
+      restoreToCompanyId,
+      createdAt,
+      createdBy: userId,
+      validation: {
+        valid: true,
+        warnings: validation.warnings,
+      },
+    });
+
+    return {
+      stageId,
+      expiresAt: new Date(createdAt + this.RESTORE_STAGE_TTL_MS),
+      validation,
+    };
+  }
+
+  static async commitStagedRestore(
+    stageId: string,
+    userId: string,
+    confirmText?: string
+  ): Promise<void> {
+    this.cleanupExpiredRestoreStages();
+
+    const stage = this.restoreStages.get(stageId);
+    if (!stage) {
+      throw new Error('Restore stage not found or expired');
+    }
+    if (stage.createdBy !== userId) {
+      throw new Error('Restore stage does not belong to this user');
+    }
+
+    await this.restoreBackup(stage.backupId, userId, stage.restoreToCompanyId, confirmText);
+    this.restoreStages.delete(stageId);
+  }
+
+  private static cleanupExpiredRestoreStages(): void {
+    const now = Date.now();
+    for (const [stageId, stage] of this.restoreStages.entries()) {
+      if (now - stage.createdAt > this.RESTORE_STAGE_TTL_MS) {
+        this.restoreStages.delete(stageId);
+      }
+    }
   }
 
   /**
